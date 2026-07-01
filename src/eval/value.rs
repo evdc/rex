@@ -21,8 +21,12 @@ pub enum Value {
 
 impl Value {
     /// Parse a decimal literal like `"9.99"` into money cents (`999`). Extra
-    /// fractional digits are truncated; missing ones are padded.
+    /// fractional digits are truncated; missing ones are padded. The sign is
+    /// taken from the literal itself so sub-dollar negatives (`"-0.50"`) keep it,
+    /// which parsing the integer part alone would lose (`"-0"` parses to `0`).
     pub fn money_from_decimal(text: &str) -> Value {
+        let text = text.trim();
+        let negative = text.starts_with('-');
         let (whole, frac) = text.split_once('.').unwrap_or((text, ""));
         let whole: i64 = whole.parse().unwrap_or(0);
         let mut cents_str = frac.to_string();
@@ -31,8 +35,8 @@ impl Value {
             cents_str.push('0');
         }
         let cents: i64 = cents_str.parse().unwrap_or(0);
-        let sign = if whole < 0 { -1 } else { 1 };
-        Value::Money(whole * 100 + sign * cents)
+        let magnitude = whole.abs() * 100 + cents;
+        Value::Money(if negative { -magnitude } else { magnitude })
     }
 
     /// Numeric value on a common scale (cents): `Int` counts are promoted to
@@ -55,9 +59,6 @@ impl Value {
         }
     }
 
-    pub fn is_money(&self) -> bool {
-        matches!(self, Value::Money(_))
-    }
 }
 
 impl std::fmt::Display for Value {
@@ -65,12 +66,36 @@ impl std::fmt::Display for Value {
         match self {
             Value::Unit => write!(f, "()"),
             Value::Int(n) => write!(f, "{n}"),
-            Value::Money(c) => write!(f, "${}.{:02}", c / 100, (c % 100).abs()),
+            Value::Money(c) => {
+                let sign = if *c < 0 { "-" } else { "" };
+                let c = c.abs();
+                write!(f, "{sign}${}.{:02}", c / 100, c % 100)
+            }
             Value::Text(s) => write!(f, "{s:?}"),
             Value::Date { year, month, day } => write!(f, "{year:04}-{month:02}-{day:02}"),
             Value::Id(sort, n) => write!(f, "#{}:{n}", sort.0),
             Value::Atom(a) => write!(f, "@{a}"),
             Value::Pair(a, b) => write!(f, "({a}, {b})"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn money_parse_keeps_sign_for_sub_dollar_negatives() {
+        assert_eq!(Value::money_from_decimal("9.99"), Value::Money(999));
+        assert_eq!(Value::money_from_decimal("-1.50"), Value::Money(-150));
+        // The integer part parses as `0`, so the sign must come from the literal.
+        assert_eq!(Value::money_from_decimal("-0.50"), Value::Money(-50));
+    }
+
+    #[test]
+    fn money_display_shows_sign() {
+        assert_eq!(Value::Money(999).to_string(), "$9.99");
+        assert_eq!(Value::Money(-50).to_string(), "-$0.50");
+        assert_eq!(Value::Money(-150).to_string(), "-$1.50");
     }
 }

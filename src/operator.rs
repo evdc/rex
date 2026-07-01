@@ -74,3 +74,32 @@ const fn meta(
 pub fn lookup(name: &str) -> Option<&'static OpMeta> {
     OPERATORS.iter().find(|m| m.name == name)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// Every combinator the checker/evaluator can produce must have metadata, so
+    /// the table can't silently drift from the real operator set. When a new
+    /// combinator is added, add it here and to `OPERATORS` together.
+    #[test]
+    fn every_combinator_has_metadata() {
+        let expected = [
+            "compose", "restrict", "inverse", "fork", "union", "intersect",
+            "distinct", "except", "antijoin", "by", "aggregate", "compare",
+            "mul", "concat",
+        ];
+        for name in expected {
+            assert!(lookup(name).is_some(), "missing metadata for `{name}`");
+        }
+    }
+
+    #[test]
+    fn operator_names_are_unique() {
+        let mut seen = HashSet::new();
+        for m in OPERATORS {
+            assert!(seen.insert(m.name), "duplicate metadata for `{}`", m.name);
+        }
+    }
+}

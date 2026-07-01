@@ -275,6 +275,14 @@ let inregion  : Customer         = id where :region in (@west + @east)
 let result    : Customer → Money = (custspend where > 30)[inregion]
 ```
 
+> **Correction (reflected in `tests/fixtures/spec12.rex`):** the `result` line as
+> written above is ill-typed under the strict §3.2 rule — `R[S]` joins `R`'s
+> *right* column (here `Money`) against `S`'s left (`CustID`), which fails to
+> typecheck. Restricting by a customer key-set is composition on the shared
+> `Customer` key: `let result : Customer → Money = inregion . (custspend where > 30)`.
+> This is the `[]`/value-column hazard the stress-test was designed to catch,
+> now enforced by the checker.
+
 Four lines of view definitions for what is ~25 lines of SQL (two joins, group-by, having, IN-filter). What the example demonstrated, and the findings it produced, are folded into the relevant sections above:
 
 - multi-hop join (`:order.customer`, `:product.price`) needs no rotation gymnastics — each hop's right column is the next hop's key (§3, §5);

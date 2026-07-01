@@ -9,6 +9,6 @@ pub mod interp;
 pub mod relation;
 pub mod value;
 
-pub use interp::{run, run_typed, run_typed_values, EvalResult};
+pub use interp::{run, run_typed_values, EvalResult};
 pub use relation::{BTreeRelation, BinaryRelation};
 pub use value::Value;

@@ -40,16 +40,9 @@ pub fn run(program: &crate::ast::Program) -> EvalResult {
     }
 }
 
-/// Evaluate an already-elaborated program.
-pub fn run_typed(typed: &TProgram) -> HashMap<String, BTreeRelation> {
-    let mut interp = Interp::new();
-    interp.run(typed);
-    interp.views
-}
-
-/// Evaluate an already-elaborated program, also returning `new`-bound values
-/// (entity ids) alongside the views. Used by the REPL to display both kinds
-/// of `let` binding.
+/// Evaluate an already-elaborated program, returning both the view relations and
+/// the `new`-bound values (entity ids). The REPL uses the values to display
+/// `let x = new E { .. }` bindings alongside view `let`s.
 pub fn run_typed_values(typed: &TProgram) -> (HashMap<String, BTreeRelation>, HashMap<String, Value>) {
     let mut interp = Interp::new();
     interp.run(typed);
@@ -169,9 +162,9 @@ impl Interp {
                 let mut r = BTreeRelation::new();
                 if let ValueTy::Id(sort) = te.ty.from {
                     let p = predicate(pred);
-                    for id in self.identity(sort).domain() {
-                        if p(&id) {
-                            r.add(id.clone(), id, 1);
+                    for (l, right, w) in self.identity(sort).iter() {
+                        if p(&right) {
+                            r.add(l, right, w);
                         }
                     }
                 }
@@ -181,11 +174,13 @@ impl Interp {
                 let ra = self.eval(a);
                 let rb = self.eval(b);
                 let mut out = BTreeRelation::new();
+                // A coreflexive on the shared key: for each key, `a OP b` over its
+                // co-keyed values. Weights combine bilinearly (as in `a . OP . ~b`).
                 for k in ra.domain() {
-                    for (va, _) in ra.row(&k) {
-                        for (vb, _) in rb.row(&k) {
+                    for (va, wa) in ra.row(&k) {
+                        for (vb, wb) in rb.row(&k) {
                             if compare_values(*op, &va, &vb) {
-                                out.add(k.clone(), k.clone(), 1);
+                                out.add(k.clone(), k.clone(), wa * wb);
                             }
                         }
                     }
@@ -196,9 +191,9 @@ impl Interp {
                 let set: BTreeSet<Value> = lits.iter().map(lit_value).collect();
                 let ra = self.eval(a);
                 let mut out = BTreeRelation::new();
-                for (k, v, _) in ra.iter() {
+                for (k, v, w) in ra.iter() {
                     if set.contains(&v) {
-                        out.add(k.clone(), k, 1);
+                        out.add(k.clone(), k, w);
                     }
                 }
                 out
