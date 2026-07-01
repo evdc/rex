@@ -151,3 +151,29 @@ fn comparison_operands_must_be_cokeyed() {
     );
     assert_error_contains(&src, "not co-keyed");
 }
+
+// --- rejection: §9.1 groundedness -----------------------------------------
+
+#[test]
+fn ungrounded_standalone_comparison_is_rejected() {
+    // `> 30` standing alone over `Int` is an infinite relation with no finite
+    // domain to enumerate.
+    assert_error_contains("let bad : Int -> Int = > 30\n", "ungrounded");
+}
+
+#[test]
+fn ungrounded_standalone_equality_is_rejected() {
+    assert_error_contains("let bad : Text -> Text = = \"x\"\n", "ungrounded");
+}
+
+#[test]
+fn grounded_filter_is_ok() {
+    // The same comparison in filter position is grounded by the finite relation
+    // it filters, so it must NOT be rejected.
+    let src = with_schema(
+        "let lineprice : Line -> Money = :qty * :product.price\n\
+         let custspend : Customer -> Money = sum(lineprice by :order.customer)\n\
+         let big : Customer -> Money = custspend where > 30\n",
+    );
+    assert_ok(&src);
+}

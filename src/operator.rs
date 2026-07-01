@@ -11,11 +11,12 @@ pub enum Kind {
     Functional,
 }
 
-/// Finiteness for the (later) groundedness analysis (§9.1).
+/// Finiteness for the groundedness analysis (§9.1); consumed by
+/// [`crate::types::ground`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Grounding {
     Finite,
-    /// Built-ins like `<`, `+arith` are infinite and must be grounded by
+    /// Built-ins like `<`, `+arith`, `in` are infinite and must be grounded by
     /// application to enough finite arguments.
     Infinite,
 }
@@ -51,6 +52,7 @@ pub const OPERATORS: &[OpMeta] = &[
     meta("aggregate", Relational, false, false, Finite),
     // Built-in comparison/arithmetic relations are infinite (need grounding).
     meta("compare", Relational, true, false, Infinite),
+    meta("in", Relational, true, false, Infinite),
     meta("mul", Functional, true, true, Infinite),
     meta("concat", Functional, true, true, Infinite),
 ];
@@ -88,7 +90,7 @@ mod tests {
         let expected = [
             "compose", "restrict", "inverse", "fork", "union", "intersect",
             "distinct", "except", "antijoin", "by", "aggregate", "compare",
-            "mul", "concat",
+            "in", "mul", "concat",
         ];
         for name in expected {
             assert!(lookup(name).is_some(), "missing metadata for `{name}`");

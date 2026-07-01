@@ -32,8 +32,16 @@ pub fn check(program: &Program) -> CheckResult {
         diagnostics: Vec::new(),
     };
     let stmts = cx.run(program);
+    let prog = TProgram { stmts };
+    // Groundedness (§9.1) runs only on a clean type-check, since the elaborated AST
+    // is well-formed only then. A rejection here nulls `elaborated`, so every
+    // downstream caller refuses to evaluate the program.
+    if cx.diagnostics.is_empty() {
+        cx.diagnostics
+            .extend(super::ground::check_groundedness(&prog, &cx.env));
+    }
     let elaborated = if cx.diagnostics.is_empty() {
-        Some(TProgram { stmts })
+        Some(prog)
     } else {
         None
     };

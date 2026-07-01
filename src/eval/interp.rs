@@ -158,7 +158,14 @@ impl Interp {
 
             TExprKind::Coreflexive(pred) => {
                 // Standalone coreflexive built-in: materializable only over an
-                // enumerable (entity) domain.
+                // enumerable (entity) domain. The groundedness pass (§9.1,
+                // `types::ground`) statically rejects any other domain, so the
+                // non-`Id` fallthrough below is unreachable on a checked program;
+                // the empty fallback remains only as a release-build safety net.
+                debug_assert!(
+                    matches!(te.ty.from, ValueTy::Id(_)),
+                    "groundedness pass guarantees an enumerable domain"
+                );
                 let mut r = BTreeRelation::new();
                 if let ValueTy::Id(sort) = te.ty.from {
                     let p = predicate(pred);

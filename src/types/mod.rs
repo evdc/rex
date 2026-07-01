@@ -2,6 +2,7 @@
 
 pub mod check;
 pub mod env;
+pub mod ground;
 pub mod ty;
 pub mod typed;
 
