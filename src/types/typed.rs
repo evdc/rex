@@ -1,0 +1,124 @@
+//! The elaborated (typed) AST produced by the checker.
+//!
+//! Every node carries its [`RelTy`], field paths are resolved to concrete
+//! `(SortId, field)` hops, identifiers are resolved to their kind (view /
+//! entity-identity / value), and filter-position built-ins (`> 30`, `in (...)`)
+//! are lowered to explicit [`Filter`](TExprKind::Filter) nodes. The evaluator
+//! consumes this directly — no domain threading, env lookups, or type
+//! recomputation needed.
+
+use super::ty::{RelTy, SortId};
+use crate::ast::CmpOp;
+use crate::span::Span;
+
+/// A literal, kept in a types-level form so the typed AST doesn't depend on the
+/// evaluator's `Value`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Lit {
+    Int(i64),
+    Decimal(String),
+    Str(String),
+    Date { year: i32, month: u32, day: u32 },
+    Atom(String),
+}
+
+/// A grounded coreflexive built-in used in filter position.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Pred {
+    Cmp(CmpOp, Lit),
+    InSet(Vec<Lit>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AggKind {
+    Sum,
+    Count,
+    Avg,
+    Min,
+    Max,
+}
+
+/// One hop of a resolved field path: field `field` of entity sort `sort`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FieldHop {
+    pub sort: SortId,
+    pub field: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TExpr {
+    pub kind: TExprKind,
+    pub ty: RelTy,
+    pub span: Span,
+}
+
+impl TExpr {
+    pub fn new(kind: TExprKind, ty: RelTy, span: Span) -> TExpr {
+        TExpr { kind, ty, span }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum TExprKind {
+    /// Identity/diagonal over all ids of a sort (`id`, or an entity name).
+    Identity(SortId),
+    /// Reference to a view (`let`) binding.
+    View(String),
+    /// Reference to a `new`-bound entity id.
+    ValueRef(String),
+    /// A resolved field path, first hop first.
+    Field(Vec<FieldHop>),
+    /// A constant relation `dom -> lit` over every id of `dom`.
+    Const { lit: Lit, dom: SortId },
+    /// A singleton coreflexive `{@a -> @a}`.
+    Atom(String),
+
+    Compose(Box<TExpr>, Box<TExpr>),
+    Semijoin(Box<TExpr>, Box<TExpr>),
+    /// Filter the left relation's right column by a grounded predicate.
+    Filter(Box<TExpr>, Pred),
+    Fork(Box<TExpr>, Box<TExpr>),
+    Union(Box<TExpr>, Box<TExpr>),
+    Intersect(Box<TExpr>, Box<TExpr>),
+    Inverse(Box<TExpr>),
+    Distinct(Box<TExpr>),
+    /// `X by Y` (kept as the idiom `~Y . X`).
+    By(Box<TExpr>, Box<TExpr>),
+    /// `except`/`antijoin`: `A - A[B]`.
+    Antijoin(Box<TExpr>, Box<TExpr>),
+    Mul(Box<TExpr>, Box<TExpr>),
+    Concat(Box<TExpr>, Box<TExpr>),
+
+    /// A standalone coreflexive built-in (rare; usually folded into `Filter`).
+    Coreflexive(Pred),
+    /// Binary comparison `a OP b`, a coreflexive on the shared key.
+    BinCompare(CmpOp, Box<TExpr>, Box<TExpr>),
+    /// `lhs in {set}`, a coreflexive on `lhs`'s key.
+    InRel(Box<TExpr>, Vec<Lit>),
+    Agg(AggKind, Box<TExpr>),
+}
+
+/// A field value in a `new`: either a literal or a reference to a bound id.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TValue {
+    Lit(Lit),
+    Ref(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum TStmt {
+    Let {
+        name: Option<String>,
+        body: TExpr,
+    },
+    New {
+        name: Option<String>,
+        sort: SortId,
+        fields: Vec<(String, TValue)>,
+    },
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TProgram {
+    pub stmts: Vec<TStmt>,
+}

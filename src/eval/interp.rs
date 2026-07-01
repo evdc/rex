@@ -1,0 +1,313 @@
+//! The interpreter. It type-checks the program to obtain the elaborated
+//! [`TProgram`], then evaluates it directly: statements run in order (`new`
+//! populates the in-memory DB and binds ids; view `let`s evaluate to
+//! relations). Because the typed AST already carries every relation type, all
+//! resolved field/sort/identifier references, and grounded filter predicates,
+//! evaluation is a straight structural walk — no domain threading, environment
+//! lookups, or type recomputation.
+
+use super::algebra::{self, Agg};
+use super::relation::{BTreeRelation, BinaryRelation};
+use super::value::Value;
+use crate::types::check;
+use crate::types::env::Env;
+use crate::types::ty::{SortId, ValueTy};
+use crate::types::typed::*;
+use std::collections::{BTreeSet, HashMap};
+
+pub struct EvalResult {
+    pub views: HashMap<String, BTreeRelation>,
+    pub env: Env,
+}
+
+impl EvalResult {
+    pub fn view(&self, name: &str) -> Option<&BTreeRelation> {
+        self.views.get(name)
+    }
+}
+
+/// Type-check (producing the elaborated AST) and evaluate `program`. If the
+/// program has type errors, no views are produced.
+pub fn run(program: &crate::ast::Program) -> EvalResult {
+    let checked = check::check(program);
+    let mut interp = Interp::new();
+    if let Some(typed) = &checked.elaborated {
+        interp.run(typed);
+    }
+    EvalResult {
+        views: interp.views,
+        env: checked.env,
+    }
+}
+
+/// Evaluate an already-elaborated program.
+pub fn run_typed(typed: &TProgram) -> HashMap<String, BTreeRelation> {
+    let mut interp = Interp::new();
+    interp.run(typed);
+    interp.views
+}
+
+/// Evaluate an already-elaborated program, also returning `new`-bound values
+/// (entity ids) alongside the views. Used by the REPL to display both kinds
+/// of `let` binding.
+pub fn run_typed_values(typed: &TProgram) -> (HashMap<String, BTreeRelation>, HashMap<String, Value>) {
+    let mut interp = Interp::new();
+    interp.run(typed);
+    (interp.views, interp.values)
+}
+
+#[derive(Default)]
+struct Interp {
+    fields: HashMap<(SortId, String), BTreeRelation>,
+    ids: HashMap<SortId, BTreeRelation>,
+    next_id: HashMap<SortId, u64>,
+    views: HashMap<String, BTreeRelation>,
+    values: HashMap<String, Value>,
+}
+
+impl Interp {
+    fn new() -> Interp {
+        Interp::default()
+    }
+
+    fn run(&mut self, program: &TProgram) {
+        for stmt in &program.stmts {
+            match stmt {
+                TStmt::New { name, sort, fields } => {
+                    let id = self.eval_new(*sort, fields);
+                    if let Some(name) = name {
+                        self.values.insert(name.clone(), id);
+                    }
+                }
+                TStmt::Let { name, body } => {
+                    let rel = self.eval(body);
+                    if let Some(name) = name {
+                        self.views.insert(name.clone(), rel);
+                    }
+                }
+            }
+        }
+    }
+
+    fn eval_new(&mut self, sort: SortId, fields: &[(String, TValue)]) -> Value {
+        let n = self.next_id.entry(sort).or_insert(0);
+        let id = Value::Id(sort, *n);
+        *n += 1;
+        for (name, tv) in fields {
+            let v = self.eval_tvalue(tv);
+            self.fields
+                .entry((sort, name.clone()))
+                .or_default()
+                .add(id.clone(), v, 1);
+        }
+        self.ids.entry(sort).or_default().add(id.clone(), id.clone(), 1);
+        id
+    }
+
+    fn eval_tvalue(&self, tv: &TValue) -> Value {
+        match tv {
+            TValue::Lit(lit) => lit_value(lit),
+            TValue::Ref(name) => self
+                .values
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| panic!("unbound value `{name}`")),
+        }
+    }
+
+    fn eval(&self, te: &TExpr) -> BTreeRelation {
+        match &te.kind {
+            TExprKind::Identity(sort) => self.identity(*sort),
+            TExprKind::View(name) => self.views.get(name).cloned().unwrap_or_default(),
+            TExprKind::ValueRef(name) => singleton(self.values[name].clone()),
+            TExprKind::Field(hops) => self.eval_field(hops),
+            TExprKind::Const { lit, dom } => {
+                let val = lit_value(lit);
+                let mut r = BTreeRelation::new();
+                for id in self.identity(*dom).domain() {
+                    r.add(id, val.clone(), 1);
+                }
+                r
+            }
+            TExprKind::Atom(a) => singleton(Value::Atom(a.clone())),
+
+            TExprKind::Compose(a, b) => algebra::compose(&self.eval(a), &self.eval(b)),
+            TExprKind::Semijoin(a, b) => algebra::semijoin(&self.eval(a), &self.eval(b)),
+            TExprKind::Filter(a, pred) => {
+                let p = predicate(pred);
+                algebra::filter_right(&self.eval(a), |v| p(v))
+            }
+            TExprKind::Fork(a, b) => algebra::fork(&self.eval(a), &self.eval(b)),
+            TExprKind::Union(a, b) => algebra::union(&self.eval(a), &self.eval(b)),
+            TExprKind::Intersect(a, b) => algebra::intersect(&self.eval(a), &self.eval(b)),
+            TExprKind::Inverse(a) => algebra::inverse(&self.eval(a)),
+            TExprKind::Distinct(a) => algebra::distinct(&self.eval(a)),
+            TExprKind::By(x, y) => {
+                // X by Y == ~Y . X
+                algebra::compose(&algebra::inverse(&self.eval(y)), &self.eval(x))
+            }
+            TExprKind::Antijoin(a, b) => {
+                let ra = self.eval(a);
+                let sj = algebra::semijoin(&ra, &self.eval(b));
+                let mut out = ra.clone();
+                for (l, r, w) in sj.iter() {
+                    out.add(l, r, -w);
+                }
+                out
+            }
+            TExprKind::Mul(a, b) => {
+                let money = te.ty.to == ValueTy::Money;
+                algebra::value_join(&self.eval(a), &self.eval(b), move |x, y| mul_values(x, y, money))
+            }
+            TExprKind::Concat(a, b) => {
+                algebra::value_join(&self.eval(a), &self.eval(b), concat_values)
+            }
+
+            TExprKind::Coreflexive(pred) => {
+                // Standalone coreflexive built-in: materializable only over an
+                // enumerable (entity) domain.
+                let mut r = BTreeRelation::new();
+                if let ValueTy::Id(sort) = te.ty.from {
+                    let p = predicate(pred);
+                    for id in self.identity(sort).domain() {
+                        if p(&id) {
+                            r.add(id.clone(), id, 1);
+                        }
+                    }
+                }
+                r
+            }
+            TExprKind::BinCompare(op, a, b) => {
+                let ra = self.eval(a);
+                let rb = self.eval(b);
+                let mut out = BTreeRelation::new();
+                for k in ra.domain() {
+                    for (va, _) in ra.row(&k) {
+                        for (vb, _) in rb.row(&k) {
+                            if compare_values(*op, &va, &vb) {
+                                out.add(k.clone(), k.clone(), 1);
+                            }
+                        }
+                    }
+                }
+                out
+            }
+            TExprKind::InRel(a, lits) => {
+                let set: BTreeSet<Value> = lits.iter().map(lit_value).collect();
+                let ra = self.eval(a);
+                let mut out = BTreeRelation::new();
+                for (k, v, _) in ra.iter() {
+                    if set.contains(&v) {
+                        out.add(k.clone(), k, 1);
+                    }
+                }
+                out
+            }
+            TExprKind::Agg(kind, arg) => {
+                let money = arg.ty.to == ValueTy::Money;
+                algebra::aggregate(&self.eval(arg), agg_of(*kind), money)
+            }
+        }
+    }
+
+    fn identity(&self, sort: SortId) -> BTreeRelation {
+        self.ids.get(&sort).cloned().unwrap_or_default()
+    }
+
+    fn eval_field(&self, hops: &[FieldHop]) -> BTreeRelation {
+        let mut rel = self.field(hops[0].sort, &hops[0].field);
+        for hop in &hops[1..] {
+            rel = algebra::compose(&rel, &self.field(hop.sort, &hop.field));
+        }
+        rel
+    }
+
+    fn field(&self, sort: SortId, name: &str) -> BTreeRelation {
+        self.fields
+            .get(&(sort, name.to_string()))
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
+// --- free helpers ---------------------------------------------------------
+
+fn singleton(v: Value) -> BTreeRelation {
+    let mut r = BTreeRelation::new();
+    r.add(v.clone(), v, 1);
+    r
+}
+
+fn agg_of(kind: AggKind) -> Agg {
+    match kind {
+        AggKind::Sum => Agg::Sum,
+        AggKind::Count => Agg::Count,
+        AggKind::Avg => Agg::Avg,
+        AggKind::Min => Agg::Min,
+        AggKind::Max => Agg::Max,
+    }
+}
+
+fn lit_value(lit: &Lit) -> Value {
+    match lit {
+        Lit::Int(n) => Value::Int(*n),
+        Lit::Decimal(s) => Value::money_from_decimal(s),
+        Lit::Str(s) => Value::Text(s.clone()),
+        Lit::Date { year, month, day } => Value::Date {
+            year: *year,
+            month: *month,
+            day: *day,
+        },
+        Lit::Atom(a) => Value::Atom(a.clone()),
+    }
+}
+
+fn predicate(pred: &Pred) -> Box<dyn Fn(&Value) -> bool> {
+    match pred {
+        Pred::Cmp(op, lit) => {
+            let op = *op;
+            let target = lit_value(lit);
+            Box::new(move |v| compare_values(op, v, &target))
+        }
+        Pred::InSet(lits) => {
+            let set: BTreeSet<Value> = lits.iter().map(lit_value).collect();
+            Box::new(move |v| set.contains(v))
+        }
+    }
+}
+
+fn mul_values(a: &Value, b: &Value, money: bool) -> Value {
+    let n = a.as_i64().unwrap_or(0) * b.as_i64().unwrap_or(0);
+    if money {
+        Value::Money(n)
+    } else {
+        Value::Int(n)
+    }
+}
+
+fn concat_values(a: &Value, b: &Value) -> Value {
+    match (a, b) {
+        (Value::Text(x), Value::Text(y)) => Value::Text(format!("{x}{y}")),
+        _ => Value::Text(format!("{a}{b}")),
+    }
+}
+
+fn compare_values(op: crate::ast::CmpOp, a: &Value, b: &Value) -> bool {
+    use crate::ast::CmpOp::*;
+    if let (Some(x), Some(y)) = (a.as_cents(), b.as_cents()) {
+        return match op {
+            Eq => x == y,
+            Lt => x < y,
+            Gt => x > y,
+            Le => x <= y,
+            Ge => x >= y,
+        };
+    }
+    match op {
+        Eq => a == b,
+        Lt => a < b,
+        Gt => a > b,
+        Le => a <= b,
+        Ge => a >= b,
+    }
+}
