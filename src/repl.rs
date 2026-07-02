@@ -121,7 +121,7 @@ impl eval::Store for EngineStore<'_> {
     fn field_rel(&self, sort: crate::types::ty::SortId, field: &str) -> BTreeRelation {
         self.engine
             .circuit
-            .input_integral(&crate::dbsp::InputKey::Field(sort, field.to_string()))
+            .input_integral(&crate::dbsp::InputKey::Field(sort, crate::eval::intern(field)))
             .cloned()
             .unwrap_or_default()
     }

@@ -167,7 +167,7 @@ pub fn eval_expr_with(store: &dyn Store, te: &TExpr) -> BTreeRelation {
             }
             r
         }
-        TExprKind::Atom(a) => singleton(Value::Atom(a.clone())),
+        TExprKind::Atom(a) => singleton(Value::atom(a)),
 
         TExprKind::Compose(a, b) => algebra::compose(&eval(a), &eval(b)),
         TExprKind::Semijoin(a, b) => algebra::semijoin(&eval(a), &eval(b)),
@@ -287,13 +287,13 @@ pub fn lit_value(lit: &Lit) -> Value {
     match lit {
         Lit::Int(n) => Value::Int(*n),
         Lit::Decimal(s) => Value::money_from_decimal(s),
-        Lit::Str(s) => Value::Text(s.clone()),
+        Lit::Str(s) => Value::text(s),
         Lit::Date { year, month, day } => Value::Date {
             year: *year,
             month: *month,
             day: *day,
         },
-        Lit::Atom(a) => Value::Atom(a.clone()),
+        Lit::Atom(a) => Value::atom(a),
     }
 }
 
@@ -328,8 +328,10 @@ pub fn mul_values(a: &Value, b: &Value, money: bool) -> Value {
 /// kernel.
 pub fn concat_values(a: &Value, b: &Value) -> Value {
     match (a, b) {
-        (Value::Text(x), Value::Text(y)) => Value::Text(format!("{x}{y}")),
-        _ => Value::Text(format!("{a}{b}")),
+        (Value::Text(x), Value::Text(y)) => {
+            Value::text(&format!("{}{}", x.as_str(), y.as_str()))
+        }
+        _ => Value::text(&format!("{a}{b}")),
     }
 }
 
@@ -346,11 +348,15 @@ pub fn compare_values(op: crate::ast::CmpOp, a: &Value, b: &Value) -> bool {
             Ge => x >= y,
         };
     }
+    // Non-numeric: the order the language means (Text lexicographic — the
+    // derived `Ord` ranks interned symbols by id, which is storage order,
+    // not surface semantics).
+    let ord = a.cmp_semantic(b);
     match op {
-        Eq => a == b,
-        Lt => a < b,
-        Gt => a > b,
-        Le => a <= b,
-        Ge => a >= b,
+        Eq => ord.is_eq(),
+        Lt => ord.is_lt(),
+        Gt => ord.is_gt(),
+        Le => ord.is_le(),
+        Ge => ord.is_ge(),
     }
 }

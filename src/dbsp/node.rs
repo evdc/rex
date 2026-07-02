@@ -26,13 +26,13 @@ pub struct NodeId(pub usize);
 
 /// Identity of a base table: the per-sort diagonal, or one `(sort, field)`
 /// columnar relation (§3: an entity is a family of field relations sharing an
-/// ID key).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// ID key). Field names are interned, so the key is `Copy`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum InputKey {
     /// The per-sort identity/diagonal (`Customer : CustID -> CustID`, §3.3).
     Identity(SortId),
     /// One field relation (`Customer:name : CustID -> Text`).
-    Field(SortId, String),
+    Field(SortId, crate::eval::intern::Sym),
 }
 
 /// A circuit operator. Children are named by [`NodeId`] and always precede the

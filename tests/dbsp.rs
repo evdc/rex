@@ -11,7 +11,7 @@ use rex::ast::CmpOp;
 use rex::dbsp::{Circuit, CoKeyedFn, InputKey, Node, NodeId, Transaction};
 use rex::eval::algebra::Agg;
 use rex::eval::relation::{BTreeRelation, BinaryRelation};
-use rex::eval::{Value, algebra};
+use rex::eval::{Value, algebra, intern};
 use rex::types::ty::SortId;
 use rex::types::typed::{AggKind, Lit, Pred};
 use std::collections::BTreeMap;
@@ -48,11 +48,11 @@ fn int(n: i64) -> Value {
 }
 
 fn key_a() -> InputKey {
-    InputKey::Field(SortId(0), "a".to_string())
+    InputKey::Field(SortId(0), intern("a"))
 }
 
 fn key_b() -> InputKey {
-    InputKey::Field(SortId(0), "b".to_string())
+    InputKey::Field(SortId(0), intern("b"))
 }
 
 /// One base-table change: (left, right, weight) over a tiny domain.
@@ -69,7 +69,7 @@ fn tx_seq() -> impl Strategy<Value = Vec<Vec<Change>>> {
 fn to_tx(key: &InputKey, changes: &[Change]) -> Transaction {
     let mut tx = Transaction::new();
     for &(l, r, w) in changes {
-        tx.push(key.clone(), int(l), int(r), w);
+        tx.push(*key, int(l), int(r), w);
     }
     tx
 }
@@ -337,11 +337,11 @@ proptest! {
     ) {
         // A stateful node fed by a stateful node: (A . B) . C, the shape every
         // multi-hop field path lowers to.
-        let key_c = InputKey::Field(SortId(0), "c".to_string());
+        let key_c = InputKey::Field(SortId(0), intern("c"));
         let mut circuit = Circuit::new();
         let a = circuit.input(key_a());
         let b = circuit.input(key_b());
-        let c = circuit.input(key_c.clone());
+        let c = circuit.input(key_c);
         let ab = circuit.add_node(Node::Compose { l: a, r: b, linv: BTreeRelation::new() });
         let abc = circuit.add_node(Node::Compose { l: ab, r: c, linv: BTreeRelation::new() });
         circuit.set_output("out", abc);
@@ -356,9 +356,9 @@ proptest! {
             let cb = steps_b.get(i).unwrap_or(&empty);
             let cc = steps_c.get(i).unwrap_or(&empty);
             let mut tx = Transaction::new();
-            for (key, changes) in [(key_a(), ca), (key_b(), cb), (key_c.clone(), cc)] {
+            for (key, changes) in [(key_a(), ca), (key_b(), cb), (key_c, cc)] {
                 for &(l, r, w) in changes {
-                    tx.push(key.clone(), int(l), int(r), w);
+                    tx.push(key, int(l), int(r), w);
                 }
             }
             circuit.step(&tx);
@@ -393,13 +393,13 @@ proptest! {
 #[test]
 fn const_singleton_fires_exactly_once() {
     let mut circuit = Circuit::new();
-    let c = circuit.add_node(Node::ConstSingleton { value: Value::Atom("west".into()), fired: false });
+    let c = circuit.add_node(Node::ConstSingleton { value: Value::atom("west"), fired: false });
     circuit.set_output("c", c);
 
     let first = circuit.step(&Transaction::new());
     assert_eq!(first.view_deltas["c"].to_sorted_vec(), vec![(
-        Value::Atom("west".into()),
-        Value::Atom("west".into()),
+        Value::atom("west"),
+        Value::atom("west"),
         1,
     )]);
 

@@ -10,6 +10,7 @@
 
 use super::circuit::Circuit;
 use super::node::{CoKeyedFn, InputKey, Node, NodeId};
+use crate::eval::intern::intern;
 use crate::eval::interp::lit_value;
 use crate::eval::relation::BTreeRelation;
 use crate::eval::value::Value;
@@ -34,9 +35,9 @@ pub fn lower(circuit: &mut Circuit, te: &TExpr, values: &HashMap<String, Value>)
             circuit.add_node(Node::ConstSingleton { value: v, fired: false })
         }
         TExprKind::Field(hops) => {
-            let mut acc = circuit.input(InputKey::Field(hops[0].sort, hops[0].field.clone()));
+            let mut acc = circuit.input(InputKey::Field(hops[0].sort, intern(&hops[0].field)));
             for hop in &hops[1..] {
-                let next = circuit.input(InputKey::Field(hop.sort, hop.field.clone()));
+                let next = circuit.input(InputKey::Field(hop.sort, intern(&hop.field)));
                 acc = circuit.add_node(Node::Compose {
                     l: acc,
                     r: next,
@@ -50,7 +51,7 @@ pub fn lower(circuit: &mut Circuit, te: &TExpr, values: &HashMap<String, Value>)
             circuit.add_node(Node::MapConst(ids, lit_value(lit)))
         }
         TExprKind::Atom(a) => circuit.add_node(Node::ConstSingleton {
-            value: Value::Atom(a.clone()),
+            value: Value::atom(a),
             fired: false,
         }),
 

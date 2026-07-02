@@ -7,6 +7,7 @@
 use super::circuit::{Circuit, StepResult, Transaction};
 use super::lower::lower;
 use super::node::InputKey;
+use crate::eval::intern::intern;
 use crate::eval::relation::BinaryRelation;
 use crate::eval::value::Value;
 use crate::types::ty::SortId;
@@ -37,7 +38,7 @@ impl Engine {
         let mut tx = Transaction::new();
         tx.push(InputKey::Identity(sort), id.clone(), id.clone(), 1);
         for (field, v) in fields {
-            tx.push(InputKey::Field(sort, field.clone()), id.clone(), v.clone(), 1);
+            tx.push(InputKey::Field(sort, intern(field)), id.clone(), v.clone(), 1);
         }
         (id.clone(), self.circuit.step(&tx))
     }
@@ -66,7 +67,7 @@ impl Engine {
             .circuit
             .input_keys()
             .filter(|k| matches!(k, InputKey::Field(s, _) if s == sort))
-            .cloned()
+            .copied()
             .collect();
         for key in field_keys {
             let rows: Vec<(Value, i64)> = self
@@ -75,7 +76,7 @@ impl Engine {
                 .map(|rel| rel.row(id).collect())
                 .unwrap_or_default();
             for (v, w) in rows {
-                tx.push(key.clone(), id.clone(), v, -w);
+                tx.push(key, id.clone(), v, -w);
             }
         }
         self.circuit.step(&tx)

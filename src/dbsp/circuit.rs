@@ -75,7 +75,7 @@ impl Circuit {
         if let Some(id) = self.inputs.get(&key) {
             return *id;
         }
-        let id = self.add_node(Node::Input(key.clone()));
+        let id = self.add_node(Node::Input(key));
         self.inputs.insert(key, id);
         id
     }
@@ -120,7 +120,7 @@ impl Circuit {
         // Ensure every targeted base table exists *before* sizing the delta
         // vector, so data arriving ahead of any view that reads it is kept.
         for (key, _, _, _) in &tx.deltas {
-            self.input(key.clone());
+            self.input(*key);
         }
 
         let mut deltas: Vec<BTreeRelation> = vec![BTreeRelation::new(); self.nodes.len()];

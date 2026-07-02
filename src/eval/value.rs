@@ -3,23 +3,51 @@
 //!
 //! `Money` is stored as an integer number of minor units (cents) to stay exact.
 
+use super::intern::{intern, Sym};
 use crate::types::ty::SortId;
 
+/// NOTE on `Ord`: the derived order ranks `Text`/`Atom` by *interning order*
+/// (see [`crate::eval::intern`]) — a total order fit for Z-set storage, not
+/// lexicographic. User-visible comparisons go through [`Value::cmp_semantic`].
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Value {
     Unit,
     Int(i64),
     /// Money in minor units (cents).
     Money(i64),
-    Text(String),
+    Text(Sym),
     Date { year: i32, month: u32, day: u32 },
     /// An entity id: which sort, and a per-sort sequence number.
     Id(SortId, u64),
-    Atom(String),
+    Atom(Sym),
     Pair(Box<Value>, Box<Value>),
 }
 
 impl Value {
+    /// An interned text value.
+    pub fn text(s: &str) -> Value {
+        Value::Text(intern(s))
+    }
+
+    /// An interned atom value.
+    pub fn atom(s: &str) -> Value {
+        Value::Atom(intern(s))
+    }
+
+    /// The total order the *surface language* means: `Text`/`Atom`
+    /// lexicographic (resolved through the interner), recursively inside
+    /// pairs, everything else as the derived order.
+    pub fn cmp_semantic(&self, other: &Value) -> std::cmp::Ordering {
+        match (self, other) {
+            (Value::Text(a), Value::Text(b)) | (Value::Atom(a), Value::Atom(b)) => {
+                a.as_str().cmp(b.as_str())
+            }
+            (Value::Pair(a1, b1), Value::Pair(a2, b2)) => {
+                a1.cmp_semantic(a2).then_with(|| b1.cmp_semantic(b2))
+            }
+            _ => self.cmp(other),
+        }
+    }
     /// Parse a decimal literal like `"9.99"` into money cents (`999`). Extra
     /// fractional digits are truncated; missing ones are padded. The sign is
     /// taken from the literal itself so sub-dollar negatives (`"-0.50"`) keep it,
@@ -71,7 +99,7 @@ impl std::fmt::Display for Value {
                 let c = c.abs();
                 write!(f, "{sign}${}.{:02}", c / 100, c % 100)
             }
-            Value::Text(s) => write!(f, "{s:?}"),
+            Value::Text(s) => write!(f, "{:?}", s.as_str()),
             Value::Date { year, month, day } => write!(f, "{year:04}-{month:02}-{day:02}"),
             Value::Id(sort, n) => write!(f, "#{}:{n}", sort.0),
             Value::Atom(a) => write!(f, "@{a}"),
