@@ -9,11 +9,39 @@
 use proptest::prelude::*;
 use rex::ast::CmpOp;
 use rex::dbsp::{Circuit, CoKeyedFn, InputKey, Node, NodeId, Transaction};
+use rex::eval::algebra::Agg;
 use rex::eval::relation::{BTreeRelation, BinaryRelation};
 use rex::eval::{Value, algebra};
 use rex::types::ty::SortId;
-use rex::types::typed::{Lit, Pred};
+use rex::types::typed::{AggKind, Lit, Pred};
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+
+fn compose_node(l: NodeId, r: NodeId) -> Node {
+    Node::Compose { l, r, linv: BTreeRelation::new() }
+}
+
+fn semijoin_node(l: NodeId, r: NodeId) -> Node {
+    Node::Semijoin { l, r, linv: BTreeRelation::new() }
+}
+
+fn antijoin_node(l: NodeId, r: NodeId) -> Node {
+    Node::Antijoin { l, r, linv: BTreeRelation::new() }
+}
+
+fn agg_node(kind: AggKind) -> impl Fn(NodeId) -> Node {
+    move |input| Node::Aggregate { input, kind, money: false, st: BTreeMap::new() }
+}
+
+/// Batch antijoin oracle, mirroring interp.rs: `A − A[B]`.
+fn batch_antijoin(a: &BTreeRelation, b: &BTreeRelation) -> BTreeRelation {
+    let sj = algebra::semijoin(a, b);
+    let mut out = a.clone();
+    for (l, r, w) in sj.iter() {
+        out.add(l, r, -w);
+    }
+    out
+}
 
 fn int(n: i64) -> Value {
     Value::Int(n)
@@ -170,12 +198,81 @@ proptest! {
 
     #[test]
     fn compose_matches_batch(steps_a in tx_seq(), steps_b in tx_seq()) {
-        check_binary(
-            |l, r| Node::Compose { l, r, linv: BTreeRelation::new() },
-            |r, s| algebra::compose(r, s),
-            &steps_a,
-            &steps_b,
-        )?;
+        check_binary(compose_node, |r, s| algebra::compose(r, s), &steps_a, &steps_b)?;
+    }
+
+    #[test]
+    fn semijoin_matches_batch(steps_a in tx_seq(), steps_b in tx_seq()) {
+        check_binary(semijoin_node, |r, s| algebra::semijoin(r, s), &steps_a, &steps_b)?;
+    }
+
+    #[test]
+    fn antijoin_matches_batch(steps_a in tx_seq(), steps_b in tx_seq()) {
+        check_binary(antijoin_node, batch_antijoin, &steps_a, &steps_b)?;
+    }
+
+    #[test]
+    fn intersect_matches_batch(steps_a in tx_seq(), steps_b in tx_seq()) {
+        check_binary(Node::Intersect, |r, s| algebra::intersect(r, s), &steps_a, &steps_b)?;
+    }
+
+    #[test]
+    fn distinct_matches_batch(steps in tx_seq()) {
+        check_unary(Node::Distinct, |r| algebra::distinct(r), &steps)?;
+    }
+
+    #[test]
+    fn agg_sum_matches_batch(steps in tx_seq()) {
+        check_unary(agg_node(AggKind::Sum), |r| algebra::aggregate(r, Agg::Sum, false), &steps)?;
+    }
+
+    #[test]
+    fn agg_count_matches_batch(steps in tx_seq()) {
+        check_unary(agg_node(AggKind::Count), |r| algebra::aggregate(r, Agg::Count, false), &steps)?;
+    }
+
+    #[test]
+    fn agg_avg_matches_batch(steps in tx_seq()) {
+        check_unary(agg_node(AggKind::Avg), |r| algebra::aggregate(r, Agg::Avg, false), &steps)?;
+    }
+
+    #[test]
+    fn agg_min_matches_batch(steps in tx_seq()) {
+        check_unary(agg_node(AggKind::Min), |r| algebra::aggregate(r, Agg::Min, false), &steps)?;
+    }
+
+    #[test]
+    fn agg_max_matches_batch(steps in tx_seq()) {
+        check_unary(agg_node(AggKind::Max), |r| algebra::aggregate(r, Agg::Max, false), &steps)?;
+    }
+
+    #[test]
+    fn agg_then_filter_matches_batch(steps in tx_seq()) {
+        // The spec12 `custspend where > 30` shape: a group aggregate feeding a
+        // threshold filter — retract/assert deltas must cross the threshold
+        // cleanly in both directions.
+        let pred = Pred::Cmp(CmpOp::Gt, Lit::Int(2));
+        let mut circuit = Circuit::new();
+        let input = circuit.input(key_a());
+        let agg = circuit.add_node(Node::Aggregate {
+            input,
+            kind: AggKind::Sum,
+            money: false,
+            st: BTreeMap::new(),
+        });
+        let out = circuit.add_node(Node::Filter(agg, pred));
+        circuit.set_output("out", out);
+
+        let mut oracle_in = BTreeRelation::new();
+        for changes in &steps {
+            circuit.step(&to_tx(&key_a(), changes));
+            integrate(&mut oracle_in, changes);
+            let batch = algebra::filter_right(
+                &algebra::aggregate(&oracle_in, Agg::Sum, false),
+                |v| matches!(v, Value::Int(n) if *n > 2),
+            );
+            prop_assert_eq!(circuit.integral(out), &batch);
+        }
     }
 
     #[test]
@@ -349,6 +446,236 @@ fn compose_cross_term_when_both_inputs_change_together() {
     let result = circuit.step(&retract);
     assert_eq!(result.view_deltas["out"].to_sorted_vec(), vec![(int(1), int(3), -1)]);
     assert!(circuit.view("out").unwrap().is_empty());
+}
+
+// --- adversarial cases for the non-linear tier ------------------------------
+//
+// The property net above covers these statistically; the cases below pin the
+// narrow mechanisms by name so a regression is immediately legible.
+
+/// Harness: a two-input circuit, stepped with explicit per-side changes.
+struct Pair {
+    circuit: Circuit,
+    out: NodeId,
+}
+
+impl Pair {
+    fn new(node: impl Fn(NodeId, NodeId) -> Node) -> Pair {
+        let mut circuit = Circuit::new();
+        let a = circuit.input(key_a());
+        let b = circuit.input(key_b());
+        let out = circuit.add_node(node(a, b));
+        circuit.set_output("out", out);
+        Pair { circuit, out }
+    }
+
+    /// Apply changes to both sides in ONE transaction; return the view delta.
+    fn step(&mut self, a: &[Change], b: &[Change]) -> Vec<(Value, Value, i64)> {
+        let mut tx = to_tx(&key_a(), a);
+        for &(l, r, w) in b {
+            tx.push(key_b(), int(l), int(r), w);
+        }
+        self.circuit.step(&tx).view_deltas["out"].to_sorted_vec()
+    }
+
+    fn contents(&self) -> Vec<(Value, Value, i64)> {
+        self.circuit.integral(self.out).to_sorted_vec()
+    }
+}
+
+fn triples(entries: &[(i64, i64, i64)]) -> Vec<(Value, Value, i64)> {
+    entries.iter().map(|&(l, r, w)| (int(l), int(r), w)).collect()
+}
+
+#[test]
+fn semijoin_membership_flips() {
+    let mut p = Pair::new(semijoin_node);
+    // L gets rows keyed at 2 before R knows the key: nothing passes.
+    assert!(p.step(&[(1, 2, 3)], &[]).is_empty());
+
+    // R gains its first row at 2: membership flips ON, L's slice replays with
+    // its full weight (3).
+    assert_eq!(p.step(&[], &[(2, 9, 1)]), triples(&[(1, 2, 3)]));
+
+    // A second R row at 2, then one retracted: membership never flips, no output.
+    assert!(p.step(&[], &[(2, 8, 1)]).is_empty());
+    assert!(p.step(&[], &[(2, 8, -1)]).is_empty());
+
+    // Last R row retracted: flips OFF, the slice retracts.
+    assert_eq!(p.step(&[], &[(2, 9, -1)]), triples(&[(1, 2, -3)]));
+    assert!(p.contents().is_empty());
+}
+
+#[test]
+fn semijoin_cancelling_r_rows_do_not_flip() {
+    let mut p = Pair::new(semijoin_node);
+    p.step(&[(1, 2, 1)], &[]);
+    // +1 and −1 at the same R key in one transaction: net membership change is
+    // zero; the merged `has_left` must see through the cancellation.
+    assert!(p.step(&[], &[(2, 9, 1), (2, 9, -1)]).is_empty());
+    assert!(p.contents().is_empty());
+}
+
+#[test]
+fn semijoin_delta_l_and_flip_in_same_transaction() {
+    let mut p = Pair::new(semijoin_node);
+    p.step(&[(1, 2, 1)], &[]);
+    // New L row at 2 AND R's first row at 2 arrive together: the old L row
+    // comes in via the flip term, the new one via δL ⋉ M' — exactly once each.
+    assert_eq!(p.step(&[(5, 2, 1)], &[(2, 9, 1)]), triples(&[(1, 2, 1), (5, 2, 1)]));
+}
+
+#[test]
+fn antijoin_first_and_last_match_with_multiplicity() {
+    let mut p = Pair::new(antijoin_node);
+    // A customer with weight-3 presence and no match: fully in the antijoin.
+    assert_eq!(p.step(&[(1, 2, 3)], &[]), triples(&[(1, 2, 3)]));
+
+    // First match appears: rows leave with the SAME weight (the §6 weight-
+    // correctness property — subtracting the semijoin, not the raw image).
+    assert_eq!(p.step(&[], &[(2, 9, 1)]), triples(&[(1, 2, -3)]));
+    assert!(p.contents().is_empty());
+
+    // Last match leaves: rows return.
+    assert_eq!(p.step(&[], &[(2, 9, -1)]), triples(&[(1, 2, 3)]));
+}
+
+#[test]
+fn intersect_min_crossing_both_directions() {
+    let mut p = Pair::new(Node::Intersect);
+    p.step(&[(1, 1, 2)], &[(1, 1, 5)]);
+    assert_eq!(p.contents(), triples(&[(1, 1, 2)])); // min(2,5)
+
+    // Left grows past right: min switches sides, delta is the difference.
+    assert_eq!(p.step(&[(1, 1, 4)], &[]), triples(&[(1, 1, 3)])); // min 2 -> 5
+    // Right shrinks below left: min follows it down.
+    assert_eq!(p.step(&[], &[(1, 1, -4)]), triples(&[(1, 1, -4)])); // min 5 -> 1
+    assert_eq!(p.contents(), triples(&[(1, 1, 1)]));
+}
+
+#[test]
+fn intersect_negative_weight_on_one_side() {
+    let mut p = Pair::new(Node::Intersect);
+    // min(-1, 2) = -1: intersect must not clamp.
+    p.step(&[(1, 1, -1)], &[(1, 1, 2)]);
+    assert_eq!(p.contents(), triples(&[(1, 1, -1)]));
+}
+
+#[test]
+fn distinct_weight_transitions() {
+    let mut circuit = Circuit::new();
+    let input = circuit.input(key_a());
+    let out = circuit.add_node(Node::Distinct(input));
+    circuit.set_output("out", out);
+    let mut step = |changes: &[Change]| -> Vec<(Value, Value, i64)> {
+        circuit.step(&to_tx(&key_a(), changes)).view_deltas["out"].to_sorted_vec()
+    };
+
+    // 0 -> 2: appears once.
+    assert_eq!(step(&[(1, 1, 2)]), triples(&[(1, 1, 1)]));
+    // 2 -> 1: still present, no output delta.
+    assert!(step(&[(1, 1, -1)]).is_empty());
+    // 1 -> 0: retraction.
+    assert_eq!(step(&[(1, 1, -1)]), triples(&[(1, 1, -1)]));
+    // 0 -> -1: still absent (clamp of a negative is 0), no delta.
+    assert!(step(&[(1, 1, -1)]).is_empty());
+    // -1 -> 0: still absent.
+    assert!(step(&[(1, 1, 1)]).is_empty());
+    // 0 -> 1: appears again.
+    assert_eq!(step(&[(1, 1, 1)]), triples(&[(1, 1, 1)]));
+}
+
+/// Harness for one-input aggregate cases.
+fn agg_circuit(kind: AggKind) -> (Circuit, NodeId) {
+    let mut circuit = Circuit::new();
+    let input = circuit.input(key_a());
+    let out = circuit.add_node(Node::Aggregate { input, kind, money: false, st: BTreeMap::new() });
+    circuit.set_output("out", out);
+    (circuit, out)
+}
+
+#[test]
+fn min_retracting_current_minimum_forces_rescan() {
+    let (mut circuit, out) = agg_circuit(AggKind::Min);
+    let mut tx = Transaction::new();
+    tx.push(key_a(), int(1), int(3), 1);
+    tx.push(key_a(), int(1), int(7), 1);
+    circuit.step(&tx);
+    assert_eq!(circuit.integral(out).to_sorted_vec(), triples(&[(1, 3, 1)]));
+
+    // Retract the minimum itself: the survivor (7) must be found by rescan.
+    let mut retract = Transaction::new();
+    retract.push(key_a(), int(1), int(3), -1);
+    let result = circuit.step(&retract);
+    assert_eq!(
+        result.view_deltas["out"].to_sorted_vec(),
+        triples(&[(1, 3, -1), (1, 7, 1)])
+    );
+    assert_eq!(circuit.integral(out).to_sorted_vec(), triples(&[(1, 7, 1)]));
+}
+
+#[test]
+fn avg_key_disappears_when_group_empties() {
+    let (mut circuit, out) = agg_circuit(AggKind::Avg);
+    let mut tx = Transaction::new();
+    tx.push(key_a(), int(1), int(4), 1);
+    circuit.step(&tx);
+    assert_eq!(
+        circuit.integral(out).to_sorted_vec(),
+        vec![(int(1), Value::Money(4), 1)]
+    );
+
+    let mut retract = Transaction::new();
+    retract.push(key_a(), int(1), int(4), -1);
+    circuit.step(&retract);
+    assert!(circuit.integral(out).is_empty());
+}
+
+#[test]
+fn mixed_sign_group_is_present_with_zero_count() {
+    // Two values whose weights are +1 and -1: the group is nonempty (two
+    // nonzero entries) but count == 0. Batch emits Sum(0) and Count(0), and
+    // skips Avg — the incremental presence rule must match all three.
+    let changes: &[Change] = &[(1, 3, 1), (1, 5, -1)];
+
+    let (mut sum_c, sum_out) = agg_circuit(AggKind::Sum);
+    sum_c.step(&to_tx(&key_a(), changes));
+    assert_eq!(sum_c.integral(sum_out).to_sorted_vec(), triples(&[(1, -2, 1)]));
+
+    let (mut count_c, count_out) = agg_circuit(AggKind::Count);
+    count_c.step(&to_tx(&key_a(), changes));
+    assert_eq!(count_c.integral(count_out).to_sorted_vec(), triples(&[(1, 0, 1)]));
+
+    let (mut avg_c, avg_out) = agg_circuit(AggKind::Avg);
+    avg_c.step(&to_tx(&key_a(), changes));
+    assert!(avg_c.integral(avg_out).is_empty());
+}
+
+#[test]
+fn sum_crossing_downstream_threshold_both_directions() {
+    // spec12's `custspend where > 30` shape, minimal: Sum feeding Filter(> 2).
+    let mut circuit = Circuit::new();
+    let input = circuit.input(key_a());
+    let agg = circuit.add_node(Node::Aggregate {
+        input,
+        kind: AggKind::Sum,
+        money: false,
+        st: BTreeMap::new(),
+    });
+    let out = circuit.add_node(Node::Filter(agg, Pred::Cmp(CmpOp::Gt, Lit::Int(2))));
+    circuit.set_output("out", out);
+    let mut step = |changes: &[Change]| -> Vec<(Value, Value, i64)> {
+        circuit.step(&to_tx(&key_a(), changes)).view_deltas["out"].to_sorted_vec()
+    };
+
+    // Sum = 2: below threshold, invisible.
+    assert!(step(&[(1, 2, 1)]).is_empty());
+    // Sum = 4: crosses up — appears with the new value only.
+    assert_eq!(step(&[(1, 2, 1)]), triples(&[(1, 4, 1)]));
+    // Sum = 6: stays above — clean retract/assert of the changed value.
+    assert_eq!(step(&[(1, 2, 1)]), triples(&[(1, 4, -1), (1, 6, 1)]));
+    // Sum = 2: crosses back down — the old value retracts, nothing replaces it.
+    assert_eq!(step(&[(1, 2, -2)]), triples(&[(1, 6, -1)]));
 }
 
 #[test]

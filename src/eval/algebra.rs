@@ -52,13 +52,22 @@ pub fn union(r: &dyn BinaryRelation, s: &dyn BinaryRelation) -> BTreeRelation {
     out
 }
 
-/// `R & S`: elementwise `min` of weights (§3.1).
+/// `R & S`: elementwise `min` of weights (§3.1), over the union of supports —
+/// symmetric, as `min` demands. A pair present in only one side has weight 0
+/// on the other, so it contributes `min(w, 0)`: nothing when `w` is positive,
+/// `w` itself when `w` is negative (a retraction intersects as a retraction).
 pub fn intersect(r: &dyn BinaryRelation, s: &dyn BinaryRelation) -> BTreeRelation {
     let mut out = BTreeRelation::new();
     for (a, b, w) in r.iter() {
         let m = w.min(s.weight(&a, &b));
         if m != 0 {
             out.add(a, b, m);
+        }
+    }
+    // Pairs present only in s: min(0, w) is nonzero only for negative w.
+    for (a, b, w) in s.iter() {
+        if r.weight(&a, &b) == 0 && w < 0 {
+            out.add(a, b, w);
         }
     }
     out

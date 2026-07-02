@@ -109,127 +109,158 @@ impl Interp {
     }
 
     fn eval(&self, te: &TExpr) -> BTreeRelation {
-        match &te.kind {
-            TExprKind::Identity(sort) => self.identity(*sort),
-            TExprKind::View(name) => self.views.get(name).cloned().unwrap_or_default(),
-            TExprKind::ValueRef(name) => singleton(self.values[name].clone()),
-            TExprKind::Field(hops) => self.eval_field(hops),
-            TExprKind::Const { lit, dom } => {
-                let val = lit_value(lit);
-                let mut r = BTreeRelation::new();
-                for id in self.identity(*dom).domain() {
-                    r.add(id, val.clone(), 1);
-                }
-                r
-            }
-            TExprKind::Atom(a) => singleton(Value::Atom(a.clone())),
-
-            TExprKind::Compose(a, b) => algebra::compose(&self.eval(a), &self.eval(b)),
-            TExprKind::Semijoin(a, b) => algebra::semijoin(&self.eval(a), &self.eval(b)),
-            TExprKind::Filter(a, pred) => {
-                let p = predicate(pred);
-                algebra::filter_right(&self.eval(a), |v| p(v))
-            }
-            TExprKind::Fork(a, b) => algebra::fork(&self.eval(a), &self.eval(b)),
-            TExprKind::Union(a, b) => algebra::union(&self.eval(a), &self.eval(b)),
-            TExprKind::Intersect(a, b) => algebra::intersect(&self.eval(a), &self.eval(b)),
-            TExprKind::Inverse(a) => algebra::inverse(&self.eval(a)),
-            TExprKind::Distinct(a) => algebra::distinct(&self.eval(a)),
-            TExprKind::By(x, y) => {
-                // X by Y == ~Y . X
-                algebra::compose(&algebra::inverse(&self.eval(y)), &self.eval(x))
-            }
-            TExprKind::Antijoin(a, b) => {
-                let ra = self.eval(a);
-                let sj = algebra::semijoin(&ra, &self.eval(b));
-                let mut out = ra.clone();
-                for (l, r, w) in sj.iter() {
-                    out.add(l, r, -w);
-                }
-                out
-            }
-            TExprKind::Mul(a, b) => {
-                let money = te.ty.to == ValueTy::Money;
-                algebra::value_join(&self.eval(a), &self.eval(b), move |x, y| mul_values(x, y, money))
-            }
-            TExprKind::Concat(a, b) => {
-                algebra::value_join(&self.eval(a), &self.eval(b), concat_values)
-            }
-
-            TExprKind::Coreflexive(pred) => {
-                // Standalone coreflexive built-in: materializable only over an
-                // enumerable (entity) domain. The groundedness pass (§9.1,
-                // `types::ground`) statically rejects any other domain, so the
-                // non-`Id` fallthrough below is unreachable on a checked program;
-                // the empty fallback remains only as a release-build safety net.
-                debug_assert!(
-                    matches!(te.ty.from, ValueTy::Id(_)),
-                    "groundedness pass guarantees an enumerable domain"
-                );
-                let mut r = BTreeRelation::new();
-                if let ValueTy::Id(sort) = te.ty.from {
-                    let p = predicate(pred);
-                    for (l, right, w) in self.identity(sort).iter() {
-                        if p(&right) {
-                            r.add(l, right, w);
-                        }
-                    }
-                }
-                r
-            }
-            TExprKind::BinCompare(op, a, b) => {
-                let ra = self.eval(a);
-                let rb = self.eval(b);
-                let mut out = BTreeRelation::new();
-                // A coreflexive on the shared key: for each key, `a OP b` over its
-                // co-keyed values. Weights combine bilinearly (as in `a . OP . ~b`).
-                for k in ra.domain() {
-                    for (va, wa) in ra.row(&k) {
-                        for (vb, wb) in rb.row(&k) {
-                            if compare_values(*op, &va, &vb) {
-                                out.add(k.clone(), k.clone(), wa * wb);
-                            }
-                        }
-                    }
-                }
-                out
-            }
-            TExprKind::InRel(a, lits) => {
-                let set: BTreeSet<Value> = lits.iter().map(lit_value).collect();
-                let ra = self.eval(a);
-                let mut out = BTreeRelation::new();
-                for (k, v, w) in ra.iter() {
-                    if set.contains(&v) {
-                        out.add(k.clone(), k, w);
-                    }
-                }
-                out
-            }
-            TExprKind::Agg(kind, arg) => {
-                let money = arg.ty.to == ValueTy::Money;
-                algebra::aggregate(&self.eval(arg), agg_of(*kind), money)
-            }
-        }
+        eval_expr_with(self, te)
     }
+}
 
-    fn identity(&self, sort: SortId) -> BTreeRelation {
-        self.ids.get(&sort).cloned().unwrap_or_default()
-    }
+/// Read access to the base tables, views, and value bindings an expression
+/// evaluates against. The batch [`Interp`] implements it over its own maps;
+/// the incremental Session implements it over the engine's integrals, so a
+/// scratch expression (or a test oracle) can be batch-evaluated against live
+/// circuit state.
+pub trait Store {
+    fn field_rel(&self, sort: SortId, field: &str) -> BTreeRelation;
+    fn identity_rel(&self, sort: SortId) -> BTreeRelation;
+    fn view_rel(&self, name: &str) -> BTreeRelation;
+    fn value(&self, name: &str) -> Value;
+}
 
-    fn eval_field(&self, hops: &[FieldHop]) -> BTreeRelation {
-        let mut rel = self.field(hops[0].sort, &hops[0].field);
-        for hop in &hops[1..] {
-            rel = algebra::compose(&rel, &self.field(hop.sort, &hop.field));
-        }
-        rel
-    }
-
-    fn field(&self, sort: SortId, name: &str) -> BTreeRelation {
+impl Store for Interp {
+    fn field_rel(&self, sort: SortId, field: &str) -> BTreeRelation {
         self.fields
-            .get(&(sort, name.to_string()))
+            .get(&(sort, field.to_string()))
             .cloned()
             .unwrap_or_default()
     }
+
+    fn identity_rel(&self, sort: SortId) -> BTreeRelation {
+        self.ids.get(&sort).cloned().unwrap_or_default()
+    }
+
+    fn view_rel(&self, name: &str) -> BTreeRelation {
+        self.views.get(name).cloned().unwrap_or_default()
+    }
+
+    fn value(&self, name: &str) -> Value {
+        self.values
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| panic!("unbound value `{name}`"))
+    }
+}
+
+/// Batch-evaluate one elaborated expression against any [`Store`]. This is the
+/// structural walk the interpreter always did, factored out of `Interp` so it
+/// can also read through a live incremental engine.
+pub fn eval_expr_with(store: &dyn Store, te: &TExpr) -> BTreeRelation {
+    let eval = |e: &TExpr| eval_expr_with(store, e);
+    match &te.kind {
+        TExprKind::Identity(sort) => store.identity_rel(*sort),
+        TExprKind::View(name) => store.view_rel(name),
+        TExprKind::ValueRef(name) => singleton(store.value(name)),
+        TExprKind::Field(hops) => eval_field(store, hops),
+        TExprKind::Const { lit, dom } => {
+            let val = lit_value(lit);
+            let mut r = BTreeRelation::new();
+            for id in store.identity_rel(*dom).domain() {
+                r.add(id, val.clone(), 1);
+            }
+            r
+        }
+        TExprKind::Atom(a) => singleton(Value::Atom(a.clone())),
+
+        TExprKind::Compose(a, b) => algebra::compose(&eval(a), &eval(b)),
+        TExprKind::Semijoin(a, b) => algebra::semijoin(&eval(a), &eval(b)),
+        TExprKind::Filter(a, pred) => {
+            let p = predicate(pred);
+            algebra::filter_right(&eval(a), |v| p(v))
+        }
+        TExprKind::Fork(a, b) => algebra::fork(&eval(a), &eval(b)),
+        TExprKind::Union(a, b) => algebra::union(&eval(a), &eval(b)),
+        TExprKind::Intersect(a, b) => algebra::intersect(&eval(a), &eval(b)),
+        TExprKind::Inverse(a) => algebra::inverse(&eval(a)),
+        TExprKind::Distinct(a) => algebra::distinct(&eval(a)),
+        TExprKind::By(x, y) => {
+            // X by Y == ~Y . X
+            algebra::compose(&algebra::inverse(&eval(y)), &eval(x))
+        }
+        TExprKind::Antijoin(a, b) => {
+            let ra = eval(a);
+            let sj = algebra::semijoin(&ra, &eval(b));
+            let mut out = ra.clone();
+            for (l, r, w) in sj.iter() {
+                out.add(l, r, -w);
+            }
+            out
+        }
+        TExprKind::Mul(a, b) => {
+            let money = te.ty.to == ValueTy::Money;
+            algebra::value_join(&eval(a), &eval(b), move |x, y| mul_values(x, y, money))
+        }
+        TExprKind::Concat(a, b) => algebra::value_join(&eval(a), &eval(b), concat_values),
+
+        TExprKind::Coreflexive(pred) => {
+            // Standalone coreflexive built-in: materializable only over an
+            // enumerable (entity) domain. The groundedness pass (§9.1,
+            // `types::ground`) statically rejects any other domain, so the
+            // non-`Id` fallthrough below is unreachable on a checked program;
+            // the empty fallback remains only as a release-build safety net.
+            debug_assert!(
+                matches!(te.ty.from, ValueTy::Id(_)),
+                "groundedness pass guarantees an enumerable domain"
+            );
+            let mut r = BTreeRelation::new();
+            if let ValueTy::Id(sort) = te.ty.from {
+                let p = predicate(pred);
+                for (l, right, w) in store.identity_rel(sort).iter() {
+                    if p(&right) {
+                        r.add(l, right, w);
+                    }
+                }
+            }
+            r
+        }
+        TExprKind::BinCompare(op, a, b) => {
+            let ra = eval(a);
+            let rb = eval(b);
+            let mut out = BTreeRelation::new();
+            // A coreflexive on the shared key: for each key, `a OP b` over its
+            // co-keyed values. Weights combine bilinearly (as in `a . OP . ~b`).
+            for k in ra.domain() {
+                for (va, wa) in ra.row(&k) {
+                    for (vb, wb) in rb.row(&k) {
+                        if compare_values(*op, &va, &vb) {
+                            out.add(k.clone(), k.clone(), wa * wb);
+                        }
+                    }
+                }
+            }
+            out
+        }
+        TExprKind::InRel(a, lits) => {
+            let set: BTreeSet<Value> = lits.iter().map(lit_value).collect();
+            let ra = eval(a);
+            let mut out = BTreeRelation::new();
+            for (k, v, w) in ra.iter() {
+                if set.contains(&v) {
+                    out.add(k.clone(), k, w);
+                }
+            }
+            out
+        }
+        TExprKind::Agg(kind, arg) => {
+            let money = arg.ty.to == ValueTy::Money;
+            algebra::aggregate(&eval(arg), agg_of(*kind), money)
+        }
+    }
+}
+
+fn eval_field(store: &dyn Store, hops: &[FieldHop]) -> BTreeRelation {
+    let mut rel = store.field_rel(hops[0].sort, &hops[0].field);
+    for hop in &hops[1..] {
+        rel = algebra::compose(&rel, &store.field_rel(hop.sort, &hop.field));
+    }
+    rel
 }
 
 // --- free helpers ---------------------------------------------------------

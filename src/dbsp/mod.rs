@@ -13,7 +13,11 @@
 //! checks exactly this, property-style.
 
 pub mod circuit;
+pub mod engine;
+pub mod lower;
 pub mod node;
 
 pub use circuit::{Circuit, StepResult, Transaction};
-pub use node::{CoKeyedFn, InputKey, Node, NodeId, Updated};
+pub use engine::Engine;
+pub use lower::lower;
+pub use node::{CoKeyedFn, InputKey, KeyAgg, Node, NodeId, Updated};

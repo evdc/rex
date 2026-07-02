@@ -6,10 +6,9 @@
 //!
 //! 1. **Compute.** Seed input-node deltas from the transaction, then walk the
 //!    arena in order; each node derives its output delta from its children's
-//!    deltas (and, for stateful kinds, their pre-step integrals). All stored
-//!    integrals hold *pre-step* values throughout this phase.
-//! 2. **Commit.** Fold every node's delta into its integral and let stateful
-//!    nodes update their private state.
+//!    deltas and their pre-step integrals, then updates its own *private*
+//!    state. All shared integrals hold *pre-step* values throughout this phase.
+//! 2. **Commit.** Fold every node's delta into its integral.
 
 use super::node::{Ctx, InputKey, Node, NodeId};
 use crate::eval::relation::{BTreeRelation, BinaryRelation};
@@ -105,6 +104,17 @@ impl Circuit {
         self.inputs.get(key).map(|id| &self.integrals[id.0])
     }
 
+    /// Number of nodes in the arena — the backfill mark to take *before*
+    /// lowering a new view.
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// The base tables the circuit knows about.
+    pub fn input_keys(&self) -> impl Iterator<Item = &InputKey> {
+        self.inputs.keys()
+    }
+
     /// Run one transaction through the circuit and return each view's delta.
     pub fn step(&mut self, tx: &Transaction) -> StepResult {
         // Ensure every targeted base table exists *before* sizing the delta
@@ -113,32 +123,53 @@ impl Circuit {
             self.input(key.clone());
         }
 
-        // Phase 1: compute. Seed inputs, then walk in topological order.
         let mut deltas: Vec<BTreeRelation> = vec![BTreeRelation::new(); self.nodes.len()];
         for (key, l, r, w) in &tx.deltas {
             let id = self.inputs[key];
             deltas[id.0].add(l.clone(), r.clone(), *w);
         }
-        for i in 0..self.nodes.len() {
+        self.run(0, deltas)
+    }
+
+    /// Evaluate the freshly appended node suffix `from..` over the data already
+    /// in the circuit (a new `let` over existing base tables). Every node below
+    /// `from` presents its full integral as one first delta — and reads as an
+    /// *empty* integral, so the history is seen exactly once. Because every
+    /// delta rule is exact, δ-from-empty equals batch evaluation by
+    /// construction. Pre-existing nodes are neither recomputed nor recommitted.
+    pub fn backfill(&mut self, from: usize) -> StepResult {
+        let deltas: Vec<BTreeRelation> = (0..self.nodes.len())
+            .map(|j| if j < from { self.integrals[j].clone() } else { BTreeRelation::new() })
+            .collect();
+        self.run(from, deltas)
+    }
+
+    /// The shared driver: compute nodes `floor..` in topological order, commit
+    /// their deltas, and report deltas for views produced at or above `floor`.
+    fn run(&mut self, floor: usize, mut deltas: Vec<BTreeRelation>) -> StepResult {
+        // Phase 1: compute. Shared integrals stay pre-step throughout; nodes
+        // below `floor` keep their seeded deltas and read as empty integrals.
+        for i in floor..self.nodes.len() {
             if matches!(self.nodes[i], Node::Input(_)) {
-                continue; // seeded above, never computed
+                continue; // seeded, never computed
             }
             let (prev, rest) = deltas.split_at_mut(i);
-            let ctx = Ctx { deltas: prev, integrals: &self.integrals };
+            let ctx = Ctx { deltas: prev, integrals: &self.integrals, floor };
             rest[0] = self.nodes[i].compute(&ctx);
         }
 
-        // Phase 2: commit.
-        for (i, node) in self.nodes.iter_mut().enumerate() {
-            for (l, r, w) in deltas[i].to_sorted_vec() {
+        // Phase 2: commit — fold computed deltas into their nodes' integrals.
+        for (i, delta) in deltas.iter().enumerate().skip(floor) {
+            for (l, r, w) in delta.iter() {
                 self.integrals[i].add(l, r, w);
             }
-            node.commit(&deltas);
         }
 
         let mut result = StepResult::default();
         for (name, id) in &self.outputs {
-            result.view_deltas.insert(name.clone(), deltas[id.0].clone());
+            if id.0 >= floor {
+                result.view_deltas.insert(name.clone(), deltas[id.0].clone());
+            }
         }
         result
     }
