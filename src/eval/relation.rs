@@ -6,6 +6,7 @@
 //! store can be swapped without touching it.
 
 use super::value::Value;
+use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 
 pub trait BinaryRelation {
@@ -61,6 +62,34 @@ impl BTreeRelation {
     pub fn to_sorted_vec(&self) -> Vec<(Value, Value, i64)> {
         self.iter().collect()
     }
+
+    /// Borrowing counterpart of [`BinaryRelation::iter`]: no boxing, no
+    /// `Value` clones. The hot-path API for the incremental kernels.
+    pub fn triples(&self) -> impl Iterator<Item = (&Value, &Value, i64)> {
+        self.index.iter().flat_map(|(l, row)| row.iter().map(move |(r, w)| (l, r, *w)))
+    }
+
+    /// Borrowing counterpart of [`BinaryRelation::row`].
+    pub fn row_ref<'s>(&'s self, left: &Value) -> impl Iterator<Item = (&'s Value, i64)> + use<'s> {
+        self.index.get(left).into_iter().flatten().map(|(r, w)| (r, *w))
+    }
+
+    /// The row map at `left`, if any — a re-iterable probe for kernels that
+    /// scan one row several times.
+    pub fn row_map(&self, left: &Value) -> Option<&BTreeMap<Value, i64>> {
+        self.index.get(left)
+    }
+
+    /// Borrowing counterpart of [`BinaryRelation::domain`].
+    pub fn keys(&self) -> impl Iterator<Item = &Value> {
+        self.index.keys()
+    }
+
+    /// Borrowing iterator over `(left key, row map)` pairs — one pass over the
+    /// relation grouped by key, without re-probing per key.
+    pub fn rows(&self) -> impl Iterator<Item = (&Value, &BTreeMap<Value, i64>)> {
+        self.index.iter()
+    }
 }
 
 impl BinaryRelation for BTreeRelation {
@@ -68,23 +97,32 @@ impl BinaryRelation for BTreeRelation {
         if weight == 0 {
             return;
         }
-        let row = self.index.entry(left.clone()).or_default();
-        match row.get_mut(&right) {
-            Some(w) => {
-                *w += weight;
-                if *w == 0 {
-                    row.remove(&right);
-                    self.len -= 1;
-                }
-            }
-            None => {
-                row.insert(right, weight);
+        match self.index.entry(left) {
+            Entry::Vacant(e) => {
+                e.insert(BTreeMap::from([(right, weight)]));
                 self.len += 1;
             }
-        }
-        // Keep the domain accurate: drop a row that just became empty.
-        if self.index.get(&left).is_some_and(|row| row.is_empty()) {
-            self.index.remove(&left);
+            Entry::Occupied(mut e) => {
+                let row = e.get_mut();
+                match row.get_mut(&right) {
+                    Some(w) => {
+                        *w += weight;
+                        if *w == 0 {
+                            row.remove(&right);
+                            self.len -= 1;
+                            // Keep the domain accurate: drop a row that just
+                            // became empty.
+                            if row.is_empty() {
+                                e.remove();
+                            }
+                        }
+                    }
+                    None => {
+                        row.insert(right, weight);
+                        self.len += 1;
+                    }
+                }
+            }
         }
     }
 

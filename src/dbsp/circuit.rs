@@ -136,12 +136,11 @@ impl Circuit {
     /// `from` presents its full integral as one first delta — and reads as an
     /// *empty* integral, so the history is seen exactly once. Because every
     /// delta rule is exact, δ-from-empty equals batch evaluation by
-    /// construction. Pre-existing nodes are neither recomputed nor recommitted.
+    /// construction. Pre-existing nodes are neither recomputed nor recommitted;
+    /// their integrals are presented as deltas by reference (`Ctx::delta`
+    /// redirects below-floor reads), so nothing is cloned.
     pub fn backfill(&mut self, from: usize) -> StepResult {
-        let deltas: Vec<BTreeRelation> = (0..self.nodes.len())
-            .map(|j| if j < from { self.integrals[j].clone() } else { BTreeRelation::new() })
-            .collect();
-        self.run(from, deltas)
+        self.run(from, vec![BTreeRelation::new(); self.nodes.len()])
     }
 
     /// The shared driver: compute nodes `floor..` in topological order, commit
@@ -155,13 +154,21 @@ impl Circuit {
             }
             let (prev, rest) = deltas.split_at_mut(i);
             let ctx = Ctx { deltas: prev, integrals: &self.integrals, floor };
+            // Dirty-cone skip: a node whose children all sit still this step
+            // emits nothing and changes no state — except an unfired
+            // ConstSingleton, which fires exactly once from no children.
+            let quiescent = !matches!(self.nodes[i], Node::ConstSingleton { fired: false, .. })
+                && self.nodes[i].children().iter().all(|c| ctx.delta(*c).is_empty());
+            if quiescent {
+                continue;
+            }
             rest[0] = self.nodes[i].compute(&ctx);
         }
 
         // Phase 2: commit — fold computed deltas into their nodes' integrals.
         for (i, delta) in deltas.iter().enumerate().skip(floor) {
-            for (l, r, w) in delta.iter() {
-                self.integrals[i].add(l, r, w);
+            for (l, r, w) in delta.triples() {
+                self.integrals[i].add(l.clone(), r.clone(), w);
             }
         }
 

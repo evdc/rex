@@ -194,41 +194,41 @@ impl Node {
             }
             Node::Inverse(a) => {
                 let mut out = BTreeRelation::new();
-                for (l, r, w) in ctx.delta(*a).iter() {
-                    out.add(r, l, w);
+                for (l, r, w) in ctx.delta(*a).triples() {
+                    out.add(r.clone(), l.clone(), w);
                 }
                 out
             }
             Node::Union(a, b) => {
                 let mut out = BTreeRelation::new();
-                for (l, r, w) in ctx.delta(*a).iter().chain(ctx.delta(*b).iter()) {
-                    out.add(l, r, w);
+                for (l, r, w) in ctx.delta(*a).triples().chain(ctx.delta(*b).triples()) {
+                    out.add(l.clone(), r.clone(), w);
                 }
                 out
             }
             Node::Filter(a, pred) => {
                 let p = predicate(pred);
                 let mut out = BTreeRelation::new();
-                for (l, r, w) in ctx.delta(*a).iter() {
-                    if p(&r) {
-                        out.add(l, r, w);
+                for (l, r, w) in ctx.delta(*a).triples() {
+                    if p(r) {
+                        out.add(l.clone(), r.clone(), w);
                     }
                 }
                 out
             }
             Node::InRel(a, set) => {
                 let mut out = BTreeRelation::new();
-                for (l, r, w) in ctx.delta(*a).iter() {
-                    if set.contains(&r) {
-                        out.add(l.clone(), l, w);
+                for (l, r, w) in ctx.delta(*a).triples() {
+                    if set.contains(r) {
+                        out.add(l.clone(), l.clone(), w);
                     }
                 }
                 out
             }
             Node::MapConst(a, value) => {
                 let mut out = BTreeRelation::new();
-                for (l, _, w) in ctx.delta(*a).iter() {
-                    out.add(l, value.clone(), w);
+                for (l, _, w) in ctx.delta(*a).triples() {
+                    out.add(l.clone(), value.clone(), w);
                 }
                 out
             }
@@ -236,21 +236,21 @@ impl Node {
                 let mut out = BTreeRelation::new();
                 let r_new = Updated { old: ctx.integral(*r), delta: ctx.delta(*r) };
                 // δL · R': new left rows joined against R as it will stand.
-                for (a, b, w1) in ctx.delta(*l).iter() {
-                    for (c, w2) in r_new.row(&b) {
-                        out.add(a.clone(), c, w1 * w2);
+                for (a, b, w1) in ctx.delta(*l).triples() {
+                    for (c, w2) in r_new.row(b) {
+                        out.add(a.clone(), c.clone(), w1 * w2);
                     }
                 }
                 // I(L) · δR: old left rows joined against R's changes, probed
                 // through the right-column index.
-                for (b, c, w2) in ctx.delta(*r).iter() {
-                    for (a, w1) in linv.row(&b) {
-                        out.add(a, c.clone(), w1 * w2);
+                for (b, c, w2) in ctx.delta(*r).triples() {
+                    for (a, w1) in linv.row_ref(b) {
+                        out.add(a.clone(), c.clone(), w1 * w2);
                     }
                 }
                 // Maintain linv = ~I(L) (after both terms read the old state).
-                for (a, b, w) in ctx.delta(*l).iter() {
-                    linv.add(b, a, w);
+                for (a, b, w) in ctx.delta(*l).triples() {
+                    linv.add(b.clone(), a.clone(), w);
                 }
                 out
             }
@@ -258,18 +258,21 @@ impl Node {
                 let mut out = BTreeRelation::new();
                 let r_new = Updated { old: ctx.integral(*r), delta: ctx.delta(*r) };
                 // g(δL, R'): changed left values against R as it will stand.
-                for k in ctx.delta(*l).domain() {
-                    for (b, w1) in ctx.delta(*l).row(&k) {
-                        for (c, w2) in r_new.row(&k) {
-                            f.apply(&mut out, &k, &b, &c, w1 * w2);
+                // R's merged row is materialized once per key, not per pair.
+                for (k, lrow) in ctx.delta(*l).rows() {
+                    let r_row: Vec<(&Value, i64)> = r_new.row(k).collect();
+                    for (b, w1) in lrow {
+                        for &(c, w2) in &r_row {
+                            f.apply(&mut out, k, b, c, w1 * w2);
                         }
                     }
                 }
                 // g(I(L), δR): old left values against R's changes.
-                for k in ctx.delta(*r).domain() {
-                    for (c, w2) in ctx.delta(*r).row(&k) {
-                        for (b, w1) in ctx.integral(*l).row(&k) {
-                            f.apply(&mut out, &k, &b, &c, w1 * w2);
+                for (k, drow) in ctx.delta(*r).rows() {
+                    let Some(lrow) = ctx.integral(*l).row_map(k) else { continue };
+                    for (c, w2) in drow {
+                        for (b, w1) in lrow {
+                            f.apply(&mut out, k, b, c, w1 * w2);
                         }
                     }
                 }
@@ -278,8 +281,8 @@ impl Node {
             Node::Semijoin { l, r, linv } => {
                 let out =
                     semijoin_delta(ctx.delta(*l), linv, ctx.integral(*r), ctx.delta(*r));
-                for (a, b, w) in ctx.delta(*l).iter() {
-                    linv.add(b, a, w);
+                for (a, b, w) in ctx.delta(*l).triples() {
+                    linv.add(b.clone(), a.clone(), w);
                 }
                 out
             }
@@ -287,14 +290,14 @@ impl Node {
                 // δ(L − L[R]) = δL − δ(L[R]).
                 let sj = semijoin_delta(ctx.delta(*l), linv, ctx.integral(*r), ctx.delta(*r));
                 let mut out = BTreeRelation::new();
-                for (a, b, w) in ctx.delta(*l).iter() {
-                    out.add(a, b, w);
+                for (a, b, w) in ctx.delta(*l).triples() {
+                    out.add(a.clone(), b.clone(), w);
                 }
-                for (a, b, w) in sj.iter() {
-                    out.add(a, b, -w);
+                for (a, b, w) in sj.triples() {
+                    out.add(a.clone(), b.clone(), -w);
                 }
-                for (a, b, w) in ctx.delta(*l).iter() {
-                    linv.add(b, a, w);
+                for (a, b, w) in ctx.delta(*l).triples() {
+                    linv.add(b.clone(), a.clone(), w);
                 }
                 out
             }
@@ -302,16 +305,16 @@ impl Node {
                 // Pointwise: only pairs touched by either delta can change.
                 let (da, db) = (ctx.delta(*a), ctx.delta(*b));
                 let (ia, ib) = (ctx.integral(*a), ctx.integral(*b));
-                let mut touched: BTreeSet<(Value, Value)> = BTreeSet::new();
-                for (l, r, _) in da.iter().chain(db.iter()) {
+                let mut touched: BTreeSet<(&Value, &Value)> = BTreeSet::new();
+                for (l, r, _) in da.triples().chain(db.triples()) {
                     touched.insert((l, r));
                 }
                 let mut out = BTreeRelation::new();
                 for (l, r) in touched {
-                    let old = ia.weight(&l, &r).min(ib.weight(&l, &r));
-                    let new = (ia.weight(&l, &r) + da.weight(&l, &r))
-                        .min(ib.weight(&l, &r) + db.weight(&l, &r));
-                    out.add(l, r, new - old);
+                    let old = ia.weight(l, r).min(ib.weight(l, r));
+                    let new = (ia.weight(l, r) + da.weight(l, r))
+                        .min(ib.weight(l, r) + db.weight(l, r));
+                    out.add(l.clone(), r.clone(), new - old);
                 }
                 out
             }
@@ -321,9 +324,9 @@ impl Node {
                 let clamp = |w: i64| (w > 0) as i64;
                 let old = ctx.integral(*a);
                 let mut out = BTreeRelation::new();
-                for (l, r, dw) in ctx.delta(*a).iter() {
-                    let before = old.weight(&l, &r);
-                    out.add(l, r, clamp(before + dw) - clamp(before));
+                for (l, r, dw) in ctx.delta(*a).triples() {
+                    let before = old.weight(l, r);
+                    out.add(l.clone(), r.clone(), clamp(before + dw) - clamp(before));
                 }
                 out
             }
@@ -331,20 +334,20 @@ impl Node {
                 let delta = ctx.delta(*input);
                 let upd = Updated { old: ctx.integral(*input), delta };
                 let mut out = BTreeRelation::new();
-                for k in delta.domain() {
-                    let prev = st.get(&k).cloned().unwrap_or_default();
+                for (k, drow) in delta.rows() {
+                    let prev = st.get(k).cloned().unwrap_or_default();
                     // Group tier: fold the delta into the running (sum, count).
                     let mut sum = prev.sum;
                     let mut count = prev.count;
-                    for (v, w) in delta.row(&k) {
+                    for (v, w) in drow {
                         sum += v.as_i64().unwrap_or(0) * w;
                         count += w;
                     }
                     // Presence must match batch exactly: a key is emitted iff
                     // its merged image has any nonzero-weight entry (mixed-sign
                     // groups can be present with count == 0).
-                    let merged = upd.row(&k);
-                    let new_out = if merged.is_empty() {
+                    let present = upd.has_left(k);
+                    let new_out = if !present {
                         None
                     } else {
                         match kind {
@@ -357,15 +360,15 @@ impl Node {
                             }
                             // No inverse (SPEC §5): rescan this key's merged
                             // image, mirroring the batch accumulator.
-                            AggKind::Min => merged
-                                .iter()
-                                .filter(|&(_, w)| *w > 0)
+                            AggKind::Min => upd
+                                .row(k)
+                                .filter(|&(_, w)| w > 0)
                                 .map(|(v, _)| v.as_i64().unwrap_or(0))
                                 .min()
                                 .map(|m| mk_num(m, *money)),
-                            AggKind::Max => merged
-                                .iter()
-                                .filter(|&(_, w)| *w > 0)
+                            AggKind::Max => upd
+                                .row(k)
+                                .filter(|&(_, w)| w > 0)
                                 .map(|(v, _)| v.as_i64().unwrap_or(0))
                                 .max()
                                 .map(|m| mk_num(m, *money)),
@@ -380,12 +383,12 @@ impl Node {
                             out.add(k.clone(), n.clone(), 1);
                         }
                     }
-                    if merged.is_empty() {
+                    if !present {
                         // Every entry cancelled, so the folded sums are 0 too:
                         // dropping the key keeps state proportional to live keys.
-                        st.remove(&k);
+                        st.remove(k);
                     } else {
-                        st.insert(k, KeyAgg { sum, count, last_out: new_out });
+                        st.insert(k.clone(), KeyAgg { sum, count, last_out: new_out });
                     }
                 }
                 out
@@ -401,17 +404,21 @@ pub(crate) struct Ctx<'a> {
     pub deltas: &'a [BTreeRelation],
     /// Pre-step integrals of every node.
     pub integrals: &'a [BTreeRelation],
-    /// Backfill boundary: nodes below this index are presenting their full
-    /// integral *as* their delta, so their integral must read as empty here
-    /// (otherwise the history would be counted twice). 0 during a normal step.
+    /// Backfill boundary: nodes below this index present their full integral
+    /// *as* their delta (see [`Ctx::delta`]), so their integral must read as
+    /// empty here (otherwise the history would be counted twice). 0 during a
+    /// normal step.
     pub floor: usize,
 }
 
 static EMPTY: std::sync::LazyLock<BTreeRelation> = std::sync::LazyLock::new(BTreeRelation::new);
 
 impl Ctx<'_> {
-    fn delta(&self, id: NodeId) -> &BTreeRelation {
-        &self.deltas[id.0]
+    /// This step's delta of a child. During a backfill, below-floor nodes
+    /// present their full integral *as* their delta — by reference, so the
+    /// history replay copies nothing.
+    pub(crate) fn delta(&self, id: NodeId) -> &BTreeRelation {
+        if id.0 < self.floor { &self.integrals[id.0] } else { &self.deltas[id.0] }
     }
 
     /// Pre-step integral of a child (empty for nodes being replayed as deltas
@@ -433,19 +440,19 @@ fn semijoin_delta(
     let r_new = Updated { old: r_old, delta: r_delta };
     let mut out = BTreeRelation::new();
     // δL ⋉ M': new left rows kept iff their right key is live after the step.
-    for (a, b, w) in delta_l.iter() {
-        if r_new.has_left(&b) {
-            out.add(a, b, w);
+    for (a, b, w) in delta_l.triples() {
+        if r_new.has_left(b) {
+            out.add(a.clone(), b.clone(), w);
         }
     }
     // I(L) ⋉ (M' − M): keys whose membership flips replay their I(L) slice.
-    for b in r_delta.domain() {
-        let before = r_old.has_left(&b);
-        let after = r_new.has_left(&b);
+    for b in r_delta.keys() {
+        let before = r_old.has_left(b);
+        let after = r_new.has_left(b);
         if before != after {
             let sign = if after { 1 } else { -1 };
-            for (a, w) in linv.row(&b) {
-                out.add(a, b.clone(), sign * w);
+            for (a, w) in linv.row_ref(b) {
+                out.add(a.clone(), b.clone(), sign * w);
             }
         }
     }
@@ -466,27 +473,63 @@ pub struct Updated<'a> {
     pub delta: &'a BTreeRelation,
 }
 
-impl Updated<'_> {
+impl<'a> Updated<'a> {
     /// Post-step weight of a pair.
     pub fn weight(&self, l: &Value, r: &Value) -> i64 {
         self.old.weight(l, r) + self.delta.weight(l, r)
     }
 
-    /// Post-step row at `l`: merged, weights summed, zero entries pruned.
-    pub fn row(&self, l: &Value) -> BTreeMap<Value, i64> {
-        let mut merged: BTreeMap<Value, i64> = BTreeMap::new();
-        for (r, w) in self.old.row(l).chain(self.delta.row(l)) {
-            *merged.entry(r).or_insert(0) += w;
+    /// Post-step row at `l`: a sorted merge of the old and delta rows, weights
+    /// summed, zero entries skipped — single pass, no allocation.
+    pub fn row(&self, l: &Value) -> impl Iterator<Item = (&'a Value, i64)> + use<'a> {
+        MergeSum {
+            a: self.old.row_ref(l).peekable(),
+            b: self.delta.row_ref(l).peekable(),
         }
-        merged.retain(|_, w| *w != 0);
-        merged
     }
 
     /// Post-step domain membership. This must merge-and-sum: a row whose old
     /// and delta weights cancel to zero counts as *absent* — the case semijoin
-    /// flip detection depends on.
+    /// flip detection depends on. Short-circuits on the first surviving entry.
     pub fn has_left(&self, l: &Value) -> bool {
-        !self.row(l).is_empty()
+        self.row(l).next().is_some()
+    }
+}
+
+/// Sorted merge-join of two `(key, weight)` streams, summing weights on equal
+/// keys and skipping entries that cancel to zero. Both inputs must be sorted
+/// by key (BTree row order guarantees it).
+struct MergeSum<K: Ord, A: Iterator<Item = (K, i64)>, B: Iterator<Item = (K, i64)>> {
+    a: std::iter::Peekable<A>,
+    b: std::iter::Peekable<B>,
+}
+
+impl<K: Ord, A: Iterator<Item = (K, i64)>, B: Iterator<Item = (K, i64)>> Iterator
+    for MergeSum<K, A, B>
+{
+    type Item = (K, i64);
+
+    fn next(&mut self) -> Option<(K, i64)> {
+        loop {
+            let ord = match (self.a.peek(), self.b.peek()) {
+                (None, None) => return None,
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (Some((ka, _)), Some((kb, _))) => ka.cmp(kb),
+            };
+            match ord {
+                std::cmp::Ordering::Less => return self.a.next(),
+                std::cmp::Ordering::Greater => return self.b.next(),
+                std::cmp::Ordering::Equal => {
+                    let (k, wa) = self.a.next().expect("peeked");
+                    let (_, wb) = self.b.next().expect("peeked");
+                    // A cancelled entry counts as absent — keep scanning.
+                    if wa + wb != 0 {
+                        return Some((k, wa + wb));
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -517,9 +560,8 @@ mod tests {
         let old = rel(&[(1, 10, 1), (1, 11, 1)]);
         let delta = rel(&[(1, 10, -1)]);
         let u = Updated { old: &old, delta: &delta };
-        let row = u.row(&int(1));
-        assert_eq!(row.len(), 1);
-        assert_eq!(row.get(&int(11)), Some(&1));
+        let row: Vec<(Value, i64)> = u.row(&int(1)).map(|(v, w)| (v.clone(), w)).collect();
+        assert_eq!(row, vec![(int(11), 1)]);
     }
 
     #[test]

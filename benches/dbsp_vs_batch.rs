@@ -18,6 +18,7 @@ use rex::eval::interp::lit_value;
 use rex::eval::{self, Value};
 use rex::types::typed::{TProgram, TStmt, TValue};
 use std::collections::HashMap;
+use std::time::Duration;
 
 const SEED: u64 = 0xC0FFEE;
 
@@ -63,26 +64,36 @@ fn apply_all(engine: &mut Engine, stmts: &[TStmt], values: &mut HashMap<String, 
     }
 }
 
-fn bench_cold_start(c: &mut Criterion, label: &str, scale: Scale, sample_size: Option<usize>) {
+/// `tuning` is `(sample_size, measurement_time_secs)` — larger scales need
+/// fewer samples and a longer measurement window than Criterion's defaults
+/// (100 samples / 5s), or every run prints "unable to complete N samples"
+/// warnings and silently truncates the sample count anyway.
+fn bench_cold_start(c: &mut Criterion, label: &str, scale: Scale, tuning: Option<(usize, u64)>) {
     let (src, counts) = dataset::generate(scale, SEED);
     let typed = elaborate(&src);
     let news_end = counts.total_news();
 
     let mut group = c.benchmark_group(format!("cold_start/{label}"));
-    if let Some(n) = sample_size {
+    if let Some((n, secs)) = tuning {
         group.sample_size(n);
+        group.measurement_time(Duration::from_secs(secs));
     }
 
     // Batch has no way to separate loading data from computing views — this
     // is its one, natural full-pipeline number.
-    group.bench_function("batch/full_eval", |b| b.iter(|| eval::run_typed_values(&typed)));
+    group.bench_function("batch/full_eval", |b| {
+        b.iter_with_large_drop(|| eval::run_typed_values(&typed))
+    });
 
     // Apples-to-apples against batch/full_eval: fresh engine, load everything,
     // define every view (which backfills it over the data just loaded).
     group.bench_function("dbsp/full_load_and_backfill", |b| {
         b.iter_batched(
             || (Engine::new(), HashMap::new()),
-            |(mut engine, mut values)| apply_all(&mut engine, &typed.stmts, &mut values),
+            |(mut engine, mut values)| {
+                apply_all(&mut engine, &typed.stmts, &mut values);
+                (engine, values)
+            },
             BatchSize::LargeInput,
         )
     });
@@ -99,7 +110,8 @@ fn bench_cold_start(c: &mut Criterion, label: &str, scale: Scale, sample_size: O
                 (engine, values)
             },
             |(mut engine, mut values)| {
-                apply_all(&mut engine, &typed.stmts[news_end..], &mut values)
+                apply_all(&mut engine, &typed.stmts[news_end..], &mut values);
+                (engine, values)
             },
             BatchSize::LargeInput,
         )
@@ -109,15 +121,16 @@ fn bench_cold_start(c: &mut Criterion, label: &str, scale: Scale, sample_size: O
 }
 
 fn cold_start_benches(c: &mut Criterion) {
-    bench_cold_start(c, "small", SMALL, None);
-    bench_cold_start(c, "medium", MEDIUM, None);
-    bench_cold_start(c, "large", LARGE, Some(10));
+    bench_cold_start(c, "small", SMALL, None); // ~ms-scale ops: 100 samples fit in the default 5s fine
+    bench_cold_start(c, "medium", MEDIUM, Some((30, 10)));
+    bench_cold_start(c, "large", LARGE, Some((10, 25)));
 }
 
 fn incremental_benches(c: &mut Criterion) {
     let base = MEDIUM;
     let mut group = c.benchmark_group("incremental_delta");
     group.sample_size(10);
+    group.measurement_time(Duration::from_secs(10));
 
     for k in [1usize, 10, 100, 1_000] {
         let extended = Scale { lines: base.lines + k, ..base };
@@ -140,8 +153,12 @@ fn incremental_benches(c: &mut Criterion) {
                     apply_all(&mut engine, &typed.stmts[delta_news_end..], &mut values);
                     (engine, values)
                 },
+                // Return the engine so criterion drops it *outside* the timed
+                // region — dropping ~30 populated integrals costs ~20ms and
+                // otherwise swamps the per-delta cost being measured.
                 |(mut engine, mut values)| {
-                    apply_all(&mut engine, &typed.stmts[base_news_end..delta_news_end], &mut values)
+                    apply_all(&mut engine, &typed.stmts[base_news_end..delta_news_end], &mut values);
+                    (engine, values)
                 },
                 BatchSize::LargeInput,
             )
@@ -150,12 +167,23 @@ fn incremental_benches(c: &mut Criterion) {
         // Batch's only option: recompute everything (base + delta) from
         // scratch every time.
         group.bench_with_input(BenchmarkId::new("batch/full_recompute", k), &k, |b, _| {
-            b.iter(|| eval::run_typed_values(&typed))
+            b.iter_with_large_drop(|| eval::run_typed_values(&typed))
         });
     }
 
     group.finish();
 }
 
-criterion_group!(benches, cold_start_benches, incremental_benches);
+// Small/fast benchmarks (a few ms) are noisy enough on a dev laptop that the
+// default 1% noise threshold flags normal jitter as "improved"/"regressed"
+// between otherwise-identical runs; widen it so only real changes get flagged.
+fn config() -> Criterion {
+    Criterion::default().noise_threshold(0.05)
+}
+
+criterion_group! {
+    name = benches;
+    config = config();
+    targets = cold_start_benches, incremental_benches
+}
 criterion_main!(benches);
