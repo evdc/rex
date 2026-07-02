@@ -15,8 +15,21 @@ What is the overall goal and plan here
 - (Also) extend this to declarative, relational/ontology driven distributed systems (Firmament)
 
 What are the pieces
-- Elysium - prototype language/framework for reactive relational web apps
-- Ripple - relational programming language impl. in Rust, currently compiles to SQLite
-- Reactor-ts -- minimal DBSP runtime + events, in TS, as the engine for the frontend. Includes a minimal "platform" + handwritten (well, Claude-written) "compiled" code, showing what the target code using the platform *could* look like; no compiler/frontend.
+- Elysium -- prototype language/framework for reactive relational web apps, compile-to-JS
+- Ripple -- relational programming language impl. in Rust, currently compiles to SQLite. An attempt at more rigorously building the frontend for Elysium.
+- Reactor-ts -- minimal DBSP runtime + events, in TS, as the engine for the frontend. Includes a minimal "platform" + handwritten (well, Claude-written) "compiled" code, showing what the target code using the platform *could* look like; no compiler/frontend. An attempt at more rigorously building the backend for Elysium.
 - This Claude chat (https://claude.ai/chat/64e524e6-9a48-429c-8fb3-c4fdce30948c) and spec doc: incremental maintenance of nested structures = composite keys (+ a prefix op on composite keys?). 
+- Rex -- minimal relational language based on binary relational combinators, in Rust. 
+
+A rough sketch of a plan
+- Rex:
+    - Compile to DBSP - work out a way to do this
+    - Extend that with incremental maintenance of "nested" relations
+    - Use that to prototype UI (via compile-to-JS? via WASM + JS bridge?)
+- Reactor-ts:
+    - Rebuild the backend/platform against the spec for incremental maintenance of nested structures(?)
+        - or at least evaluate it against that
+- Ripple:
+    - 
+    
 

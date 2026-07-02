@@ -250,7 +250,9 @@ fn agg_of(kind: AggKind) -> Agg {
     }
 }
 
-fn lit_value(lit: &Lit) -> Value {
+/// Convert a types-level literal into a runtime [`Value`]. Shared with the
+/// incremental backend's lowering and filter kernels.
+pub fn lit_value(lit: &Lit) -> Value {
     match lit {
         Lit::Int(n) => Value::Int(*n),
         Lit::Decimal(s) => Value::money_from_decimal(s),
@@ -264,7 +266,9 @@ fn lit_value(lit: &Lit) -> Value {
     }
 }
 
-fn predicate(pred: &Pred) -> Box<dyn Fn(&Value) -> bool> {
+/// Build the grounded-value predicate a [`Pred`] denotes. Shared with the
+/// incremental backend's filter kernel.
+pub fn predicate(pred: &Pred) -> Box<dyn Fn(&Value) -> bool> {
     match pred {
         Pred::Cmp(op, lit) => {
             let op = *op;
@@ -278,7 +282,9 @@ fn predicate(pred: &Pred) -> Box<dyn Fn(&Value) -> bool> {
     }
 }
 
-fn mul_values(a: &Value, b: &Value, money: bool) -> Value {
+/// `a * b` on the shared numeric scale, tagged `Money` or `Int`. Shared with
+/// the incremental backend's co-keyed kernel.
+pub fn mul_values(a: &Value, b: &Value, money: bool) -> Value {
     let n = a.as_i64().unwrap_or(0) * b.as_i64().unwrap_or(0);
     if money {
         Value::Money(n)
@@ -287,14 +293,18 @@ fn mul_values(a: &Value, b: &Value, money: bool) -> Value {
     }
 }
 
-fn concat_values(a: &Value, b: &Value) -> Value {
+/// `a || b` text concatenation. Shared with the incremental backend's co-keyed
+/// kernel.
+pub fn concat_values(a: &Value, b: &Value) -> Value {
     match (a, b) {
         (Value::Text(x), Value::Text(y)) => Value::Text(format!("{x}{y}")),
         _ => Value::Text(format!("{a}{b}")),
     }
 }
 
-fn compare_values(op: crate::ast::CmpOp, a: &Value, b: &Value) -> bool {
+/// Compare two values, cents-aware across Int/Money. Shared with the
+/// incremental backend's co-keyed kernel.
+pub fn compare_values(op: crate::ast::CmpOp, a: &Value, b: &Value) -> bool {
     use crate::ast::CmpOp::*;
     if let (Some(x), Some(y)) = (a.as_cents(), b.as_cents()) {
         return match op {

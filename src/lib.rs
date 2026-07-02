@@ -4,6 +4,7 @@
 //! progress) the static type/soundness checker. See `SPEC.md` for the design.
 
 pub mod ast;
+pub mod dbsp;
 pub mod diagnostic;
 pub mod eval;
 pub mod lexer;
