@@ -10,10 +10,12 @@ This repository is the **compiler front end plus a batch reference interpreter**
 The design is captured in `SPEC.md` (working notes, not a spec — read it first);
 `drafts.md` holds looser ideas and project context.
 
-> **Status:** the non-recursive core parses, type-checks, elaborates, and
-> evaluates end-to-end. The §12 worked example from the spec runs and produces
-> correct results. Everything is **batch/eager** — there is no DBSP lowering,
-> no incremental maintenance, and no recursion yet.
+> **Status:** the core parses, type-checks, elaborates, and evaluates
+> end-to-end, both through the batch reference interpreter and through a
+> **DBSP circuit backend** with incremental maintenance (`src/dbsp/`). The §12
+> worked example runs and produces correct results in both. **Recursion (§8)
+> is in**: `let recursive` fixpoint views, mutual-recursion groups, the
+> stratification check, and a nested Enter/Exit fix region in the circuit.
 
 ---
 
@@ -90,35 +92,48 @@ Key design choices realized in code:
   a key's image Z-set, respecting weights.
 - ✅ Batch interpreter; REPL with session state and `/import`.
 - ✅ The §12 worked example type-checks and evaluates correctly.
+- ✅ **DBSP backend** (`src/dbsp/`): lowering of the typed AST to a circuit of
+  delta kernels, incremental view maintenance (inserts/retractions), backfill
+  of views added over existing data, property-tested against the batch algebra.
+- ✅ **Recursion (§8)**: `let recursive path : Node -> Node = edge + edge . path`.
+  **Consecutive `let recursive` statements form one fixpoint group** (mutual
+  recursion; any other statement ends the group); annotations are mandatory
+  (they seed the self-reference's type). Semantics is the joint least fixpoint
+  — Kleene iteration from ∅ with a **forced `distinct` at the knot**. The
+  batch interpreter runs the Kleene loop directly; the circuit backend wraps a
+  nested inner circuit in an Enter/Exit **fix region** (`Circuit::fixes`):
+  imports enter as δ₀, the feedback slot is the z⁻¹ edge, inner integrals make
+  iteration semi-naive, and Exit diffs the converged fixpoint against the
+  previous step's. Cost model: recursion is **non-linear** — each outer step
+  re-derives the fixpoint (O(closure), not O(Δ)); fully incremental nested
+  deltas are future work.
+- ✅ **Stratification check** (`src/types/strat.rs`): consumes the `monotone`
+  bits of `operator.rs` — no non-monotone operator (`distinct`,
+  `except`/`antijoin`, aggregation) may sit above a recursive occurrence.
+  (`&` is monotone — min of weights — and is allowed under recursion.)
 
 ---
 
 ## What's left to do (roughly in spec order)
 
-1. **Groundedness analysis (§9.1) — required by the spec for v1, not yet built.**
-   The operator table records `Infinite` for `<`, `*`, etc., but nothing enforces
-   that infinite relations are grounded by finite application. Today an ungrounded
-   program isn't rejected; it just silently evaluates to something empty/wrong
-   (e.g. a standalone coreflexive over a non-entity domain — see below).
-2. **DBSP lowering + incremental maintenance — the entire thesis.** The evaluator
-   is batch/eager (`algebra.rs`: "every operation fully materializes"). There are
-   no circuits, no delta processing, no IVM. This is the biggest gap between the
-   code and the design.
-3. **Recursion `fix` + stratification (§8).** Parked by design; the monotonicity
-   bits in `operator.rs` are forward-compat only, with no consumer.
-4. **Analysis consumers.** Set-ness (drop redundant `distinct`), linearity cost
-   model surfaced to users, delta fan-out warning (§10) — all unimplemented; the
-   metadata table has no readers.
-5. **Value-algebra completeness.** Coproducts exist in the *type* system but have
+1. **Fully incremental recursion.** The fix region re-derives its fixpoint each
+   outer step (semi-naive within the step, O(closure) across steps); the DBSP
+   nested-delta construction would make an edge insert cost only the newly
+   derivable paths.
+2. **Analysis consumers.** Set-ness (drop redundant `distinct`), linearity cost
+   model surfaced to users, delta fan-out warning (§10) — unimplemented; of the
+   metadata table only the `monotone` bits (stratification, §8) and `grounding`
+   have readers.
+3. **Value-algebra completeness.** Coproducts exist in the *type* system but have
    no runtime injection/case forms — there's no `inl/inr`, no way to construct or
    match `(V + Unit)`, so the "no NULL, use `V + Unit`" story isn't realizable at
    runtime yet. Fork builds `Pair` values but there are **no projection
    combinators** (`fst`/`snd`/`outl`/`outr`), so a forked pair is a dead end
    except at serialization.
-6. **Edge/serialization layer.** Wide-row assembly, ORDER BY, top-N (§11) — none
+4. **Edge/serialization layer.** Wide-row assembly, ORDER BY, top-N (§11) — none
    exist. Views print as raw `left → right` pairs.
-7. **`from E:` blocks** (§4 secondary sugar) — not parsed.
-8. **The `+` naming collision** (§11) is unresolved in surface syntax (`+` is
+5. **`from E:` blocks** (§4 secondary sugar) — not parsed.
+6. **The `+` naming collision** (§11) is unresolved in surface syntax (`+` is
    union; arithmetic add isn't spelled at all — only `*` and `||` exist).
 
 ---
@@ -132,10 +147,10 @@ Key design choices realized in code:
   `BinCompare` now combines weights bilinearly (`wa * wb`), and `InRel` /
   standalone `Coreflexive` carry the source row's weight, so they produce faithful
   Z-set coreflexives instead of clamped weight-1 rows.
-- **Standalone `Coreflexive` silently yields empty off an entity domain.**
-  `src/eval/interp.rs:166` only materializes when `te.ty.from` is `ValueTy::Id`;
-  any other domain returns the empty relation with no error. This is the hole that
-  a real groundedness check (item 1 above) is supposed to close.
+- ~~**Standalone `Coreflexive` silently yields empty off an entity domain.**~~
+  **Closed** by the groundedness pass (`src/types/ground.rs`): an infinite
+  built-in with no enumerable domain is now a check-time error, so the
+  interpreter's `ValueTy::Id`-only materialization is unreachable otherwise.
 - **Aggregation of an empty group produces no row.** `sum`/`count` over a key with
   no image emit nothing rather than `0` — there's no outer key to range over, so
   "count of customers with zero orders" is unrepresentable. Standard group-by
@@ -167,11 +182,10 @@ Key design choices realized in code:
 
 - ~~Duplicate interpreter entry points `run_typed`/`run_typed_values`.~~
   **Done** — collapsed to the single `run_typed_values`.
-- ~~`operator.rs` is dead metadata that can silently drift.~~ **Partly addressed** —
-  it's still forward-compat with no runtime consumer (by design), but a test now
-  guards that every combinator has an entry and that names are unique, so the
-  table can't drift from the operator set unnoticed. Wiring a `TExprKind → OpMeta`
-  lookup for a real linearity/groundedness pass is still future work.
+- ~~`operator.rs` is dead metadata that can silently drift.~~ **Mostly addressed** —
+  a test guards that every combinator has an entry and that names are unique, and
+  the `monotone` bits now have a real consumer (`src/types/strat.rs`, the §8
+  stratification check). The linearity bits still have no reader.
 - ~~`Value::is_money` is unused.~~ **Removed.**
 - ~~The `spec12.rex` fixture's `result` line deviates from SPEC §12.~~ **Done** — a
   correction note is now in SPEC §12 pointing at the fixture, so the two no longer
@@ -201,4 +215,12 @@ Gaps:
   `src/eval/value.rs`.
 - ~~No test asserting the operator table stays in sync.~~ **Added** in
   `src/operator.rs`.
-- **No REPL tests** (session commit, scratch eval, `/import`).
+- ~~No REPL tests.~~ **Partly added** in `src/repl.rs` (session commit, scratch
+  eval, retraction, failed-line rollback, recursive-group extension); `/import`
+  is still untested.
+- **Recursion is covered end-to-end**: checker (self-reference, groups,
+  mandatory annotations, stratification rejections), elaboration
+  (`LetRec`/`RecVar`), batch eval (chain/cycle/mutual/empty), the incremental
+  engine (backfill, cycle-closing insert, retraction), and a property test
+  oracling the fix region against a batch Kleene closure under random
+  insert/retract histories (`tests/dbsp.rs`).

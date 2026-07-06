@@ -30,10 +30,18 @@ fn enumerable(ty: &ValueTy) -> bool {
 pub fn check_groundedness(prog: &TProgram, env: &Env) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for stmt in &prog.stmts {
-        if let TStmt::Let { body, .. } = stmt {
-            walk(body, env, &mut out);
+        match stmt {
+            TStmt::Let { body, .. } => {
+                walk(body, env, &mut out);
+            }
+            TStmt::LetRec { bindings } => {
+                for (_, body) in bindings {
+                    walk(body, env, &mut out);
+                }
+            }
+            // `TStmt::New` field values are literals/refs — always grounded.
+            TStmt::New { .. } => {}
         }
-        // `TStmt::New` field values are literals/refs — always grounded.
     }
     out
 }
@@ -46,8 +54,9 @@ pub fn check_groundedness(prog: &TProgram, env: &Env) -> Vec<Diagnostic> {
 fn walk(e: &TExpr, env: &Env, out: &mut Vec<Diagnostic>) -> bool {
     use TExprKind::*;
     match &e.kind {
-        // Finite leaves.
-        Identity(_) | View(_) | ValueRef(_) | Field(_) | Const { .. } | Atom(_) => true,
+        // Finite leaves. A `RecVar` is grounded: the fixpoint iterates from the
+        // empty Z-set, so every iterate is finite when the rest of the body is.
+        Identity(_) | View(_) | RecVar(_) | ValueRef(_) | Field(_) | Const { .. } | Atom(_) => true,
 
         // The one leaf that can be ungrounded: an infinite built-in standing on its
         // own, grounded only when its domain is enumerable.

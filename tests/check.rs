@@ -177,3 +177,135 @@ fn grounded_filter_is_ok() {
     );
     assert_ok(&src);
 }
+
+// --- recursion (§8) ---------------------------------------------------------
+
+const GRAPH: &str = "\
+entity Node { name: Text }
+entity Edge { src: NodeID, dst: NodeID }
+let srcof : Edge -> Node = :src
+let dstof : Edge -> Node = :dst
+let edge : Node -> Node = dstof by srcof
+";
+
+fn with_graph(body: &str) -> String {
+    format!("{GRAPH}{body}")
+}
+
+#[test]
+fn recursive_self_reference_resolves() {
+    assert_ok(&with_graph(
+        "let recursive path : Node -> Node = edge + edge . path\n",
+    ));
+}
+
+#[test]
+fn non_recursive_self_reference_still_errors() {
+    assert_error_contains(
+        &with_graph("let path : Node -> Node = edge + edge . path\n"),
+        "unknown name `path`",
+    );
+}
+
+#[test]
+fn recursive_view_requires_annotation() {
+    assert_error_contains(
+        &with_graph("let recursive path = edge + edge . path\n"),
+        "needs a type annotation",
+    );
+}
+
+#[test]
+fn recursive_new_is_rejected() {
+    assert_error_contains(
+        &with_graph("let recursive x : Node -> Node = new Node { name: \"x\" }\n"),
+        "`new` cannot be `recursive`",
+    );
+}
+
+#[test]
+fn recursive_type_mismatch_is_reported() {
+    // Body is Edge -> Node, declared Node -> Node.
+    assert_error_contains(
+        &with_graph("let recursive p : Node -> Node = dstof\n"),
+        "type mismatch",
+    );
+}
+
+#[test]
+fn mutual_recursion_group_checks() {
+    // Consecutive recursive lets form one group; `odd` may reference the
+    // not-yet-defined `even`.
+    assert_ok(&with_graph(
+        "let recursive odd : Node -> Node = edge + edge . even\n\
+         let recursive even : Node -> Node = edge . odd\n",
+    ));
+}
+
+#[test]
+fn non_recursive_statement_breaks_the_group() {
+    // `mid` separates the two recursive lets, so `odd` cannot see `even`.
+    assert_error_contains(
+        &with_graph(
+            "let recursive odd : Node -> Node = edge + edge . even\n\
+             let mid : Node -> Node = edge\n\
+             let recursive even : Node -> Node = edge . odd\n",
+        ),
+        "unknown name `even`",
+    );
+}
+
+// --- rejection: §8 stratification -------------------------------------------
+
+#[test]
+fn distinct_over_recursive_occurrence_is_rejected() {
+    assert_error_contains(
+        &with_graph("let recursive p : Node -> Node = edge + distinct(edge . p)\n"),
+        "not monotone",
+    );
+}
+
+#[test]
+fn except_over_recursive_occurrence_is_rejected() {
+    assert_error_contains(
+        &with_graph("let recursive p : Node -> Node = edge except p\n"),
+        "not monotone",
+    );
+}
+
+#[test]
+fn intersect_over_recursive_occurrence_is_allowed() {
+    // `&` is elementwise min of weights — monotone in both arguments — so it
+    // is legal under recursion (unlike distinct/except/aggregation).
+    assert_ok(&with_graph("let recursive p : Node -> Node = edge & p\n"));
+}
+
+#[test]
+fn aggregation_over_recursive_occurrence_is_rejected() {
+    assert_error_contains(
+        &with_graph("let recursive w : Node -> Int = sum(w by edge)\n"),
+        "not monotone",
+    );
+}
+
+#[test]
+fn duplicate_names_in_a_group_are_rejected() {
+    assert_error_contains(
+        &with_graph(
+            "let recursive p : Node -> Node = edge + edge . p\n\
+             let recursive p : Node -> Node = edge . p\n",
+        ),
+        "duplicate recursive binding `p`",
+    );
+}
+
+#[test]
+fn non_monotone_off_the_recursive_path_is_fine() {
+    // `distinct(edge)` contains no recursive occurrence (a constant of the
+    // iteration), and applying `distinct` to the *converged* view in a later
+    // statement is the stratum boundary — both legal.
+    assert_ok(&with_graph(
+        "let recursive p : Node -> Node = distinct(edge) + edge . p\n\
+         let q : Node -> Node = distinct(p)\n",
+    ));
+}

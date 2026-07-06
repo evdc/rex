@@ -29,6 +29,7 @@ pub enum TokenKind {
     // Keywords
     KwEntity,
     KwLet,
+    KwRecursive,
     KwNew,
     KwWhere,
     KwBy,
@@ -70,6 +71,7 @@ impl TokenKind {
         Some(match word {
             "entity" => TokenKind::KwEntity,
             "let" => TokenKind::KwLet,
+            "recursive" => TokenKind::KwRecursive,
             "new" => TokenKind::KwNew,
             "where" => TokenKind::KwWhere,
             "by" => TokenKind::KwBy,
@@ -95,6 +97,7 @@ impl TokenKind {
             Date { year, month, day } => format!("date `{year:04}-{month:02}-{day:02}`"),
             KwEntity => "`entity`".into(),
             KwLet => "`let`".into(),
+            KwRecursive => "`recursive`".into(),
             KwNew => "`new`".into(),
             KwWhere => "`where`".into(),
             KwBy => "`by`".into(),

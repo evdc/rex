@@ -97,4 +97,20 @@ impl Engine {
         self.circuit.set_output(name, node);
         self.circuit.backfill(mark)
     }
+
+    /// Apply one recursion group (`let recursive …`, §8): lower the group's
+    /// nested fix region onto the circuit, register each member as a view, and
+    /// backfill over the data already integrated.
+    pub fn add_view_group(
+        &mut self,
+        bindings: &[(String, TExpr)],
+        values: &HashMap<String, Value>,
+    ) -> StepResult {
+        let mark = self.circuit.node_count();
+        let outs = super::lower::lower_group(&mut self.circuit, bindings, values);
+        for ((name, _), node) in bindings.iter().zip(outs) {
+            self.circuit.set_output(name, node);
+        }
+        self.circuit.backfill(mark)
+    }
 }

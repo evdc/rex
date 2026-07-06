@@ -112,3 +112,62 @@ fn aggregation_and_by_are_resolved() {
     assert_eq!(*kind, AggKind::Sum);
     assert!(matches!(arg.kind, TExprKind::By(_, _)));
 }
+
+// --- recursion (§8) ---------------------------------------------------------
+
+#[test]
+fn recursion_group_elaborates_to_letrec_with_recvar() {
+    let prog = elaborate(
+        "entity Node { name: Text }\n\
+         entity Edge { src: NodeID, dst: NodeID }\n\
+         let srcof : Edge -> Node = :src\n\
+         let dstof : Edge -> Node = :dst\n\
+         let edge : Node -> Node = dstof by srcof\n\
+         let recursive path : Node -> Node = edge + edge . path\n",
+    );
+    let bindings = prog
+        .stmts
+        .iter()
+        .find_map(|s| match s {
+            TStmt::LetRec { bindings } => Some(bindings),
+            _ => None,
+        })
+        .expect("a LetRec group");
+    assert_eq!(bindings.len(), 1);
+    let (name, body) = &bindings[0];
+    assert_eq!(name, "path");
+    // edge + edge . path  ==>  Union(View(edge), Compose(View(edge), RecVar(path)))
+    let TExprKind::Union(l, r) = &body.kind else {
+        panic!("expected Union, got {:?}", body.kind)
+    };
+    assert!(matches!(&l.kind, TExprKind::View(n) if n == "edge"));
+    let TExprKind::Compose(cl, cr) = &r.kind else {
+        panic!("expected Compose, got {:?}", r.kind)
+    };
+    assert!(matches!(&cl.kind, TExprKind::View(n) if n == "edge"));
+    assert!(matches!(&cr.kind, TExprKind::RecVar(n) if n == "path"));
+}
+
+#[test]
+fn mutual_group_is_one_letrec_in_binding_order() {
+    let prog = elaborate(
+        "entity Node { name: Text }\n\
+         entity Edge { src: NodeID, dst: NodeID }\n\
+         let srcof : Edge -> Node = :src\n\
+         let dstof : Edge -> Node = :dst\n\
+         let edge : Node -> Node = dstof by srcof\n\
+         let recursive odd : Node -> Node = edge + edge . even\n\
+         let recursive even : Node -> Node = edge . odd\n",
+    );
+    let groups: Vec<_> = prog
+        .stmts
+        .iter()
+        .filter_map(|s| match s {
+            TStmt::LetRec { bindings } => Some(bindings),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(groups.len(), 1, "consecutive recursive lets form ONE group");
+    let names: Vec<&str> = groups[0].iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["odd", "even"]);
+}

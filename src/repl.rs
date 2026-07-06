@@ -102,8 +102,10 @@ struct Session {
     src: String,
     /// AST statements already committed (for printing only the new ones).
     ast_count: usize,
-    /// Typed statements already applied to the engine.
-    typed_count: usize,
+    /// Typed statements already applied to the engine. Kept whole (not a
+    /// count) so a commit can detect when re-checking restructured the prefix
+    /// — a new `let recursive` merging into the previous recursion group.
+    typed_stmts: Vec<TStmt>,
     env: Env,
     engine: Engine,
     /// `new`-bound entity ids, resolved incrementally as statements apply.
@@ -151,7 +153,7 @@ impl Session {
         Session {
             src: String::new(),
             ast_count: 0,
-            typed_count: 0,
+            typed_stmts: Vec::new(),
             env: Env::new(),
             engine: Engine::new(),
             values: HashMap::new(),
@@ -245,41 +247,107 @@ impl Session {
             .expect("no diagnostics implies an elaborated program");
         self.env = checked.env;
 
-        // Entity declarations appear only in the AST (they produce no typed
-        // statement); walk the new AST suffix pairing each `let` with the next
-        // typed statement so prints come out in source order.
-        let mut ti = self.typed_count;
-        for stmt in &parsed.program.stmts[self.ast_count..] {
-            match stmt {
-                crate::ast::Stmt::Entity(e) => println!("entity {} defined", e.name),
-                crate::ast::Stmt::Let(_) => {
-                    self.apply_stmt(&typed.stmts[ti]);
-                    ti += 1;
+        // If re-checking restructured the already-applied prefix (a new
+        // `let recursive` adjacent to the previous statement merged into its
+        // recursion group), the circuit can't be extended in place: rebuild
+        // the engine and replay everything (ids are deterministic, §4).
+        let prefix_intact = typed.stmts.len() >= self.typed_stmts.len()
+            && typed.stmts[..self.typed_stmts.len()] == self.typed_stmts[..];
+        if !prefix_intact {
+            self.engine = Engine::new();
+            self.values.clear();
+            let stmts = typed.stmts.clone();
+            for stmt in &stmts {
+                self.replay_stmt(stmt);
+            }
+            println!("(recursion group extended; session re-evaluated)");
+            for stmt in &parsed.program.stmts[self.ast_count..] {
+                match stmt {
+                    crate::ast::Stmt::Entity(e) => println!("entity {} defined", e.name),
+                    crate::ast::Stmt::Let(l) => match &l.name {
+                        Some(name) => self.print_binding(name),
+                        None => println!("(anonymous binding ignored)"),
+                    },
                 }
             }
+        } else {
+            // Entity declarations appear only in the AST (they produce no
+            // typed statement); walk the new AST suffix pairing each `let`
+            // with the next typed statement so prints come out in source
+            // order. A run of consecutive recursive lets is one group — one
+            // typed statement.
+            let mut ti = self.typed_stmts.len();
+            let suffix = &parsed.program.stmts[self.ast_count..];
+            let mut si = 0;
+            while si < suffix.len() {
+                match &suffix[si] {
+                    crate::ast::Stmt::Entity(e) => {
+                        println!("entity {} defined", e.name);
+                        si += 1;
+                    }
+                    crate::ast::Stmt::Let(l) => {
+                        if l.recursive {
+                            while let Some(crate::ast::Stmt::Let(next)) = suffix.get(si)
+                                && next.recursive
+                            {
+                                si += 1;
+                            }
+                        } else {
+                            si += 1;
+                        }
+                        self.apply_stmt(&typed.stmts[ti]);
+                        ti += 1;
+                    }
+                }
+            }
+            debug_assert_eq!(ti, typed.stmts.len());
         }
-        debug_assert_eq!(ti, typed.stmts.len());
 
         self.ast_count = parsed.program.stmts.len();
-        self.typed_count = typed.stmts.len();
+        self.typed_stmts = typed.stmts;
         self.src = candidate;
         true
+    }
+
+    /// Re-apply one typed statement to a fresh engine (rebuild path): the
+    /// engine work of [`apply_stmt`] without the printing.
+    fn replay_stmt(&mut self, stmt: &TStmt) {
+        match stmt {
+            TStmt::New { name, sort, fields } => {
+                let resolved = self.resolve_fields(fields);
+                let (id, _) = self.engine.apply_new(*sort, &resolved);
+                if let Some(name) = name {
+                    self.values.insert(name.clone(), id);
+                }
+            }
+            TStmt::Let { name: Some(name), body } => {
+                self.engine.add_view(name, body, &self.values);
+            }
+            TStmt::Let { name: None, .. } => {}
+            TStmt::LetRec { bindings } => {
+                self.engine.add_view_group(bindings, &self.values);
+            }
+        }
+    }
+
+    fn resolve_fields(&self, fields: &[(String, TValue)]) -> Vec<(String, Value)> {
+        fields
+            .iter()
+            .map(|(f, tv)| {
+                let v = match tv {
+                    TValue::Lit(lit) => eval::interp::lit_value(lit),
+                    TValue::Ref(n) => self.values[n].clone(),
+                };
+                (f.clone(), v)
+            })
+            .collect()
     }
 
     /// Apply one newly committed typed statement to the engine.
     fn apply_stmt(&mut self, stmt: &TStmt) {
         match stmt {
             TStmt::New { name, sort, fields } => {
-                let resolved: Vec<(String, Value)> = fields
-                    .iter()
-                    .map(|(f, tv)| {
-                        let v = match tv {
-                            TValue::Lit(lit) => eval::interp::lit_value(lit),
-                            TValue::Ref(n) => self.values[n].clone(),
-                        };
-                        (f.clone(), v)
-                    })
-                    .collect();
+                let resolved = self.resolve_fields(fields);
                 let (id, result) = self.engine.apply_new(*sort, &resolved);
                 match name {
                     Some(name) => {
@@ -297,6 +365,12 @@ impl Session {
             // An anonymous view has no observable effect; don't grow the
             // circuit for it.
             TStmt::Let { name: None, .. } => println!("(anonymous binding ignored)"),
+            TStmt::LetRec { bindings } => {
+                self.engine.add_view_group(bindings, &self.values);
+                for (name, _) in bindings {
+                    self.print_binding(name);
+                }
+            }
         }
     }
 
@@ -485,12 +559,59 @@ mod tests {
     fn failed_line_leaves_state_untouched() {
         let mut session = Session::new();
         session.eval_committing_line("entity Customer { name: Text }");
-        let before = (session.ast_count, session.typed_count, session.engine.circuit.node_count());
+        let before = (
+            session.ast_count,
+            session.typed_stmts.len(),
+            session.engine.circuit.node_count(),
+        );
         assert!(!session.eval_committing_line("let x : Customer -> Text = :nosuchfield"));
         assert_eq!(
             before,
-            (session.ast_count, session.typed_count, session.engine.circuit.node_count())
+            (
+                session.ast_count,
+                session.typed_stmts.len(),
+                session.engine.circuit.node_count(),
+            )
         );
+    }
+
+    /// Recursive views commit line-by-line; a later adjacent recursive let
+    /// merges into the previous group, which restructures the typed prefix and
+    /// forces the rebuild path; data keeps flowing incrementally afterwards.
+    #[test]
+    fn recursive_group_extension_across_commits() {
+        let mut session = Session::new();
+        for line in [
+            "entity Node { name: Text }",
+            "entity Edge { src: NodeID, dst: NodeID }",
+            "let a = new Node { name: \"a\" }",
+            "let b = new Node { name: \"b\" }",
+            "let c = new Node { name: \"c\" }",
+            "let _ = new Edge { src: a, dst: b }",
+            "let _ = new Edge { src: b, dst: c }",
+            "let srcof : Edge -> Node = :src",
+            "let dstof : Edge -> Node = :dst",
+            "let edge : Node -> Node = dstof by srcof",
+            "let recursive path : Node -> Node = edge + edge . path",
+        ] {
+            assert!(session.eval_committing_line(line), "failed to commit: {line}");
+        }
+        // Chain a->b->c: closure is {ab, bc, ac}.
+        assert_eq!(session.engine.circuit.view("path").unwrap().len(), 3);
+
+        // Adjacent recursive let: re-checking merges it into `path`'s group,
+        // the applied prefix restructures, and the session rebuilds.
+        assert!(session.eval_committing_line(
+            "let recursive path2 : Node -> Node = edge + path2 . edge"
+        ));
+        assert_eq!(session.engine.circuit.view("path").unwrap().len(), 3);
+        assert_eq!(session.engine.circuit.view("path2").unwrap().len(), 3);
+
+        // New data still maintains both members incrementally.
+        assert!(session.eval_committing_line("let d = new Node { name: \"d\" }"));
+        assert!(session.eval_committing_line("let _ = new Edge { src: c, dst: d }"));
+        assert_eq!(session.engine.circuit.view("path").unwrap().len(), 6);
+        assert_eq!(session.engine.circuit.view("path2").unwrap().len(), 6);
     }
 
     impl Session {

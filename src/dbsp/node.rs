@@ -114,6 +114,22 @@ pub enum Node {
         money: bool,
         st: BTreeMap<Value, KeyAgg>,
     },
+    /// Placeholder inside a fix region's *inner* circuit, seeded by the region
+    /// driver and never computed: either an imported outer stream (the Enter/δ₀
+    /// side) or a member's feedback slot (the z⁻¹ edge). Which one it is lives
+    /// in the owning `FixRegion`'s tables.
+    FixInput,
+    /// The *outer* face of one recursion-group member (§8): its delta is
+    /// written by the fix-region driver in `Circuit::run` (the Exit side —
+    /// converged fixpoint diffed against the previous step's). `imports` are
+    /// the outer nodes feeding the region, duplicated here so `children()` —
+    /// and with it the topological invariant and the dirty-cone skip — needs
+    /// no access to the region table.
+    FixOutput {
+        region: usize,
+        member: usize,
+        imports: Vec<NodeId>,
+    },
 }
 
 /// Per-key aggregate state: running group sums and the value last emitted
@@ -161,7 +177,8 @@ impl Node {
     /// The node's inputs, for topology checks.
     pub fn children(&self) -> Vec<NodeId> {
         match self {
-            Node::Input(_) | Node::ConstSingleton { .. } => vec![],
+            Node::Input(_) | Node::ConstSingleton { .. } | Node::FixInput => vec![],
+            Node::FixOutput { imports, .. } => imports.clone(),
             Node::Inverse(a) | Node::Filter(a, _) | Node::InRel(a, _) | Node::MapConst(a, _) => {
                 vec![*a]
             }
@@ -175,6 +192,20 @@ impl Node {
         }
     }
 
+    /// Forget all accumulated private state. Fix-region inner circuits are
+    /// re-derived from scratch each outer step, so their nodes must start
+    /// every activation as if never run.
+    pub(crate) fn reset(&mut self) {
+        match self {
+            Node::ConstSingleton { fired, .. } => *fired = false,
+            Node::Compose { linv, .. }
+            | Node::Semijoin { linv, .. }
+            | Node::Antijoin { linv, .. } => *linv = BTreeRelation::new(),
+            Node::Aggregate { st, .. } => st.clear(),
+            _ => {}
+        }
+    }
+
     /// Compute this step's output delta from the children's deltas and their
     /// pre-step integrals. Discipline: a node may mutate only its *private*
     /// state (`linv`, aggregate accumulators, `fired`), and only after fully
@@ -183,7 +214,9 @@ impl Node {
     pub(crate) fn compute(&mut self, ctx: &Ctx<'_>) -> BTreeRelation {
         match self {
             // Inputs are seeded by the step driver; never computed.
-            Node::Input(_) => BTreeRelation::new(),
+            Node::Input(_) | Node::FixInput => BTreeRelation::new(),
+            // Handled by the fix-region driver in `Circuit::run`, never here.
+            Node::FixOutput { .. } => unreachable!("FixOutput is driven by the fix region"),
             Node::ConstSingleton { value, fired } => {
                 let mut out = BTreeRelation::new();
                 if !*fired {
@@ -423,7 +456,7 @@ impl Ctx<'_> {
 
     /// Pre-step integral of a child (empty for nodes being replayed as deltas
     /// during a backfill).
-    fn integral(&self, id: NodeId) -> &BTreeRelation {
+    pub(crate) fn integral(&self, id: NodeId) -> &BTreeRelation {
         if id.0 < self.floor { &EMPTY } else { &self.integrals[id.0] }
     }
 }

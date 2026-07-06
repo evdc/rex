@@ -166,3 +166,108 @@ fn spec12_runs_end_to_end() {
     assert_eq!(out[&cust(0)], Value::Money(7445));
     assert_eq!(out[&cust(1)], Value::Money(12250));
 }
+
+// --- recursion (§8) ---------------------------------------------------------
+
+/// A four-node graph program: `a`..`d`, the given edges, an `edge` view, and
+/// `views` appended (typically recursive lets).
+fn graph_src(edges: &[(&str, &str)], views: &str) -> String {
+    let mut s = String::from(
+        "entity Node { name: Text }\nentity Edge { src: NodeID, dst: NodeID }\n",
+    );
+    for n in ["a", "b", "c", "d"] {
+        s.push_str(&format!("let {n} = new Node {{ name: \"{n}\" }}\n"));
+    }
+    for (x, y) in edges {
+        s.push_str(&format!("let _ = new Edge {{ src: {x}, dst: {y} }}\n"));
+    }
+    s.push_str(
+        "let srcof : Edge -> Node = :src\n\
+         let dstof : Edge -> Node = :dst\n\
+         let edge : Node -> Node = dstof by srcof\n",
+    );
+    s.push_str(views);
+    s
+}
+
+/// A view's pairs as node indices (`a`=0 .. `d`=3), sorted, asserting every
+/// weight is 1 (set semantics at the knot).
+fn node_pairs(result: &rex::eval::EvalResult, name: &str) -> Vec<(u64, u64)> {
+    let node = |v: &Value| match v {
+        Value::Id(_, n) => *n,
+        other => panic!("expected a node id, got {other}"),
+    };
+    let mut out: Vec<(u64, u64)> = result
+        .view(name)
+        .unwrap_or_else(|| panic!("no view `{name}`"))
+        .iter()
+        .map(|(l, r, w)| {
+            assert_eq!(w, 1, "fixpoint views are sets");
+            (node(&l), node(&r))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+fn run_src(src: &str) -> rex::eval::EvalResult {
+    let parsed = parse(src);
+    assert!(parsed.diagnostics.is_empty(), "parse: {:?}", parsed.diagnostics);
+    run(&parsed.program)
+}
+
+#[test]
+fn transitive_closure_of_a_chain() {
+    let src = graph_src(
+        &[("a", "b"), ("b", "c"), ("c", "d")],
+        "let recursive path : Node -> Node = edge + edge . path\n",
+    );
+    assert_eq!(
+        node_pairs(&run_src(&src), "path"),
+        vec![(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
+    );
+}
+
+#[test]
+fn closure_terminates_on_a_cycle() {
+    // a -> b -> c -> a: every node reaches every node (incl. itself); the
+    // forced distinct at the knot is what stops the iteration.
+    let src = graph_src(
+        &[("a", "b"), ("b", "c"), ("c", "a")],
+        "let recursive path : Node -> Node = edge + edge . path\n",
+    );
+    let all: Vec<(u64, u64)> =
+        (0..3).flat_map(|l| (0..3).map(move |r| (l, r))).collect();
+    assert_eq!(node_pairs(&run_src(&src), "path"), all);
+}
+
+#[test]
+fn mutual_recursion_odd_even_paths() {
+    // odd = paths of odd length, even = paths of even (>= 2) length.
+    let src = graph_src(
+        &[("a", "b"), ("b", "c"), ("c", "d")],
+        "let recursive odd : Node -> Node = edge + edge . even\n\
+         let recursive even : Node -> Node = edge . odd\n",
+    );
+    let result = run_src(&src);
+    assert_eq!(
+        node_pairs(&result, "odd"),
+        vec![(0, 1), (0, 3), (1, 2), (2, 3)]
+    );
+    assert_eq!(node_pairs(&result, "even"), vec![(0, 2), (1, 3)]);
+}
+
+#[test]
+fn recursion_fixture_runs_end_to_end() {
+    let result = run_src(include_str!("fixtures/recursion.rex"));
+    assert_eq!(
+        node_pairs(&result, "path"),
+        vec![(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
+    );
+}
+
+#[test]
+fn empty_edge_relation_yields_empty_closure() {
+    let src = graph_src(&[], "let recursive path : Node -> Node = edge + edge . path\n");
+    assert_eq!(node_pairs(&run_src(&src), "path"), vec![]);
+}

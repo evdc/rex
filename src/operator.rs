@@ -44,7 +44,10 @@ pub const OPERATORS: &[OpMeta] = &[
     meta("inverse", Relational, true, true, Finite),
     meta("fork", Relational, true, true, Finite),
     meta("union", Relational, true, true, Finite),
-    meta("intersect", Relational, false, false, Finite),
+    // Elementwise `min` of weights is monotone in both arguments (§3.1 calls
+    // intersect non-*linear* only — it shares distinct's cost tier, not its
+    // non-monotonicity).
+    meta("intersect", Relational, true, false, Finite),
     meta("distinct", Relational, false, false, Finite),
     meta("except", Relational, false, false, Finite),
     meta("antijoin", Relational, false, false, Finite),
@@ -55,6 +58,9 @@ pub const OPERATORS: &[OpMeta] = &[
     meta("in", Relational, true, false, Infinite),
     meta("mul", Functional, true, true, Infinite),
     meta("concat", Functional, true, true, Infinite),
+    // The fixpoint itself is monotone (it *requires* a monotone body, §8) but
+    // firmly in the non-linear/expensive tier — never "free" like a filter.
+    meta("fix", Relational, true, false, Finite),
 ];
 
 const fn meta(
@@ -90,7 +96,7 @@ mod tests {
         let expected = [
             "compose", "restrict", "inverse", "fork", "union", "intersect",
             "distinct", "except", "antijoin", "by", "aggregate", "compare",
-            "in", "mul", "concat",
+            "in", "mul", "concat", "fix",
         ];
         for name in expected {
             assert!(lookup(name).is_some(), "missing metadata for `{name}`");

@@ -70,10 +70,10 @@ fn atoms() {
 #[test]
 fn identifiers_and_keywords() {
     assert_eq!(
-        kinds("entity let new where by distinct id in except antijoin from"),
+        kinds("entity let recursive new where by distinct id in except antijoin from"),
         vec![
-            KwEntity, KwLet, KwNew, KwWhere, KwBy, KwDistinct, KwId, KwIn, KwExcept, KwAntijoin,
-            KwFrom,
+            KwEntity, KwLet, KwRecursive, KwNew, KwWhere, KwBy, KwDistinct, KwId, KwIn, KwExcept,
+            KwAntijoin, KwFrom,
         ]
     );
     assert_eq!(

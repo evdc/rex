@@ -166,6 +166,23 @@ fn let_with_and_without_annotation() {
 }
 
 #[test]
+fn recursive_let() {
+    assert_eq!(
+        sexpr("let recursive path : Node -> Node = edge + edge . path"),
+        "(letrec path (-> Node Node) (union edge (compose edge path)))"
+    );
+    // The annotation is optional at parse time; the checker requires it.
+    assert_eq!(sexpr("let recursive p = e + e . p"), "(letrec p _ (union e (compose e p)))");
+}
+
+#[test]
+fn recursive_is_reserved() {
+    // `recursive` is a keyword now, so it cannot be a binding name.
+    let result = parse("let recursive = 42");
+    assert!(!result.diagnostics.is_empty());
+}
+
+#[test]
 fn anonymous_let() {
     assert_eq!(
         sexpr("let _ = new Line { qty: 3 }"),

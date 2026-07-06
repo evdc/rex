@@ -37,6 +37,10 @@ pub struct LetDecl {
     pub name: Option<String>,
     pub ty: Option<Type>,
     pub body: Expr,
+    /// `let recursive` — the body may reference the binding name (and the
+    /// names of adjacent recursive lets: consecutive recursive lets form one
+    /// fixpoint group, §8).
+    pub recursive: bool,
     pub span: Span,
 }
 

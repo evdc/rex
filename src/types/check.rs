@@ -30,6 +30,7 @@ pub fn check(program: &Program) -> CheckResult {
     let mut cx = Checker {
         env: Env::new(),
         diagnostics: Vec::new(),
+        rec_names: Default::default(),
     };
     let stmts = cx.run(program);
     let prog = TProgram { stmts };
@@ -39,6 +40,8 @@ pub fn check(program: &Program) -> CheckResult {
     if cx.diagnostics.is_empty() {
         cx.diagnostics
             .extend(super::ground::check_groundedness(&prog, &cx.env));
+        cx.diagnostics
+            .extend(super::strat::check_stratification(&prog));
     }
     let elaborated = if cx.diagnostics.is_empty() {
         Some(prog)
@@ -58,6 +61,9 @@ type TResult<T> = Result<T, Bail>;
 struct Checker {
     env: Env,
     diagnostics: Vec<Diagnostic>,
+    /// Names of the recursion group currently being checked: identifiers
+    /// matching these elaborate to `RecVar`, not `View`. Empty outside groups.
+    rec_names: std::collections::HashSet<String>,
 }
 
 impl Checker {
@@ -93,13 +99,31 @@ impl Checker {
                 }
             }
         }
-        // Pass 3: check & elaborate `let`s in order.
+        // Pass 3: check & elaborate `let`s in order. Consecutive recursive
+        // lets form one fixpoint group (§8); any other statement ends it.
         let mut stmts = Vec::new();
-        for stmt in &program.stmts {
-            if let Stmt::Let(l) = stmt
-                && let Ok(ts) = self.check_let(l)
-            {
-                stmts.push(ts);
+        let mut i = 0;
+        while i < program.stmts.len() {
+            match &program.stmts[i] {
+                Stmt::Let(l) if l.recursive => {
+                    let mut group = vec![l];
+                    while let Some(Stmt::Let(next)) = program.stmts.get(i + group.len())
+                        && next.recursive
+                    {
+                        group.push(next);
+                    }
+                    i += group.len();
+                    if let Ok(ts) = self.check_rec_group(&group) {
+                        stmts.push(ts);
+                    }
+                }
+                Stmt::Let(l) => {
+                    i += 1;
+                    if let Ok(ts) = self.check_let(l) {
+                        stmts.push(ts);
+                    }
+                }
+                Stmt::Entity(_) => i += 1,
             }
         }
         stmts
@@ -195,6 +219,74 @@ impl Checker {
             name: l.name.clone(),
             body,
         })
+    }
+
+    /// Check one recursion group. All member names are bound (from their
+    /// mandatory annotations) *before* any body is checked, so each body may
+    /// reference every member; those references elaborate to `RecVar`.
+    fn check_rec_group(&mut self, group: &[&LetDecl]) -> TResult<TStmt> {
+        let mut members: Vec<(String, RelTy, &LetDecl)> = Vec::new();
+        for l in group {
+            if matches!(l.body.kind, ExprKind::New { .. }) {
+                let _: TResult<()> =
+                    self.error(l.span, "`new` cannot be `recursive` — it creates data, not a view");
+                continue;
+            }
+            let Some(name) = l.name.clone() else {
+                let _: TResult<()> =
+                    self.error(l.span, "a recursive `let` needs a name for the self-reference");
+                continue;
+            };
+            let Some(ty) = &l.ty else {
+                let _: TResult<()> = self.error(
+                    l.span,
+                    format!("recursive view `{name}` needs a type annotation to seed the self-reference"),
+                );
+                continue;
+            };
+            let Ok(declared) = self.resolve_rel_type(ty) else {
+                continue;
+            };
+            // The group's fixpoint state is keyed by name in both backends, so
+            // duplicates would silently collapse — reject them outright.
+            if self.rec_names.contains(&name) {
+                let _: TResult<()> = self.error(
+                    l.span,
+                    format!("duplicate recursive binding `{name}` in this group"),
+                );
+                continue;
+            }
+            self.env.bind(&name, Binding::Rel(declared.clone()));
+            self.rec_names.insert(name.clone());
+            members.push((name, declared, l));
+        }
+
+        let complete = members.len() == group.len();
+        let mut bindings = Vec::new();
+        for (name, declared, l) in &members {
+            let Ok(body) = self.check_rel(&l.body, Some(declared.from.clone())) else {
+                continue;
+            };
+            if !self.rel_matches(declared, &body.ty) {
+                let msg = format!(
+                    "type mismatch: `{name}` is declared `{}` but its body is `{}`",
+                    self.env.show_rel(declared),
+                    self.env.show_rel(&body.ty),
+                );
+                let _: TResult<()> = self.error(l.body.span, msg);
+                continue;
+            }
+            bindings.push((name.clone(), body));
+        }
+        for (name, _, _) in &members {
+            self.rec_names.remove(name);
+        }
+
+        if complete && bindings.len() == members.len() {
+            Ok(TStmt::LetRec { bindings })
+        } else {
+            Err(Bail)
+        }
     }
 
     fn check_new(
@@ -359,6 +451,12 @@ impl Checker {
     }
 
     fn check_ident(&mut self, name: &str, span: Span) -> TResult<TExpr> {
+        // A member of the recursion group being checked — the knot (§8).
+        if self.rec_names.contains(name)
+            && let Some(Binding::Rel(rt)) = self.env.binding(name)
+        {
+            return Ok(TExpr::new(TExprKind::RecVar(name.to_string()), rt.clone(), span));
+        }
         // Entity used as its identity relation (§3.3).
         if let Some(sort) = self.env.entity_sort(name) {
             return Ok(TExpr::new(

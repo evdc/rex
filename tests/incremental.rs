@@ -45,6 +45,9 @@ fn apply_stmt(engine: &mut Engine, stmt: &TStmt, values: &mut HashMap<String, Va
                 engine.add_view(name, body, values);
             }
         }
+        TStmt::LetRec { bindings } => {
+            engine.add_view_group(bindings, values);
+        }
     }
 }
 
@@ -230,4 +233,110 @@ fn interleaved_view_definitions_match_batch() {
         views.join("\n"),
     );
     assert_views_match_batch(&engine, &oracle_src, "interleaved definitions");
+}
+
+// --- recursion (§8): the fix region under inserts, retractions, backfill ----
+
+const RECURSION: &str = include_str!("fixtures/recursion.rex");
+
+fn apply_all(src: &str) -> (Engine, HashMap<String, Value>) {
+    let typed = elaborate(src);
+    let mut engine = Engine::new();
+    let mut values = HashMap::new();
+    for stmt in &typed.stmts {
+        apply_stmt(&mut engine, stmt, &mut values);
+    }
+    (engine, values)
+}
+
+#[test]
+fn recursive_view_backfills_over_existing_data() {
+    // Fixture order is data first, views (incl. the group) last — the group is
+    // added onto a populated circuit and must backfill.
+    let (engine, _) = apply_all(RECURSION);
+    let batch = eval::run(&rex::parse(RECURSION).program);
+    assert_eq!(
+        engine.circuit.view("path").expect("path view"),
+        batch.view("path").expect("batch path"),
+        "backfilled fixpoint diverged from batch"
+    );
+    assert_eq!(engine.circuit.view("path").unwrap().len(), 6);
+}
+
+#[test]
+fn recursive_view_maintains_under_insert_and_retraction() {
+    let (mut engine, values) = apply_all(RECURSION);
+    let node_sort = rex::types::SortId(0);
+    let edge_sort = rex::types::SortId(1);
+    let d = values["d"].clone();
+    let a = values["a"].clone();
+    assert_eq!(d, Value::Id(node_sort, 3));
+
+    // Insert d -> a: the chain becomes a cycle, closure = all 16 pairs.
+    let (edge_id, result) = engine.apply_new(
+        edge_sort,
+        &[("src".to_string(), d), ("dst".to_string(), a)],
+    );
+    let delta = &result.view_deltas["path"];
+    assert_eq!(delta.len(), 10, "10 new pairs: 16 total - 6 existing");
+    assert!(delta.iter().all(|(_, _, w)| w == 1));
+    assert_eq!(engine.circuit.view("path").unwrap().len(), 16);
+
+    // Retract it: the closure shrinks back to the chain's 6 pairs.
+    let result = engine.retract_entity(&edge_id);
+    let delta = &result.view_deltas["path"];
+    assert_eq!(delta.len(), 10, "the same 10 pairs retract");
+    assert!(delta.iter().all(|(_, _, w)| w == -1));
+    assert_eq!(engine.circuit.view("path").unwrap().len(), 6);
+}
+
+#[test]
+fn mutual_group_maintains_incrementally() {
+    let views = "let srcof : Edge -> Node = :src\n\
+                 let dstof : Edge -> Node = :dst\n\
+                 let edge : Node -> Node = dstof by srcof\n\
+                 let recursive odd : Node -> Node = edge + edge . even\n\
+                 let recursive even : Node -> Node = edge . odd\n";
+    let base = format!(
+        "entity Node {{ name: Text }}\nentity Edge {{ src: NodeID, dst: NodeID }}\n\
+         let a = new Node {{ name: \"a\" }}\nlet b = new Node {{ name: \"b\" }}\n\
+         let c = new Node {{ name: \"c\" }}\nlet d = new Node {{ name: \"d\" }}\n\
+         let _ = new Edge {{ src: a, dst: b }}\nlet _ = new Edge {{ src: b, dst: c }}\n{views}"
+    );
+    let (mut engine, values) = apply_all(&base);
+
+    // Insert c -> d incrementally; the engine must match a batch run of the
+    // same final program.
+    let (c, dd) = (values["c"].clone(), values["d"].clone());
+    engine.apply_new(
+        rex::types::SortId(1),
+        &[("src".to_string(), c), ("dst".to_string(), dd)],
+    );
+    let full = base.replace(
+        "let srcof",
+        "let _ = new Edge { src: c, dst: d }\nlet srcof",
+    );
+    let batch = eval::run(&rex::parse(&full).program);
+    for name in ["odd", "even"] {
+        assert_eq!(
+            engine.circuit.view(name).expect("engine view"),
+            batch.view(name).expect("batch view"),
+            "view `{name}` diverged from batch after insert"
+        );
+    }
+}
+
+#[test]
+fn import_less_constant_group_still_fires() {
+    // A recursion group whose body references no base table or view lowers
+    // with an empty import list — no child deltas can ever wake it, so the
+    // region must fire once on backfill (like an unfired ConstSingleton).
+    let (engine, _) = apply_all("let recursive t : {@a} = @a + t . t\n");
+    let batch = eval::run(&rex::parse("let recursive t : {@a} = @a + t . t\n").program);
+    assert_eq!(
+        engine.circuit.view("t").expect("t view"),
+        batch.view("t").expect("batch t"),
+        "constant-only fixpoint diverged from batch"
+    );
+    assert_eq!(engine.circuit.view("t").unwrap().len(), 1, "{{@a -> @a}}");
 }

@@ -55,6 +55,9 @@ fn apply_stmt(engine: &mut Engine, stmt: &TStmt, values: &mut HashMap<String, Va
                 engine.add_view(name, body, values);
             }
         }
+        TStmt::LetRec { bindings } => {
+            engine.add_view_group(bindings, values);
+        }
     }
 }
 

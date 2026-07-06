@@ -64,6 +64,10 @@ pub enum TExprKind {
     Identity(SortId),
     /// Reference to a view (`let`) binding.
     View(String),
+    /// Reference to a member of the enclosing `LetRec` group — the recursive
+    /// knot (§8). Distinct from `View` so the fixpoint drivers and the
+    /// stratification check can tell it from an ordinary back-reference.
+    RecVar(String),
     /// Reference to a `new`-bound entity id.
     ValueRef(String),
     /// A resolved field path, first hop first.
@@ -110,6 +114,13 @@ pub enum TStmt {
     Let {
         name: Option<String>,
         body: TExpr,
+    },
+    /// One recursion group: consecutive `let recursive` statements whose
+    /// bodies may reference any member via [`TExprKind::RecVar`]. Semantics is
+    /// the joint least fixpoint (Kleene iteration from ∅) with a forced
+    /// `distinct` at each knot (§8).
+    LetRec {
+        bindings: Vec<(String, TExpr)>,
     },
     New {
         name: Option<String>,

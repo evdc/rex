@@ -78,6 +78,11 @@ impl Interp {
                         self.views.insert(name.clone(), rel);
                     }
                 }
+                TStmt::LetRec { bindings } => {
+                    for (name, rel) in eval_fixpoint(self, bindings) {
+                        self.views.insert(name, rel);
+                    }
+                }
             }
         }
     }
@@ -123,6 +128,12 @@ pub trait Store {
     fn identity_rel(&self, sort: SortId) -> BTreeRelation;
     fn view_rel(&self, name: &str) -> BTreeRelation;
     fn value(&self, name: &str) -> Value;
+    /// The current iterate of a recursion-group member. Meaningful only inside
+    /// a fixpoint evaluation ([`eval_fixpoint`] overlays it); the checker
+    /// guarantees `RecVar` appears nowhere else.
+    fn rec_rel(&self, name: &str) -> BTreeRelation {
+        unreachable!("RecVar `{name}` outside a recursion group")
+    }
 }
 
 impl Store for Interp {
@@ -149,6 +160,67 @@ impl Store for Interp {
     }
 }
 
+/// Joint Kleene iteration for one recursion group (§8): every member starts at
+/// the empty Z-set; each round re-evaluates all bodies against the previous
+/// iterates with a forced `distinct` at the knot; stop when no member changes.
+/// The clamp to {0,1} is what guarantees termination on cyclic data.
+pub fn eval_fixpoint(
+    store: &dyn Store,
+    bindings: &[(String, TExpr)],
+) -> Vec<(String, BTreeRelation)> {
+    let mut iterates: HashMap<String, BTreeRelation> = bindings
+        .iter()
+        .map(|(n, _)| (n.clone(), BTreeRelation::new()))
+        .collect();
+    loop {
+        let overlay = RecStore { inner: store, iterates: &iterates };
+        let mut next = HashMap::new();
+        let mut changed = false;
+        for (name, body) in bindings {
+            let cand = algebra::distinct(&eval_expr_with(&overlay, body));
+            changed |= cand != iterates[name];
+            next.insert(name.clone(), cand);
+        }
+        drop(overlay);
+        iterates = next;
+        if !changed {
+            break;
+        }
+    }
+    bindings
+        .iter()
+        .map(|(n, _)| (n.clone(), iterates.remove(n).expect("iterate exists")))
+        .collect()
+}
+
+/// Overlay store used during a fixpoint: `RecVar` reads the current iterate;
+/// everything else passes through.
+struct RecStore<'a> {
+    inner: &'a dyn Store,
+    iterates: &'a HashMap<String, BTreeRelation>,
+}
+
+impl Store for RecStore<'_> {
+    fn field_rel(&self, sort: SortId, field: &str) -> BTreeRelation {
+        self.inner.field_rel(sort, field)
+    }
+    fn identity_rel(&self, sort: SortId) -> BTreeRelation {
+        self.inner.identity_rel(sort)
+    }
+    fn view_rel(&self, name: &str) -> BTreeRelation {
+        self.inner.view_rel(name)
+    }
+    fn value(&self, name: &str) -> Value {
+        self.inner.value(name)
+    }
+    fn rec_rel(&self, name: &str) -> BTreeRelation {
+        self.iterates
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| self.inner.rec_rel(name))
+    }
+}
+
 /// Batch-evaluate one elaborated expression against any [`Store`]. This is the
 /// structural walk the interpreter always did, factored out of `Interp` so it
 /// can also read through a live incremental engine.
@@ -157,6 +229,7 @@ pub fn eval_expr_with(store: &dyn Store, te: &TExpr) -> BTreeRelation {
     match &te.kind {
         TExprKind::Identity(sort) => store.identity_rel(*sort),
         TExprKind::View(name) => store.view_rel(name),
+        TExprKind::RecVar(name) => store.rec_rel(name),
         TExprKind::ValueRef(name) => singleton(store.value(name)),
         TExprKind::Field(hops) => eval_field(store, hops),
         TExprKind::Const { lit, dom } => {

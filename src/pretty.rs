@@ -35,7 +35,8 @@ pub fn stmt_to_sexpr(stmt: &Stmt) -> String {
                 .as_ref()
                 .map(type_to_sexpr)
                 .unwrap_or_else(|| "_".to_string());
-            format!("(let {} {} {})", name, ty, expr_to_sexpr(&l.body))
+            let head = if l.recursive { "letrec" } else { "let" };
+            format!("({} {} {} {})", head, name, ty, expr_to_sexpr(&l.body))
         }
     }
 }

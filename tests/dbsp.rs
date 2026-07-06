@@ -697,3 +697,111 @@ fn cancelling_weights_prune_from_integral() {
     assert_eq!(result.view_deltas["out"].to_sorted_vec(), vec![(int(10), int(1), -1)]);
     assert!(circuit.view("out").unwrap().is_empty());
 }
+
+// --- recursion (§8): the fix region vs. a batch Kleene oracle ---------------
+
+/// Batch transitive-closure oracle: Kleene iteration of
+/// `path = distinct(edge + edge . path)` — the same equation the fix region
+/// solves, computed entirely with the batch algebra.
+fn batch_closure(edge: &BTreeRelation) -> BTreeRelation {
+    let mut path = BTreeRelation::new();
+    loop {
+        let next = algebra::distinct(&algebra::union(
+            edge,
+            &algebra::compose(edge, &path),
+        ));
+        if next == path {
+            return path;
+        }
+        path = next;
+    }
+}
+
+/// An engine whose circuit holds the recursive `path` view over an
+/// (initially empty) Edge entity.
+fn closure_engine() -> rex::dbsp::Engine {
+    let src = "\
+entity Node { name: Text }
+entity Edge { src: NodeID, dst: NodeID }
+let srcof : Edge -> Node = :src
+let dstof : Edge -> Node = :dst
+let edge : Node -> Node = dstof by srcof
+let recursive path : Node -> Node = edge + edge . path
+";
+    let parsed = rex::parse(src);
+    assert!(parsed.diagnostics.is_empty());
+    let checked = rex::check(&parsed.program);
+    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+    let typed = checked.elaborated.expect("elaborated");
+
+    let mut engine = rex::dbsp::Engine::new();
+    let values = std::collections::HashMap::new();
+    for stmt in &typed.stmts {
+        match stmt {
+            rex::types::typed::TStmt::Let { name: Some(name), body } => {
+                engine.add_view(name, body, &values);
+            }
+            rex::types::typed::TStmt::LetRec { bindings } => {
+                engine.add_view_group(bindings, &values);
+            }
+            _ => {}
+        }
+    }
+    engine
+}
+
+proptest! {
+    /// Feed a random insert/retract history over a tiny node domain (weights
+    /// stay faithful to the language: an edge entity exists once or not at
+    /// all — `new` inserts +1, retraction negates what exists; net-negative
+    /// base rows are unreachable, and monotone-in-X fixpoints require them to
+    /// be) and after EVERY step assert the engine's `path` equals the batch
+    /// closure of the integrated edge relation.
+    #[test]
+    fn fix_region_matches_batch_closure(seq in prop::collection::vec(
+        prop::collection::vec((0u64..6, 0u64..4, 0u64..4, prop::bool::ANY), 0..4),
+        1..10,
+    )) {
+        let mut engine = closure_engine();
+        let node_sort = SortId(0);
+        let edge_sort = SortId(1);
+        let src_key = InputKey::Field(edge_sort, intern("src"));
+        let dst_key = InputKey::Field(edge_sort, intern("dst"));
+        // Live edge entities: id -> (src, dst).
+        let mut live: BTreeMap<u64, (u64, u64)> = BTreeMap::new();
+
+        for step in &seq {
+            let mut tx = Transaction::new();
+            for &(e, u, v, insert) in step {
+                let eid = Value::Id(edge_sort, e);
+                if insert {
+                    if live.contains_key(&e) {
+                        continue; // entity ids are unique
+                    }
+                    live.insert(e, (u, v));
+                    tx.push(src_key, eid.clone(), Value::Id(node_sort, u), 1);
+                    tx.push(dst_key, eid, Value::Id(node_sort, v), 1);
+                } else if let Some((u, v)) = live.remove(&e) {
+                    // Retract exactly the rows the entity holds.
+                    tx.push(src_key, eid.clone(), Value::Id(node_sort, u), -1);
+                    tx.push(dst_key, eid, Value::Id(node_sort, v), -1);
+                }
+            }
+            engine.circuit.step(&tx);
+
+            let src_int = engine.circuit.input_integral(&src_key).cloned().unwrap_or_default();
+            let dst_int = engine.circuit.input_integral(&dst_key).cloned().unwrap_or_default();
+            let edge = algebra::compose(&algebra::inverse(&src_int), &dst_int);
+            prop_assert_eq!(
+                engine.circuit.view("edge").cloned().unwrap_or_default(),
+                edge.clone(),
+                "edge view diverged"
+            );
+            prop_assert_eq!(
+                engine.circuit.view("path").cloned().unwrap_or_default(),
+                batch_closure(&edge),
+                "path fixpoint diverged from batch closure"
+            );
+        }
+    }
+}

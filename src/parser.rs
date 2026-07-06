@@ -204,6 +204,7 @@ impl Parser {
     fn parse_let(&mut self) -> PResult<LetDecl> {
         let start = self.span();
         self.bump(); // `let`
+        let recursive = self.eat(&TokenKind::KwRecursive);
         let (raw_name, _) = self.expect_ident("a binding name after `let`")?;
         let name = if raw_name == "_" { None } else { Some(raw_name) };
 
@@ -220,6 +221,7 @@ impl Parser {
             name,
             ty,
             body,
+            recursive,
             span,
         })
     }

@@ -201,15 +201,18 @@ Examples: `.`, `[]`, `~`, `+union` — monotone, linear. `distinct`, `except`, a
 
 ---
 
-## 8. Recursion — PARKED (design known, not in v1)
+## 8. Recursion — IMPLEMENTED
 
-Sequencing decision: **nail the non-recursive core first, add `fix` immediately after.**
+One combinator `fix : (Rel → Rel) → Rel` with **least-fixed-point** semantics (Kleene iteration from the empty Z-set, à la Feldera's `WITH RECURSIVE`). A recursive view is an equation `X = F(X)`; iterate to stability; **forced `distinct` at the knot** guarantees termination (this also pins recursion firmly in the non-linear/expensive tier — a fixpoint is never "free" like a filter).
 
-Known design when added: one combinator `fix : (Rel → Rel) → Rel` with **least-fixed-point** semantics (Kleene iteration from the empty Z-set, à la Feldera's `WITH RECURSIVE`). A recursive view is an equation `X = F(X)`; iterate to stability; **forced `distinct` at the knot** guarantees termination (this also pins recursion firmly in the non-linear/expensive tier — a fixpoint is never "free" like a filter).
+`fix` is well-typed only over the **monotone fragment** of the algebra: `F` may not use `distinct`, aggregation, `except`/negation below the recursive occurrence. This **monotonicity partition is the stratification check**, expressed *structurally on the combinator tree* (cleaner than Datalog's predicate-dependency-graph formulation — a dividend of the binary-relational core). Implemented in `src/types/strat.rs`, consuming the §7 `monotone` bits.
 
-`fix` is well-typed only over the **monotone fragment** of the algebra: `F` may not use `distinct`, aggregation, `except`/negation below the recursive occurrence. This **monotonicity partition is the stratification check**, expressed *structurally on the combinator tree* (cleaner than Datalog's predicate-dependency-graph formulation — a dividend of the binary-relational core).
+**Decisions made at implementation time:**
 
-**Scope win discovered during stress-testing:** in the **non-recursive v1**, stratification is *always satisfiable* (no cycles), so the v1 core carries monotonicity bits for forward-compatibility but needs **no stratification checker**. The whole apparatus is dormant until `fix`.
+- **Surface form is `let recursive`, not an expression-level `fix`.** The binding name *is* the self-reference (`let recursive path : Node → Node = edge + edge . path`); an expression `fix` would need a binder form the point-free language otherwise lacks. `fix` exists only in the elaborated form: a recursion group is one `TStmt::LetRec`, with recursive occurrences as `RecVar` nodes.
+- **Consecutive `let recursive` statements form one fixpoint group** (mutual recursion); any other statement ends the group. Each body may reference every member of its group. Semantics is the joint least fixpoint.
+- **Type annotations are mandatory on recursive lets** — the declared type seeds the self-reference before the body is checked.
+- **DBSP lowering** (`Circuit::fixes`): the outer arena stays strictly topological; the cycle lives in a nested inner circuit wrapped Enter/Exit-style. Enter (δ₀) presents each import's full current value at iteration 0; the per-member feedback slot is the z⁻¹ edge, fed `distinct(body) − integrated-so-far` each pass (inner integrals persisting across iterations = semi-naive evaluation); Exit diffs the converged fixpoint against the previous outer step's, so retractions are correct by construction. Cost: O(closure) per outer step touching the region — the recompute tier, honestly. Fully incremental nested deltas (an insert costing only newly derivable facts) are future work.
 
 ---
 
@@ -220,7 +223,7 @@ A single flow analysis over the combinator graph, accumulating responsibilities:
 1. **Groundedness** (Rel-style): a variable is grounded only by application to a **finite** relation; infinite relations (`<`, `+`) ground their result only when enough arguments are already grounded. Evaluation is rejected if any variable is ungrounded. Sound but **incomplete** — some terminating programs get rejected (the accepted tax, same shape as a borrow checker). *Required in v1.*
 2. **Set-ness**: track which relations are already sets so redundant `distinct` can be dropped. *Optimization; v1-optional.*
 3. **Linearity**: per-operator, drives the incremental cost model surfaced to users. *v1 should at least record it.*
-4. **Stratification / monotonicity**: dormant until `fix`. *Forward-compat metadata in v1; checker later.*
+4. **Stratification / monotonicity**: live since `fix` landed — a structural walk over each recursion group's bodies (`src/types/strat.rs`) rejecting non-monotone operators above a recursive occurrence.
 
 ---
 
@@ -236,7 +239,7 @@ Lowers to **DBSP circuits**; the point-free program *is* the circuit (boxes = re
 
 ## 11. Parked / open items
 
-- **Recursion** (`fix` + stratification) — design known (§8), deferred one step.
+- ~~**Recursion** (`fix` + stratification)~~ — **implemented** (§8); what remains parked is *fully incremental* recursion (nested deltas rather than per-step re-derivation).
 - **Row polymorphism / structural interfaces** — the principled, type-safe version of the ECS "query everything with fields A,B" idea. v1 must not foreclose it.
 - **Top-N / ranked-filter** — *not* a pure edge concern (it gates downstream data); a first-class non-linear operator, expressible as an aggregation into a "sorted-list-of-length-N" monoid. Parked.
 - **Pure sort / ORDER BY** — genuinely an edge/presentation concern (Z-sets are unordered); not incrementally natural. Lives at serialization.
