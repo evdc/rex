@@ -116,7 +116,15 @@ eventually warn) that anything consuming an opaque composite drops from
 element-surgical to recompute-per-group. Surface sugar makes narrow feel wide;
 the core never widens.
 
-### 3.2 Rust+WASM vs full TS: **Rust core → WASM, TS bridge — staged, gated on M0.**
+### 3.2 Rust+WASM vs full TS: **DECIDED (July 2026) — Rust core → WASM, TS shaper.**
+
+Measured, not assumed: the engine ships as `crates/rex-wasm` (414 KB raw / 121 KB gzipped
+before wasm-opt); the boundary is one JSON delta batch per step over the canonical value
+encoding (`rex-core/src/eval/encode.rs`), measured at ~18–42 µs per event round-trip with
+~176 B payloads (node microbench). The shaper is TypeScript (`js/rex-dom`) — the
+classifier is the highest-risk piece and debugs JS-side, the fractional-indexing library
+is JS, and the delta batch crosses the boundary anyway. The original decision criteria
+below are answered; kept for the record.
 
 Recommended end state: the compiler (already Rust) and the engine run as a WASM core;
 a thin JS/TS bridge owns the DOM. The delta protocol favors this split — deltas are
@@ -136,7 +144,14 @@ fusion) are the reference tests any Rust engine must reproduce. If the spike goe
 badly for Rust/WASM, the fallback is promoting reactor-ts to the production runtime
 with Rex compiling to JS against its platform API — the `chat-compiled.ts` shape.
 
-### 3.3 Engine: bundled minimal vs Feldera `dbsp` crate: **spike (M0), not decided.**
+### 3.3 Engine: bundled minimal vs Feldera `dbsp` crate: **DECIDED — bundled, by construction.**
+
+The M1 work grew the bundled engine (`src/dbsp/`) to the point where the M0 spike's
+question answered itself: it lowers the dynamic `TProgram` graph directly, exposes
+relation internals to the shaper (every `BTreeRelation` *is* an IndexedZSet), builds to
+wasm at ~121 KB gzipped, and its correctness surface is held by the batch-oracle property
+tests. The Feldera comparison is moot unless the bundled engine hits a wall. Original
+criteria kept below for the record.
 
 Time-boxed comparison, one small circuit implemented both ways (two joins, one
 aggregate, one nesting level — a mini-Kanban core):
@@ -175,10 +190,10 @@ Ordering follows the spec's own implementation orders (§11 for Part I, §20 for
 Part II), adapted to start from Rex's actual state. Each milestone names its gate:
 what must be demonstrably true before the next starts.
 
-### M0 — Engine spike
+### M0 — Engine spike — **CLOSED** (satisfied by the built engine + §3.2/§3.3 decisions)
 The §3.3 comparison. Deliverable: a short written decision with the four exit
 criteria answered, plus the surviving mini-circuit as the seed of M1.
-**Gate:** engine choice committed.
+**Gate:** engine choice committed. ✓
 
 ### M1 — Rex incremental core
 - Circuit IR lowered from `TProgram`; delay (`z⁻¹`), integrate, differentiate;
@@ -195,7 +210,11 @@ criteria answered, plus the surviving mini-circuit as the seed of M1.
 **Gate:** spec12.rex runs delta-at-a-time with results identical to batch eval,
 including under retraction.
 
-### M2 — Nested structures (spec Part I, §§2–3, 8)
+### M2 — Nested structures (spec Part I, §§2–3, 8) — **GATE MET (July 2026)**
+Delivered: `fst`/`snd` projections end-to-end (the one missing eliminator — composite-key
+nesting otherwise composes from existing `~`/`,`/`.`/`by`); `tests/nesting.rs` proves
+correct per-view deltas under insert/retract/regroup; the §8 cliff is a checker warning;
+`encode.rs` is the canonical value/delta wire format. Notes below kept for the record.
 - Composite keys as first-class: nesting = flat relations keyed by the composite of
   enclosing grouping keys; each nesting level its own IndexedZSet (axiom 3).
 - `group` / `unnest` / `aggregate` / re-group closed and incrementally maintained
@@ -208,7 +227,13 @@ including under retraction.
 **Gate:** a nested two-level query (lists → ordered cards) emits correct per-node
 deltas under insert/retract/regroup.
 
-### M3 — Shaper + bridge prototype (spec Part I, §§4–7)
+### M3 — Shaper + bridge prototype (spec Part I, §§4–7) — **GATE MET (July 2026)**
+Delivered: workspace split (`crates/rex-core` / `rex-cli` / `rex-wasm`, `js/rex-dom`);
+`RexApp` wasm API; TS shaper with view-role classifier, −/+ fusion, phased apply,
+fractional ordering + rebalance, mirror-based mount, subtree coalescing, reparent —
+spy-driver mutation-count tests in vitest plus Playwright gates on the live Kanban app
+(`examples/kanban`): retitle preserves node identity *and focus*, drag reuses the DOM
+node, delete detaches once. Notes below kept for the record.
 Build in the spec's §11 order:
 1. Same-entity −/+ fusion classifier (§5.2) — highest-risk, silent failure mode;
    stress-test node-identity preservation first.

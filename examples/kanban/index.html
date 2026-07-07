@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Rex Kanban</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 24px; background: #f4f5f7; }
+      h1 { font-size: 18px; }
+      main { display: flex; gap: 16px; align-items: flex-start; }
+      section.list {
+        background: #ebecf0; border-radius: 8px; padding: 12px; width: 260px;
+      }
+      section.list > header { font-weight: 600; margin-bottom: 8px; display: flex; justify-content: space-between; }
+      section.list > header button { border: none; background: none; cursor: pointer; color: #666; }
+      div.card {
+        background: white; border-radius: 6px; padding: 8px; margin-bottom: 8px;
+        box-shadow: 0 1px 1px rgba(0,0,0,0.15); display: flex; gap: 6px; align-items: center;
+      }
+      div.card.dragging { opacity: 0.5; }
+      div.card input { border: none; flex: 1; font: inherit; background: transparent; }
+      div.card input:focus { outline: 1px solid #4c9aff; }
+      div.card button { border: none; background: none; cursor: pointer; color: #bbb; }
+      div.card button:hover { color: #e33; }
+      #controls { margin-bottom: 16px; }
+    </style>
+  </head>
+  <body>
+    <h1>Rex Kanban — incremental relational views driving the DOM</h1>
+    <div id="controls"></div>
+    <main id="board"></main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

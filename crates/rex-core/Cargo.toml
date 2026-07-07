@@ -1,0 +1,17 @@
+# The core library keeps the package name `rex` so every test/bench/importer
+# keeps addressing it as `rex::…`; the directory name reflects its workspace
+# role.
+[package]
+name = "rex"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+[dev-dependencies]
+proptest = "1"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "dbsp_vs_batch"
+harness = false

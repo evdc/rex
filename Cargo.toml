@@ -1,15 +1,12 @@
-[package]
-name = "rex"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+resolver = "2"
+members = ["crates/rex-core", "crates/rex-cli", "crates/rex-wasm"]
 
-[dependencies]
-rustyline = "18.0.1"
-
-[dev-dependencies]
-proptest = "1"
-criterion = { version = "0.5", features = ["html_reports"] }
-
-[[bench]]
-name = "dbsp_vs_batch"
-harness = false
+# Small-and-fast profile for the wasm bundle (build with
+# `cargo build -p rex-wasm --profile wasm-release --target wasm32-unknown-unknown`).
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = true
+panic = "abort"
+codegen-units = 1

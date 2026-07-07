@@ -619,7 +619,22 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "proptest",
+]
+
+[[package]]
+name = "rex-cli"
+version = "0.1.0"
+dependencies = [
+ "rex",
  "rustyline",
+]
+
+[[package]]
+name = "rex-wasm"
+version = "0.1.0"
+dependencies = [
+ "rex",
+ "wasm-bindgen",
 ]
 
 [[package]]
