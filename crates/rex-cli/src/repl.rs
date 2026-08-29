@@ -235,6 +235,25 @@ impl Session {
             }
             return false;
         }
+        // `view`/`state` desugar into many generated `let`s, which breaks the
+        // REPL's 1:1 AST↔typed-statement bookkeeping. They target the compiler
+        // (`rex build`), not the interactive session.
+        if parsed
+            .program
+            .stmts
+            .iter()
+            .any(|s| {
+                matches!(
+                    s,
+                    rex::ast::Stmt::View(_) | rex::ast::Stmt::State(_) | rex::ast::Stmt::Rel(_)
+                )
+            })
+        {
+            println!(
+                "`view`/`state`/`rel` aren't supported in the REPL — compile with `rex build`."
+            );
+            return false;
+        }
         let checked = rex::check(&parsed.program);
         // Print everything, but only errors (elaborated == None) reject the
         // line — warnings (§8 cliff marks) are advisory.
@@ -267,6 +286,9 @@ impl Session {
                         Some(name) => self.print_binding(name),
                         None => println!("(anonymous binding ignored)"),
                     },
+                    rex::ast::Stmt::View(v) => println!("view {} defined", v.name),
+                    rex::ast::Stmt::State(s) => println!("state {} defined", s.name),
+                    rex::ast::Stmt::Rel(r) => println!("rel {} defined", r.name),
                 }
             }
         } else {
@@ -297,6 +319,10 @@ impl Session {
                         self.apply_stmt(&typed.stmts[ti]);
                         ti += 1;
                     }
+                    // Rejected earlier in `commit`; unreachable here.
+                    rex::ast::Stmt::View(_)
+                    | rex::ast::Stmt::State(_)
+                    | rex::ast::Stmt::Rel(_) => si += 1,
                 }
             }
             debug_assert_eq!(ti, typed.stmts.len());

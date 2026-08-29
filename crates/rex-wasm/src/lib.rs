@@ -5,8 +5,10 @@
 //! exactly once per transaction and the shaper can key its maps on the
 //! encoded strings directly.
 
-use rex::dbsp::Engine;
+use rex::dbsp::{DispatchOp, Engine};
+use rex::eval::interp::lit_value;
 use rex::eval::{decode_value, encode_value, json_quote, rows_to_json, step_result_to_json, Value};
+use rex::types::shape_ir::{HandlerDef, MutationIR, ValRef};
 use rex::types::ty::SortId;
 use rex::types::ValueTy;
 use std::collections::HashMap;
@@ -18,6 +20,8 @@ pub struct RexApp {
     env: rex::types::Env,
     /// `new`-bound ids from the program source.
     values: HashMap<String, Value>,
+    /// Inline view handlers, by generated name (§M5 dispatch).
+    handlers: HashMap<String, HandlerDef>,
 }
 
 #[wasm_bindgen]
@@ -36,15 +40,105 @@ impl RexApp {
             return Err(render_all(&checked.diagnostics, source));
         };
 
+        let handlers = checked
+            .shapes
+            .handlers
+            .iter()
+            .map(|h| (h.name.clone(), h.clone()))
+            .collect();
         let mut app = RexApp {
             engine: Engine::new(),
             env: checked.env,
             values: HashMap::new(),
+            handlers,
         };
         for stmt in &typed.stmts {
             app.engine.apply_typed_stmt(stmt, &mut app.values);
         }
         Ok(app)
+    }
+
+    /// Run an inline view handler (`on … =>`) as ONE atomic transaction (§M5).
+    /// `args_json` is a flat object of canonically-encoded values keyed by
+    /// binder/param name (`{"Card":"…","List":"…","v":"t:hi"}`). Returns
+    /// `{"ids":[…],"deltas":{"views":{…}}}` — `ids` are the keys minted by any
+    /// `new` mutations, in order.
+    pub fn dispatch(&mut self, name: &str, args_json: &str) -> Result<String, JsValue> {
+        let handler = self
+            .handlers
+            .get(name)
+            .ok_or_else(|| JsValue::from_str(&format!("unknown handler `{name}`")))?
+            .clone();
+        let args: HashMap<String, String> = serde_json::from_str(args_json)
+            .map_err(|e| JsValue::from_str(&format!("bad handler args: {e}")))?;
+
+        let arg = |n: &str| -> Result<Value, JsValue> {
+            let s = args
+                .get(n)
+                .ok_or_else(|| JsValue::from_str(&format!("handler `{name}` missing arg `{n}`")))?;
+            decode(s)
+        };
+        let target_id = |r: &rex::types::shape_ir::Ref| arg(&r.0);
+        let resolve = |v: &ValRef| -> Result<Value, JsValue> {
+            match v {
+                ValRef::Lit(lit) => Ok(lit_value(lit)),
+                ValRef::Arg(n) => arg(n),
+            }
+        };
+
+        let mut ops = Vec::new();
+        for m in &handler.body {
+            match m {
+                MutationIR::Set { target, entity, updates } => {
+                    let id = target_id(target)?;
+                    let sort = self.entity_sort(entity)?;
+                    let mut resolved = Vec::new();
+                    for (field, val) in updates {
+                        let value = resolve(val)?;
+                        self.check_field(sort, field, &value)?;
+                        resolved.push((field.clone(), value));
+                    }
+                    ops.push(DispatchOp::Set { id, updates: resolved });
+                }
+                MutationIR::Delete { target } => {
+                    ops.push(DispatchOp::Retract { id: target_id(target)? });
+                }
+                MutationIR::Insert { entity, fields } => {
+                    let sort = self.entity_sort(entity)?;
+                    let mut resolved = Vec::new();
+                    for (field, val) in fields {
+                        let value = resolve(val)?;
+                        self.check_field(sort, field, &value)?;
+                        resolved.push((field.clone(), value));
+                    }
+                    ops.push(DispatchOp::New { sort, fields: resolved });
+                }
+            }
+        }
+
+        let (ids, res) = self.engine.dispatch(&ops);
+        let ids_json: Vec<String> = ids.iter().map(|v| json_quote(&encode_value(v))).collect();
+        Ok(format!(
+            r#"{{"ids":[{}],"deltas":{}}}"#,
+            ids_json.join(","),
+            step_result_to_json(&res)
+        ))
+    }
+
+    /// The full contents of every registered view as one `{"views":{…}}` batch
+    /// — the initial render the shaper applies at boot (replaces per-view
+    /// `read_view` calls).
+    pub fn snapshot(&self) -> String {
+        let mut names: Vec<&String> = self.engine.circuit.output_names().collect();
+        names.sort();
+        let views: Vec<String> = names
+            .iter()
+            .map(|n| {
+                let rel = self.engine.circuit.view(n).expect("registered view");
+                format!("{}:{}", json_quote(n), rows_to_json(rel))
+            })
+            .collect();
+        format!(r#"{{"views":{{{}}}}}"#, views.join(","))
     }
 
     /// Create an entity: `fields` as parallel name/value arrays, values in
@@ -145,6 +239,12 @@ impl RexApp {
     /// declared field type. Without this a bad `update_field` silently stores
     /// (say) an Int in a Text column, or a non-pair value in a `T×T` field
     /// that a downstream `fst`/`snd` view then traps on.
+    fn entity_sort(&self, entity: &str) -> Result<SortId, JsValue> {
+        self.env
+            .entity_sort(entity)
+            .ok_or_else(|| JsValue::from_str(&format!("unknown entity `{entity}`")))
+    }
+
     fn check_field(&self, sort: SortId, field: &str, value: &Value) -> Result<(), JsValue> {
         let Some(ty) = self.env.field_ty(sort, field) else {
             return Err(JsValue::from_str(&format!(

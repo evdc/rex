@@ -233,6 +233,13 @@ impl<'a> Lexer<'a> {
                         break;
                     }
                 },
+                // Multibyte UTF-8: decode the whole codepoint from the source,
+                // not byte-by-byte (`byte as char` is Latin-1 and would split a
+                // char like `×` into two mojibake codepoints).
+                Some(other) if other >= 0x80 => {
+                    let ch = self.decode_char_at(self.pos - 1, other);
+                    value.push(ch);
+                }
                 Some(other) => value.push(other as char),
             }
         }
@@ -258,13 +265,22 @@ impl<'a> Lexer<'a> {
                 self.pos += 1;
                 TokenKind::Ge
             }
+            b':' if self.peek() == Some(b'=') => {
+                self.pos += 1;
+                TokenKind::ColonEq
+            }
             b'.' => TokenKind::Dot,
             b',' => TokenKind::Comma,
+            b';' => TokenKind::Semi,
             b':' => TokenKind::Colon,
             b'~' => TokenKind::Tilde,
             b'+' => TokenKind::Plus,
             b'&' => TokenKind::Amp,
             b'*' => TokenKind::Star,
+            b'=' if self.peek() == Some(b'>') => {
+                self.pos += 1;
+                TokenKind::FatArrow
+            }
             b'=' => TokenKind::Eq,
             b'<' => TokenKind::Lt,
             b'>' => TokenKind::Gt,

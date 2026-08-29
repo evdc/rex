@@ -24,12 +24,21 @@ pub struct CheckResult {
     pub diagnostics: Vec<Diagnostic>,
     /// The elaborated program — `Some` iff there were no errors.
     pub elaborated: Option<TProgram>,
+    /// The UI IR desugared from `view`/`state` statements (§M5). Empty for
+    /// programs with no views.
+    pub shapes: super::shape_ir::ShapeProgram,
 }
 
 pub fn check(program: &Program) -> CheckResult {
+    // Desugar `view`/`state` into ordinary entities + `let`s (plus the UI IR)
+    // before type-checking; the checker only ever sees the core language.
+    let desugared = super::view::desugar(program);
+    let program = &desugared.program;
+    let shapes = desugared.shapes;
+
     let mut cx = Checker {
         env: Env::new(),
-        diagnostics: Vec::new(),
+        diagnostics: desugared.diagnostics,
         rec_names: Default::default(),
     };
     let stmts = cx.run(program);
@@ -55,6 +64,7 @@ pub fn check(program: &Program) -> CheckResult {
         env: cx.env,
         diagnostics: cx.diagnostics,
         elaborated,
+        shapes,
     }
 }
 
@@ -127,6 +137,11 @@ impl Checker {
                     }
                 }
                 Stmt::Entity(_) => i += 1,
+                // Views, state, and rels are desugared to entities + lets in a
+                // pre-pass (see [`super::view`]); by the time the checker runs
+                // they appear as ordinary statements, so any surviving
+                // `View`/`State`/`Rel` here is a no-op.
+                Stmt::View(_) | Stmt::State(_) | Stmt::Rel(_) => i += 1,
             }
         }
         stmts

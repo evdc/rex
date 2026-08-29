@@ -101,6 +101,23 @@ impl Parser {
         tok
     }
 
+    /// Is the cursor on a contextual keyword (a bare identifier `word`)?
+    /// The view surface reuses ordinary identifiers (`order`, `select`, `on`,
+    /// `delete`) as keywords only inside view bodies, so the base expression
+    /// language keeps them usable as field/entity names.
+    fn at_kw(&self, word: &str) -> bool {
+        matches!(self.peek(), TokenKind::Ident(s) if s == word)
+    }
+
+    fn eat_kw(&mut self, word: &str) -> bool {
+        if self.at_kw(word) {
+            self.bump();
+            true
+        } else {
+            false
+        }
+    }
+
     fn eat(&mut self, kind: &TokenKind) -> bool {
         if self.peek() == kind {
             self.bump();
@@ -155,7 +172,16 @@ impl Parser {
 
     /// Skip tokens until the start of the next statement (or EOF).
     fn recover(&mut self) {
-        while !self.at_eof() && !matches!(self.peek(), TokenKind::KwLet | TokenKind::KwEntity) {
+        while !self.at_eof()
+            && !matches!(
+                self.peek(),
+                TokenKind::KwLet
+                    | TokenKind::KwEntity
+                    | TokenKind::KwView
+                    | TokenKind::KwState
+                    | TokenKind::KwRel
+            )
+        {
             self.bump();
         }
     }
@@ -164,11 +190,404 @@ impl Parser {
         match self.peek() {
             TokenKind::KwEntity => self.parse_entity().map(Stmt::Entity),
             TokenKind::KwLet => self.parse_let().map(Stmt::Let),
+            TokenKind::KwView => self.parse_view().map(Stmt::View),
+            TokenKind::KwState => self.parse_state().map(Stmt::State),
+            TokenKind::KwRel => self.parse_rel().map(Stmt::Rel),
             other => self.error(format!(
-                "expected a statement (`entity` or `let`), found {}",
+                "expected a statement (`entity`, `rel`, `let`, `view`, or `state`), found {}",
                 other.describe()
             )),
         }
+    }
+
+    // --- views ------------------------------------------------------------
+
+    fn parse_view(&mut self) -> PResult<ViewDecl> {
+        let start = self.span();
+        self.bump(); // `view`
+        let (name, _) = self.expect_ident("a view name after `view`")?;
+        self.expect(&TokenKind::Eq, "before the view body")?;
+        let body = self.parse_select()?;
+        Ok(ViewDecl {
+            name,
+            body,
+            span: start.to(self.prev_span()),
+        })
+    }
+
+    fn parse_state(&mut self) -> PResult<StateDecl> {
+        let start = self.span();
+        self.bump(); // `state`
+        let (name, _) = self.expect_ident("a state name after `state`")?;
+        self.expect(&TokenKind::Colon, "before the state type")?;
+        let ty = self.parse_type()?;
+        self.expect(&TokenKind::Eq, "before the state default")?;
+        let default = self.parse_expr(0)?;
+        Ok(StateDecl {
+            name,
+            ty,
+            default,
+            span: start.to(self.prev_span()),
+        })
+    }
+
+    /// `Entity [where p (& p)*] [order by :path] select <element>`.
+    fn parse_select(&mut self) -> PResult<SelectExpr> {
+        let start = self.span();
+        let (entity, _) = self.expect_ident("an entity name to start a `select`")?;
+        // Optional `as l` row-binder alias (disambiguates the row from the entity).
+        let binder = if self.eat_kw("as") {
+            Some(self.expect_ident("a binder name after `as`")?.0)
+        } else {
+            None
+        };
+        let mut wheres = Vec::new();
+        if self.eat(&TokenKind::KwWhere) {
+            loop {
+                wheres.push(self.parse_expr(BP_WHERE_BY)?);
+                if !self.eat(&TokenKind::Amp) {
+                    break;
+                }
+            }
+        }
+        let order_by = if self.eat_kw("order") {
+            self.expect(&TokenKind::KwBy, "after `order`")?;
+            Some(self.parse_field_parts()?)
+        } else {
+            None
+        };
+        if !self.eat_kw("select") {
+            return self.error(format!(
+                "expected `select` before the view element, found {}",
+                self.peek().describe()
+            ));
+        }
+        let body = self.parse_element()?;
+        Ok(SelectExpr {
+            entity,
+            binder,
+            wheres,
+            order_by,
+            body,
+            span: start.to(self.prev_span()),
+        })
+    }
+
+    /// A bare field path `:a.b` returning just its parts (for `order by`).
+    fn parse_field_parts(&mut self) -> PResult<Vec<String>> {
+        self.expect(&TokenKind::Colon, "a `:field` path")?;
+        let (first, _) = self.expect_ident("a field name after `:`")?;
+        let mut parts = vec![first];
+        while matches!(self.peek(), TokenKind::Dot)
+            && matches!(self.peek_at(1), TokenKind::Ident(_))
+        {
+            self.bump();
+            let (part, _) = self.expect_ident("a field name after `.`")?;
+            parts.push(part);
+        }
+        Ok(parts)
+    }
+
+    /// `tag ('.' class)* item* block?` where an item is an attr, bare modifier,
+    /// handler, or text, and the block holds nested content.
+    fn parse_element(&mut self) -> PResult<ElementExpr> {
+        let start = self.span();
+        let (tag, _) = self.expect_ident("an element tag")?;
+        let mut classes = Vec::new();
+        while self.eat(&TokenKind::Dot) {
+            let (c, _) = self.expect_ident("a class name after `.`")?;
+            classes.push(c);
+        }
+        // Bare-ident modifiers appear only here, right after the tag/classes
+        // (`section.list dropTarget`, `div.card draggable`). Restricting them to
+        // this position keeps a later bare ident (a sibling tag) from being
+        // swallowed by an unbraced element like `input value=… on change=…`.
+        let mut modifiers = Vec::new();
+        while let TokenKind::Ident(name) = self.peek().clone() {
+            let is_modifier = name != "on"
+                && !matches!(self.peek_at(1), TokenKind::Eq)
+                && !(name == "class" && matches!(self.peek_at(1), TokenKind::Dot));
+            if !is_modifier {
+                break;
+            }
+            self.bump();
+            modifiers.push(name);
+        }
+
+        let mut attrs = Vec::new();
+        let mut handlers = Vec::new();
+        let mut children = Vec::new();
+        loop {
+            match self.peek().clone() {
+                TokenKind::Str(s) => {
+                    self.bump();
+                    children.push(Content::Text(s));
+                }
+                TokenKind::LBrace => {
+                    self.parse_element_block(&mut handlers, &mut children)?;
+                    break; // the block is always the last part of an element
+                }
+                TokenKind::Ident(name) if name == "on" => {
+                    handlers.push(self.parse_handler()?);
+                }
+                TokenKind::Ident(name) if name == "class" && matches!(self.peek_at(1), TokenKind::Dot) => {
+                    attrs.push(self.parse_class_attr()?);
+                }
+                TokenKind::Ident(name) if matches!(self.peek_at(1), TokenKind::Eq) => {
+                    attrs.push(self.parse_attr(name)?);
+                }
+                // A bare ident here is the next sibling's tag — this element ends.
+                _ => break,
+            }
+        }
+        Ok(ElementExpr {
+            tag,
+            classes,
+            modifiers,
+            attrs,
+            handlers,
+            children,
+            span: start.to(self.prev_span()),
+        })
+    }
+
+    fn parse_attr(&mut self, name: String) -> PResult<AttrBind> {
+        let start = self.span();
+        self.bump(); // name ident
+        self.bump(); // `=`
+        let value = self.parse_attr_value()?;
+        Ok(AttrBind {
+            name,
+            value,
+            span: start.to(self.prev_span()),
+        })
+    }
+
+    fn parse_class_attr(&mut self) -> PResult<AttrBind> {
+        let start = self.span();
+        self.bump(); // `class`
+        self.bump(); // `.`
+        let (cls, _) = self.expect_ident("a class name after `class.`")?;
+        self.expect(&TokenKind::Eq, "after the class toggle name")?;
+        let value = self.parse_attr_value()?;
+        Ok(AttrBind {
+            name: format!("class.{cls}"),
+            value,
+            span: start.to(self.prev_span()),
+        })
+    }
+
+    fn parse_attr_value(&mut self) -> PResult<AttrValue> {
+        match self.peek().clone() {
+            TokenKind::Str(s) => {
+                self.bump();
+                Ok(AttrValue::Static(s))
+            }
+            TokenKind::Colon => Ok(AttrValue::Bind(self.parse_field_parts()?)),
+            other => self.error(format!(
+                "expected a string or `:field` for an attribute value, found {}",
+                other.describe()
+            )),
+        }
+    }
+
+    /// The `{ ... }` block: nested elements, selects, `:field` text, static
+    /// text, or handlers on the enclosing element.
+    fn parse_element_block(
+        &mut self,
+        handlers: &mut Vec<HandlerDecl>,
+        children: &mut Vec<Content>,
+    ) -> PResult<()> {
+        self.bump(); // `{`
+        while !matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
+            match self.peek().clone() {
+                TokenKind::Ident(name) if name == "on" => {
+                    handlers.push(self.parse_handler()?);
+                }
+                TokenKind::Colon => children.push(Content::Bind(self.parse_field_parts()?)),
+                TokenKind::Str(s) => {
+                    self.bump();
+                    children.push(Content::Text(s));
+                }
+                TokenKind::Ident(_) if self.looks_like_select() => {
+                    children.push(Content::Select(Box::new(self.parse_select()?)));
+                }
+                TokenKind::Ident(_) => {
+                    children.push(Content::Element(self.parse_element()?));
+                }
+                other => {
+                    return self.error(format!("unexpected {} in element body", other.describe()));
+                }
+            }
+        }
+        self.expect(&TokenKind::RBrace, "to close the element body")?;
+        Ok(())
+    }
+
+    /// A content ident begins a `select` (not a plain element) when it is
+    /// immediately followed by `as` (an alias), `where`, `order`, or `select`.
+    fn looks_like_select(&self) -> bool {
+        matches!(self.peek_at(1), TokenKind::KwWhere)
+            || matches!(self.peek_at(1), TokenKind::Ident(s) if s == "as" || s == "order" || s == "select")
+    }
+
+    /// `on event('.'mod)* ['(' params ')'] '=>' mutation (';' mutation)*`.
+    fn parse_handler(&mut self) -> PResult<HandlerDecl> {
+        let start = self.span();
+        self.bump(); // `on` (contextual keyword)
+        let (event, _) = self.expect_ident("a DOM event name after `on`")?;
+        let mut modifiers = Vec::new();
+        while self.eat(&TokenKind::Dot) {
+            let (m, _) = self.expect_ident("an event modifier after `.`")?;
+            modifiers.push(m);
+        }
+        let mut params = Vec::new();
+        if self.eat(&TokenKind::LParen) {
+            if !matches!(self.peek(), TokenKind::RParen) {
+                loop {
+                    params.push(self.parse_handler_param()?);
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+            }
+            self.expect(&TokenKind::RParen, "to close the handler parameters")?;
+        }
+        self.expect(&TokenKind::FatArrow, "before the handler body")?;
+        let mut body = vec![self.parse_mutation()?];
+        while self.eat(&TokenKind::Semi) {
+            body.push(self.parse_mutation()?);
+        }
+        Ok(HandlerDecl {
+            event,
+            modifiers,
+            params,
+            body,
+            span: start.to(self.prev_span()),
+        })
+    }
+
+    fn parse_handler_param(&mut self) -> PResult<HandlerParam> {
+        let start = self.span();
+        let (name, _) = self.expect_ident("a handler parameter name")?;
+        self.expect(&TokenKind::Colon, "after the parameter name")?;
+        let ty = self.parse_type()?;
+        self.expect(&TokenKind::Eq, "before the parameter extractor")?;
+        let extractor = self.parse_extractor()?;
+        Ok(HandlerParam {
+            name,
+            ty,
+            extractor,
+            span: start.to(self.prev_span()),
+        })
+    }
+
+    fn parse_extractor(&mut self) -> PResult<Extractor> {
+        let (name, span) = self.expect_ident("an extractor (value, checked, drag, ...)")?;
+        let arg = if self.eat(&TokenKind::LParen) {
+            let a = match self.peek().clone() {
+                TokenKind::Str(s) => {
+                    self.bump();
+                    s
+                }
+                TokenKind::Ident(s) => {
+                    self.bump();
+                    s
+                }
+                other => {
+                    return self
+                        .error(format!("expected an extractor argument, found {}", other.describe()))
+                }
+            };
+            self.expect(&TokenKind::RParen, "to close the extractor argument")?;
+            Some(a)
+        } else {
+            None
+        };
+        match (name.as_str(), arg) {
+            ("value", None) => Ok(Extractor::Value),
+            ("checked", None) => Ok(Extractor::Checked),
+            ("drag", Some(a)) => Ok(Extractor::Drag(a)),
+            ("dropPos", Some(a)) => Ok(Extractor::DropPos(a)),
+            ("endOf", Some(a)) => Ok(Extractor::EndOf(a)),
+            ("prompt", Some(a)) => Ok(Extractor::Prompt(a)),
+            (other, _) => {
+                self.diagnostics.push(Diagnostic::error(
+                    span,
+                    format!("unknown extractor `{other}`"),
+                ));
+                Err(Bail)
+            }
+        }
+    }
+
+    fn parse_mutation(&mut self) -> PResult<Mutation> {
+        let start = self.span();
+        if self.at_kw("delete") {
+            self.bump();
+            let (target, _) = self.expect_ident("a binder to `delete`")?;
+            return Ok(Mutation::Delete {
+                target,
+                span: start.to(self.prev_span()),
+            });
+        }
+        match self.peek().clone() {
+            TokenKind::KwNew => {
+                let e = self.parse_new(start)?;
+                let ExprKind::New { entity, fields } = e.kind else {
+                    unreachable!("parse_new yields New")
+                };
+                Ok(Mutation::New {
+                    entity,
+                    fields,
+                    span: start.to(self.prev_span()),
+                })
+            }
+            // `:field := value` — set a field of `self`.
+            TokenKind::Colon => {
+                let field = self.parse_field_parts()?;
+                self.expect(&TokenKind::ColonEq, "in a field assignment")?;
+                let value = self.parse_expr(BP_ARG)?;
+                Ok(Mutation::Set {
+                    binder: None,
+                    field,
+                    value,
+                    span: start.to(self.prev_span()),
+                })
+            }
+            // `binder:field := value`.
+            TokenKind::Ident(binder) => {
+                self.bump();
+                let field = self.parse_field_parts()?;
+                self.expect(&TokenKind::ColonEq, "in a field assignment")?;
+                let value = self.parse_expr(BP_ARG)?;
+                Ok(Mutation::Set {
+                    binder: Some(binder),
+                    field,
+                    value,
+                    span: start.to(self.prev_span()),
+                })
+            }
+            other => self.error(format!("expected a mutation, found {}", other.describe())),
+        }
+    }
+
+    /// `rel Name(From, To)` — a named binary relation `From -> To`.
+    fn parse_rel(&mut self) -> PResult<RelDecl> {
+        let start = self.span();
+        self.bump(); // `rel`
+        let (name, _) = self.expect_ident("a relation name after `rel`")?;
+        self.expect(&TokenKind::LParen, "after the relation name")?;
+        let (from, _) = self.expect_ident("the source entity")?;
+        self.expect(&TokenKind::Comma, "between the relation's two entities")?;
+        let (to, _) = self.expect_ident("the target entity")?;
+        let end = self.expect(&TokenKind::RParen, "to close the relation")?;
+        Ok(RelDecl {
+            name,
+            from,
+            to,
+            span: start.to(end.span),
+        })
     }
 
     fn parse_entity(&mut self) -> PResult<EntityDecl> {

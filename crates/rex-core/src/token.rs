@@ -41,9 +41,15 @@ pub enum TokenKind {
     KwExcept,
     KwAntijoin,
     KwFrom,
+    KwView,
+    KwState,
+    KwRel,
 
     // Operators & punctuation
-    Arrow,   // ->
+    Arrow,    // ->
+    FatArrow, // =>
+    ColonEq,  // :=
+    Semi,     // ;
     Dot,     // .
     Comma,   // ,
     Colon,   // :
@@ -85,6 +91,9 @@ impl TokenKind {
             "except" => TokenKind::KwExcept,
             "antijoin" => TokenKind::KwAntijoin,
             "from" => TokenKind::KwFrom,
+            "view" => TokenKind::KwView,
+            "state" => TokenKind::KwState,
+            "rel" => TokenKind::KwRel,
             _ => return None,
         })
     }
@@ -113,7 +122,13 @@ impl TokenKind {
             KwExcept => "`except`".into(),
             KwAntijoin => "`antijoin`".into(),
             KwFrom => "`from`".into(),
+            KwView => "`view`".into(),
+            KwState => "`state`".into(),
+            KwRel => "`rel`".into(),
             Arrow => "`->`".into(),
+            FatArrow => "`=>`".into(),
+            ColonEq => "`:=`".into(),
+            Semi => "`;`".into(),
             Dot => "`.`".into(),
             Comma => "`,`".into(),
             Colon => "`:`".into(),

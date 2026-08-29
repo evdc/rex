@@ -626,7 +626,15 @@ name = "rex-cli"
 version = "0.1.0"
 dependencies = [
  "rex",
+ "rex-codegen",
  "rustyline",
+]
+
+[[package]]
+name = "rex-codegen"
+version = "0.1.0"
+dependencies = [
+ "rex",
 ]
 
 [[package]]
@@ -634,6 +642,7 @@ name = "rex-wasm"
 version = "0.1.0"
 dependencies = [
  "rex",
+ "serde_json",
  "wasm-bindgen",
 ]
 

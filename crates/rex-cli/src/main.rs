@@ -12,6 +12,10 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     };
 
+    if path == "build" {
+        return build(args);
+    }
+
     let src = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(e) => {
@@ -58,4 +62,69 @@ fn main() -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+/// `rex build <app.rex> [-o out.ts] [--import <spec>]` — compile a `.rex`
+/// program with views into a self-contained TS module.
+fn build(mut args: impl Iterator<Item = String>) -> ExitCode {
+    let Some(path) = args.next() else {
+        eprintln!("usage: rex build <app.rex> [-o out.ts] [--import <spec>] [--debug]");
+        return ExitCode::FAILURE;
+    };
+    let mut out_path: Option<String> = None;
+    let mut import: Option<String> = None;
+    let mut debug = false;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "-o" | "--out" => out_path = args.next(),
+            "--import" => import = args.next(),
+            "--debug" => debug = true,
+            other => {
+                eprintln!("rex build: unknown argument `{other}`");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    let src = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("rex: cannot read {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Default the raw-source import to the input file's own name (`./board.rex?raw`).
+    let import = import.unwrap_or_else(|| {
+        let file = std::path::Path::new(&path)
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("program.rex");
+        format!("./{file}?raw")
+    });
+
+    match rex_codegen::generate_with(&src, &import, debug) {
+        Ok(module) => match &out_path {
+            Some(out) => match std::fs::write(out, module) {
+                Ok(()) => {
+                    eprintln!("ok: wrote {out}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("rex build: cannot write {out}: {e}");
+                    ExitCode::FAILURE
+                }
+            },
+            None => {
+                print!("{module}");
+                ExitCode::SUCCESS
+            }
+        },
+        Err(diags) => {
+            for d in &diags {
+                eprintln!("{}", d.render(&src));
+            }
+            ExitCode::FAILURE
+        }
+    }
 }

@@ -259,3 +259,51 @@ fn parses_spec12_fixture() {
 (let result (-> Customer Money) (compose inregion (where custspend (cmp > _ 30))))";
     assert_eq!(sx, expected);
 }
+
+// --- views (surface UI) ---------------------------------------------------
+
+#[test]
+fn view_state_smoke() {
+    // A view with membership `where`, `order by`, nested select, attr binding,
+    // and an inline handler that chains two mutations parses cleanly.
+    let src = r#"
+entity List { title: Text, pos: Text }
+entity Card { title: Text, pos: Text, list: ListID }
+
+state filter : {@all + @active} = @all
+
+view board =
+  List order by :pos select
+    section.list dropTarget {
+      header {
+        span { :title }
+        button "+ card" on click(pos: Text = endOf(card)) =>
+          new Card { title: "New card", pos: pos, list: List }
+      }
+      Card where :list = List order by :pos select
+        div.card draggable {
+          input value=:title on change(v: Text = value) => :title := v
+          button "x" on click => delete Card
+          on drop(card: Card = drag("text/rex-card"), pos: Text = dropPos(card)) =>
+            card:list := List ; card:pos := pos
+        }
+    }
+"#;
+    let out = sexpr(src);
+    // Spot-check the load-bearing pieces survive the round-trip.
+    assert!(out.contains("(state filter"), "state: {out}");
+    assert!(out.contains("(view board"), "view: {out}");
+    assert!(out.contains("(where (cmp = :list List))"), "membership: {out}");
+    assert!(out.contains("(order :pos)"), "order: {out}");
+    assert!(out.contains("(mod dropTarget)"), "modifier: {out}");
+    assert!(out.contains("(mod draggable)"), "modifier: {out}");
+    assert!(out.contains("(attr value :title)"), "attr bind: {out}");
+    assert!(out.contains("(bind :title)"), "text bind: {out}");
+    assert!(out.contains("(on change"), "change handler: {out}");
+    assert!(out.contains("(set self:title v)"), "self set: {out}");
+    assert!(out.contains("(delete Card)"), "delete: {out}");
+    assert!(out.contains("(set card:list List)"), "binder set: {out}");
+    assert!(out.contains("(set card:pos pos)"), "chained set: {out}");
+    assert!(out.contains("dropPos(card)"), "extractor arg: {out}");
+    assert!(out.contains("(new Card"), "new mutation: {out}");
+}

@@ -263,16 +263,39 @@ windows).
 **Gate:** the §19 trace reproduced in a test; no surface async form suspends a
 `step()`.
 
-### M5 — Surface language convergence
-- Pour sugar over the Rex core until it reads like normal app development:
-  elysium-style `data`/`event`/`on`/`view` ergonomics, ripple-style pipelines where
-  they fit — over a 6NF binary-combinator core, wide-feeling at the surface only.
-- Import ripple's cardinality/key typing into the checker where it pays for itself
-  (fan-out visibility, by-key narrowing).
-- Re-open the ripple-rewrite question here: by this point "rewrite ripple on a Rex
-  core" and "grow Rex's surface" may be the same task.
-**Gate:** TodoMVC and the Kanban app written in surface syntax, compiled, passing the
-M3/M4 suites; js-framework-benchmark numbers via elysium26's harness.
+### M5 — Surface language convergence — **KANBAN GATE MET (July 2026)**
+Delivered: the whole Kanban app — data model, 6NF views, UI, and event handling — is
+one relational `.rex` program (`examples/kanban/src/board.rex`); the compiler
+(`crates/rex-codegen`, driven by `rex build`) generates all of `main.ts` (shape tree,
+templates, event wiring, boot). The **existing M3 Playwright suite passes unchanged**
+against the generated app — node identity + focus on retitle, drag reuses the DOM node,
+single-`removeChild` delete, atomic drag. Nothing is hand-written per app. Build order
+and notes below kept for the record.
+
+- **Surface (relational select-style, nesting-draft §9):** a `view` is a nested
+  relational expression with element constructors — `Entity [where …] [order by :f]
+  select <element>`. UI structure *is* a query: nesting is a nested `select`,
+  membership is the `where :field == Parent` conjunct, ordering is `order by`. Inline
+  `on <domEvent>(params) => <mutations>` handlers. New AST/parser (`view`/`state`,
+  contextual keywords so the core keeps `order`/`select`/`on`/`delete` as identifiers).
+- **Desugaring (`crates/rex-core/src/types/view.rs`, narrow core untouched):** each
+  level auto-derives ordinary `let`s — membership (`board#list#card = Card . :list`),
+  order, and per-attribute (`board#list#card#title = Card . :title`) views — proven
+  *delta-equivalent* to the old hand-written 6NF `board.rex` (`tests/view.rs`). The one
+  load-bearing rule: binders are second-class (keys, never relations), so every
+  generated listener closes over exactly the key the shaper hands its template.
+- **Engine-side dispatch (`dbsp/dispatch.rs`, `RexApp.dispatch`/`snapshot`):** an
+  `on … =>` handler is a checked list of relational mutations run as ONE atomic
+  transaction (`tests/dispatch.rs`); a Kanban drag setting `list` + `pos` is a single
+  step, so the shaper still sees one reparent, not a torn move.
+- **Runtime (`js/rex-dom`):** the honest non-relational library — fractional-key drop
+  math, drag/drop wiring, rebalance sweep — as plain helpers (`interact.ts`), not
+  smuggled language features. Encoding already shared (`encode.ts`).
+- **Deferred:** ripple's cardinality/key typing (not needed for the two MVP apps);
+  the ripple-rewrite question.
+**Gate:** Kanban ✓. **Remaining:** TodoMVC (needs `state` singletons + a `match`
+membership construct for filter-gated visibility + bulk where-target dispatch);
+js-framework-benchmark numbers via elysium26's harness.
 
 ---
 

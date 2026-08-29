@@ -259,6 +259,11 @@ impl Circuit {
         self.outputs.get(name).map(|id| &self.integrals[id.0])
     }
 
+    /// Every registered view name (for a full snapshot at boot).
+    pub fn output_names(&self) -> impl Iterator<Item = &String> {
+        self.outputs.keys()
+    }
+
     /// The integrated output of any node (tests, backfill, retraction reads).
     pub fn integral(&self, id: NodeId) -> &BTreeRelation {
         &self.integrals[id.0]

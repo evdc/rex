@@ -97,3 +97,39 @@ test("add card mounts focused and ordered last", async ({ page }) => {
   await expect(last).toHaveValue("New card");
   expect(await last.evaluate((el) => document.activeElement === el)).toBe(true);
 });
+
+// Regression: the fractional order key must be decoded (`t:` prefix stripped)
+// before the key math, or `endOf`/`dropPos` throw "invalid order key: t:…"
+// when the target list already has cards. (Earlier suite only exercised the
+// 1-card "Doing" and the empty "Done"; the 2-card "Todo" was the blind spot.)
+test("add card to a list that already has cards", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(String(e)));
+  const todo = page.locator('section.list:has(header span:text("Todo"))'); // 2 cards
+  await todo.locator("header button").click();
+  await expect(todo.locator("div.card")).toHaveCount(3);
+  expect(errors).toEqual([]);
+});
+
+test("drop into a list that already has cards", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(String(e)));
+  // Drag "Doing"'s card into the 2-card "Todo" list at a mid position.
+  await page.evaluate(() => {
+    const card = [...document.querySelectorAll("section.list")]
+      .find((l) => l.querySelector("header span")?.textContent?.includes("Doing"))!
+      .querySelector("div.card")!;
+    const target = [...document.querySelectorAll("section.list")].find((l) =>
+      l.querySelector("header span")?.textContent?.includes("Todo"),
+    )!;
+    const dt = new DataTransfer();
+    card.dispatchEvent(new DragEvent("dragstart", { bubbles: true, dataTransfer: dt }));
+    target.dispatchEvent(
+      new DragEvent("drop", { bubbles: true, dataTransfer: dt, clientY: 50 }),
+    );
+  });
+  await expect(
+    page.locator('section.list:has(header span:text("Todo")) div.card'),
+  ).toHaveCount(3);
+  expect(errors).toEqual([]);
+});

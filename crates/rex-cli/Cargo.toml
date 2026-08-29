@@ -9,4 +9,5 @@ path = "src/main.rs"
 
 [dependencies]
 rex = { path = "../rex-core" }
+rex-codegen = { path = "../rex-codegen" }
 rustyline = "18.0.1"

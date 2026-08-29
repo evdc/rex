@@ -22,6 +22,13 @@ pub struct Engine {
     next_id: HashMap<SortId, u64>,
 }
 
+/// One operation in a handler dispatch (see [`Engine::dispatch`]).
+pub enum DispatchOp {
+    New { sort: SortId, fields: Vec<(String, Value)> },
+    Set { id: Value, updates: Vec<(String, Value)> },
+    Retract { id: Value },
+}
+
 impl Engine {
     pub fn new() -> Engine {
         Engine::default()
@@ -32,16 +39,43 @@ impl Engine {
     /// independent inserts that re-find the key). Returns the id and the
     /// resulting view deltas.
     pub fn apply_new(&mut self, sort: SortId, fields: &[(String, Value)]) -> (Value, StepResult) {
+        let mut tx = Transaction::new();
+        let id = self.push_new(&mut tx, sort, fields);
+        (id, self.circuit.step(&tx))
+    }
+
+    /// Mint an id and append its identity + field rows to `tx` (no step). The
+    /// transaction-builder shared by [`apply_new`](Self::apply_new) and
+    /// [`dispatch`](Self::dispatch).
+    fn push_new(&mut self, tx: &mut Transaction, sort: SortId, fields: &[(String, Value)]) -> Value {
         let n = self.next_id.entry(sort).or_insert(0);
         let id = Value::Id(sort, *n);
         *n += 1;
-
-        let mut tx = Transaction::new();
         tx.push(InputKey::Identity(sort), id.clone(), id.clone(), 1);
         for (field, v) in fields {
             tx.push(InputKey::Field(sort, intern(field)), id.clone(), v.clone(), 1);
         }
-        (id.clone(), self.circuit.step(&tx))
+        id
+    }
+
+    /// Run a batch of create/set/retract operations as ONE atomic transaction
+    /// — the engine face of an `on … =>` handler (§M5). Every read (the −old
+    /// rows a set/retract negates) sees the pre-step snapshot, since the whole
+    /// transaction is built before the single `step()`. Returns the ids minted
+    /// by any `New` ops, in order.
+    pub fn dispatch(&mut self, ops: &[DispatchOp]) -> (Vec<Value>, StepResult) {
+        let mut tx = Transaction::new();
+        let mut ids = Vec::new();
+        for op in ops {
+            match op {
+                DispatchOp::New { sort, fields } => {
+                    ids.push(self.push_new(&mut tx, *sort, fields));
+                }
+                DispatchOp::Set { id, updates } => self.push_set(&mut tx, id, updates),
+                DispatchOp::Retract { id } => self.push_retract(&mut tx, id),
+            }
+        }
+        (ids, self.circuit.step(&tx))
     }
 
     /// Retract an entity: negate exactly the base rows currently held for
@@ -52,11 +86,17 @@ impl Engine {
     /// key: a dangling `Order.customer` simply stops joining, which is the
     /// honest 6NF semantics.
     pub fn retract_entity(&mut self, id: &Value) -> StepResult {
-        let Value::Id(sort, _) = id else {
-            panic!("retract_entity requires an entity id, got {id}")
-        };
-
         let mut tx = Transaction::new();
+        self.push_retract(&mut tx, id);
+        self.circuit.step(&tx)
+    }
+
+    /// Append the negation of every base row currently held for `id` (identity
+    /// + fields) to `tx`. Reads pre-step integrals; no step.
+    fn push_retract(&mut self, tx: &mut Transaction, id: &Value) {
+        let Value::Id(sort, _) = id else {
+            panic!("retract requires an entity id, got {id}")
+        };
         let identity = InputKey::Identity(*sort);
         if let Some(ids) = self.circuit.input_integral(&identity) {
             let w = ids.weight(id, id);
@@ -80,7 +120,6 @@ impl Engine {
                 tx.push(key, id.clone(), v, -w);
             }
         }
-        self.circuit.step(&tx)
     }
 
     /// Update one field of an existing entity (see [`update_fields`](Self::update_fields)).
@@ -100,19 +139,26 @@ impl Engine {
     /// row (never created, or already retracted): a stale update to a deleted
     /// entity must not resurrect it as an orphaned field row with no identity.
     pub fn update_fields(&mut self, id: &Value, updates: &[(String, Value)]) -> StepResult {
+        let mut tx = Transaction::new();
+        self.push_set(&mut tx, id, updates);
+        self.circuit.step(&tx)
+    }
+
+    /// Append the `−old/+new` field rows for an update to `tx`. A no-op (pushes
+    /// nothing) if `id` has no live identity row — a stale update to a deleted
+    /// entity must not resurrect it as an orphaned field row. Reads pre-step
+    /// integrals; no step.
+    fn push_set(&mut self, tx: &mut Transaction, id: &Value, updates: &[(String, Value)]) {
         let Value::Id(sort, _) = id else {
-            panic!("update_fields requires an entity id, got {id}")
+            panic!("set requires an entity id, got {id}")
         };
-        // Guard: refuse to write fields for an entity that isn't live.
         let alive = self
             .circuit
             .input_integral(&InputKey::Identity(*sort))
             .is_some_and(|ids| ids.weight(id, id) != 0);
         if !alive {
-            return StepResult::default();
+            return;
         }
-
-        let mut tx = Transaction::new();
         for (field, new) in updates {
             let key = InputKey::Field(*sort, intern(field));
             let rows: Vec<(Value, i64)> = self
@@ -125,7 +171,6 @@ impl Engine {
             }
             tx.push(key, id.clone(), new.clone(), 1);
         }
-        self.circuit.step(&tx)
     }
 
     /// Apply one elaborated statement to the live engine, threading `values`

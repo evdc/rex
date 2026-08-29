@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/rex-core", "crates/rex-cli", "crates/rex-wasm"]
+members = ["crates/rex-core", "crates/rex-cli", "crates/rex-wasm", "crates/rex-codegen"]
 
 # Small-and-fast profile for the wasm bundle (build with
 # `cargo build -p rex-wasm --profile wasm-release --target wasm32-unknown-unknown`).
