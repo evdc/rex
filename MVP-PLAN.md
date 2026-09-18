@@ -287,7 +287,7 @@ construct in them has a one-line desugaring in `SYNTAX.md`.
 questions (e.g. `Bool` spelling, `desc`, how `local` is initialised) rather
 than silently choosing.
 
-#### S-03 Codegen snapshot tests + contract fixtures (M, no deps) ∥
+#### S-03 Codegen snapshot tests + contract fixtures (M, no deps) ∥ — **done 2026-09-18**
 *Goal:* codegen and the shaper get tests independent of the Kanban app.
 *Files:* `crates/rex-codegen/tests/snapshots/*.ts`, `crates/rex-core/tests/fixtures/steps/*.json`,
 `js/rex-dom/test/contract.test.ts`.
@@ -302,6 +302,30 @@ than silently choosing.
    `SpyDriver`, asserts the counts.
 *Acceptance:* fixtures regenerate deterministically; a deliberate engine
 change to emit remove+mount instead of −/+ fails the TS test.
+*Landed as:* a new shared fixture program, `crates/rex-core/tests/fixtures/board.rex`
+(a self-contained copy of the Kanban shape — two entities, nested `select`,
+order, attrs, create/update/move/delete handlers — so these tests don't
+depend on `examples/kanban`). (1) `crates/rex-codegen/tests/snapshot.rs`
+compares `rex_codegen::generate(board.rex)` against the checked-in
+`tests/snapshots/board.ts`, `UPDATE_SNAPSHOTS=1` regenerates it. (2)
+`crates/rex-core/tests/contract_fixtures.rs` scripts a history (rename,
+reorder, reparent, delete, insert) through `Engine::dispatch`/`apply_typed_stmt`
+and checks each step's `step_result_to_json` output (plus the initial
+`{"views":{...}}` snapshot, reproducing `RexApp::snapshot()`'s shape without a
+wasm dependency) against `tests/fixtures/steps/*.json`, `UPDATE_FIXTURES=1`
+regenerates them; a second test (`scripted_history_is_deterministic`) reruns
+the script and asserts byte-identical output, directly covering the
+"fixtures regenerate deterministically" acceptance line. No hand-derived
+sidecar op-count file — the TS side (3) hand-writes a `ShapeNode` tree
+mirroring `board.rex`'s generated view names and asserts the same exact
+`SpyDriver` counts `js/rex-dom/test/shaper.test.ts` already established as
+the shaper's per-operation contract (rename → 1 `setText`; reorder/reparent →
+1 `insertBefore`, 0 `createElement`/`removeChild`; delete → 1 `removeChild`).
+Verified the acceptance line directly: hand-corrupting `03-reparent.json` to
+a different key (simulating a remove+mount instead of a −/+ move) fails
+`contract.test.ts`'s reparent case. Added `@types/node` (+ `"node"` in
+`tsconfig.json`'s `types`) since the contract test reads fixture files via
+Node's `fs`/`path`/`url` across the package boundary into `crates/rex-core`.
 
 #### S-04 Small checker/codegen bugs from README (S, no deps) ∥ — **done 2026-09-18**
 *Files:* `crates/rex-core/src/types/check.rs`, `types/view.rs`, `rex-codegen/src/lib.rs`.
