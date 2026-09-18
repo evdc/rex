@@ -30,11 +30,34 @@ pub struct Desugared {
 /// Expand every `view`/`state` statement, returning the program with them
 /// replaced by generated `let`s/entities plus the collected ShapeIR.
 pub fn desugar(program: &Program) -> Desugared {
+    // Collect each entity's field names and declared types (including
+    // `rel`-injected fields) up front, so a `view` — processed in the same
+    // pass below, regardless of whether it appears before or after the
+    // entities it renders — can (a) check a bare element tag against them
+    // (see `LevelWalk::element`) and (b) pick the right wire `Encoding` for a
+    // `:field` bind (see `LevelWalk::attr_view`).
+    let mut entity_fields: std::collections::HashMap<String, std::collections::HashMap<String, Type>> =
+        Default::default();
+    for stmt in &program.stmts {
+        if let Stmt::Entity(e) = stmt {
+            let fields = entity_fields.entry(e.name.clone()).or_default();
+            for f in &e.fields {
+                fields.insert(f.name.clone(), f.ty.clone());
+            }
+        }
+        if let Stmt::Rel(r) = stmt {
+            entity_fields.entry(r.from.clone()).or_default().insert(
+                r.name.clone(),
+                Type { kind: TypeKind::Named(r.to.clone()), span: r.span },
+            );
+        }
+    }
     let mut d = Desugar {
         stmts: Vec::new(),
         shapes: ShapeProgram::default(),
         diagnostics: Vec::new(),
         handler_seq: 0,
+        entity_fields,
     };
     // Pass 1: collect `rel` decls so each becomes a functional field on its
     // source entity (grouped by entity name), regardless of decl order.
@@ -91,6 +114,11 @@ struct Desugar {
     shapes: ShapeProgram,
     diagnostics: Vec<Diagnostic>,
     handler_seq: usize,
+    /// Each entity's field names and declared types (declared + `rel`-injected).
+    /// Used to (a) catch a bare identifier in an element body that names a
+    /// field but was meant as a bind (`{ cnt }` instead of `{ :cnt }`), and
+    /// (b) pick the wire `Encoding` for a `:field` bind.
+    entity_fields: std::collections::HashMap<String, std::collections::HashMap<String, Type>>,
 }
 
 impl Desugar {
@@ -247,8 +275,9 @@ impl LevelWalk<'_> {
                     } else {
                         BindKind::Prop(a.name.clone())
                     };
+                    let encoding = self.field_encoding(field);
                     let view = self.attr_view(field);
-                    self.attrs.push(AttrBinding { view, path: path.to_vec(), kind });
+                    self.attrs.push(AttrBinding { view, path: path.to_vec(), kind, encoding });
                 }
             }
         }
@@ -266,14 +295,40 @@ impl LevelWalk<'_> {
                 Content::Text(s) => tpl_children.push(Tpl::Static(s.clone())),
                 Content::Bind(field) => {
                     // Bind this element's textContent; not a static child node.
+                    let encoding = self.field_encoding(field);
                     let view = self.attr_view(field);
                     self.attrs.push(AttrBinding {
                         view,
                         path: path.to_vec(),
                         kind: BindKind::Text,
+                        encoding,
                     });
                 }
                 Content::Element(child) => {
+                    // A childless, attribute-less bare tag that happens to
+                    // name a field of the enclosing entity is almost always
+                    // a forgotten `:` (`{ cnt }` meant `{ :cnt }`), not a
+                    // deliberate empty element — reject it instead of
+                    // silently emitting `<cnt>`.
+                    if child.classes.is_empty()
+                        && child.modifiers.is_empty()
+                        && child.attrs.is_empty()
+                        && child.handlers.is_empty()
+                        && child.children.is_empty()
+                        && self
+                            .d
+                            .entity_fields
+                            .get(self.entity)
+                            .is_some_and(|fields| fields.contains_key(&child.tag))
+                    {
+                        self.d.error(
+                            child.span,
+                            format!(
+                                "unknown element `{}`; did you mean `{{ :{} }}`?",
+                                child.tag, child.tag
+                            ),
+                        );
+                    }
                     let mut cp = path.to_vec();
                     cp.push(tpl_children.len());
                     tpl_children.push(self.element(child, &cp));
@@ -304,6 +359,28 @@ impl LevelWalk<'_> {
         self.d
             .emit_let(&name, compose(ident(self.entity, Span::point(0)), field_path(field, Span::point(0)), Span::point(0)));
         name
+    }
+
+    /// The wire `Encoding` a `:field` (or `:a.b`) path resolves to, walking
+    /// through entity-typed hops via the declared field types collected in
+    /// `Desugar::entity_fields`. Falls back to `Text` for a path the checker
+    /// hasn't type-checked yet (unknown entity/field) — the checker rejects
+    /// those independently, so this is a best-effort codegen hint, not a
+    /// source of truth.
+    fn field_encoding(&self, field: &[String]) -> Encoding {
+        let mut entity = self.entity.to_string();
+        let mut ty: Option<&Type> = None;
+        for seg in field {
+            let Some(t) = self.d.entity_fields.get(&entity).and_then(|f| f.get(seg)) else {
+                return Encoding::Text;
+            };
+            ty = Some(t);
+            match entity_of_type(t) {
+                Some(next) => entity = next,
+                None => break,
+            }
+        }
+        ty.map(encoding_of_type).unwrap_or(Encoding::Text)
     }
 
     /// Lower an inline handler into an [`EventBinding`], recording its

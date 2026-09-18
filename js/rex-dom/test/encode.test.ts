@@ -1,5 +1,14 @@
 import { describe, expect, test } from "vitest";
-import { decodeText, encodeAtom, encodeInt, encodeMoney, encodeText } from "../src/encode.js";
+import {
+  decodeAtom,
+  decodeInt,
+  decodeMoney,
+  decodeText,
+  encodeAtom,
+  encodeInt,
+  encodeMoney,
+  encodeText,
+} from "../src/encode.js";
 
 describe("canonical encoding (mirror of rex-core encode.rs)", () => {
   test("text round-trips through encode/decode", () => {
@@ -24,5 +33,13 @@ describe("canonical encoding (mirror of rex-core encode.rs)", () => {
     expect(encodeInt(-3)).toBe("i:-3");
     expect(encodeMoney(999)).toBe("m:999");
     expect(encodeAtom("west")).toBe("@west");
+  });
+
+  test("scalar decoders round-trip their encoders", () => {
+    expect(decodeInt(encodeInt(42))).toBe(42);
+    expect(decodeInt(encodeInt(-3))).toBe(-3);
+    expect(decodeMoney(encodeMoney(999))).toBe(999);
+    expect(decodeAtom(encodeAtom("west"))).toBe("west");
+    expect(decodeAtom(encodeAtom("a,b(c)"))).toBe("a,b(c)");
   });
 });

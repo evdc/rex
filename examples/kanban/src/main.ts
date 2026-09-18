@@ -2,6 +2,7 @@
 import init, { RexApp } from "./pkg/rex_wasm.js";
 import {
   BrowserDriver, Shaper, parseStepJson, encodeText, decodeText, encodeAtom,
+  decodeInt, decodeMoney, decodeAtom,
   makeDraggable, makeDropTarget, dragValue, endOf, dropPos, maybeRebalance,
   type ShapeNode,
 } from "rex-dom";
@@ -46,7 +47,7 @@ const shape_board_list_card: ShapeNode<HTMLElement> = {
       view: "board#list#card#title",
       apply: (_d, el, v) => {
         const _i = ((el.childNodes[0] as HTMLElement)) as HTMLInputElement;
-        const _s = decodeText(v);
+        const _s = String(decodeText(v));
         if (_i.value !== _s) _i.value = _s;
       },
     },
@@ -88,7 +89,7 @@ const shape_board_list: ShapeNode<HTMLElement> = {
     {
       view: "board#list#title",
       apply: (_d, el, v) => {
-        (((el.childNodes[0] as HTMLElement).childNodes[0] as HTMLElement)).textContent = decodeText(v);
+        (((el.childNodes[0] as HTMLElement).childNodes[0] as HTMLElement)).textContent = String(decodeText(v));
       },
     },
   ],

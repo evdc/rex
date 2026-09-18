@@ -75,6 +75,7 @@ impl Emit<'_> {
         self.line("import init, { RexApp } from \"./pkg/rex_wasm.js\";");
         self.line("import {");
         self.line("  BrowserDriver, Shaper, parseStepJson, encodeText, decodeText, encodeAtom,");
+        self.line("  decodeInt, decodeMoney, decodeAtom,");
         self.line("  makeDraggable, makeDropTarget, dragValue, endOf, dropPos, maybeRebalance,");
         self.line("  type ShapeNode,");
         self.line("} from \"rex-dom\";");
@@ -245,20 +246,21 @@ impl Emit<'_> {
             self.line("    {");
             self.line(&format!("      view: {},", js_str(&a.view)));
             self.line("      apply: (_d, el, v) => {");
+            let decode = decode_fn(a.encoding);
             match &a.kind {
                 BindKind::Text => {
-                    self.line(&format!("        ({t}).textContent = decodeText(v);"));
+                    self.line(&format!("        ({t}).textContent = String({decode}(v));"));
                 }
                 BindKind::Prop(prop) if prop == "value" => {
                     self.line(&format!("        const _i = ({t}) as HTMLInputElement;"));
-                    self.line("        const _s = decodeText(v);");
+                    self.line(&format!("        const _s = String({decode}(v));"));
                     self.line("        if (_i.value !== _s) _i.value = _s;");
                 }
                 BindKind::Prop(prop) if prop == "checked" => {
                     self.line(&format!("        ({t} as HTMLInputElement).checked = (v === encodeAtom(\"true\"));"));
                 }
                 BindKind::Prop(prop) => {
-                    self.line(&format!("        ({t} as any).{prop} = decodeText(v);"));
+                    self.line(&format!("        ({t} as any).{prop} = {decode}(v);"));
                 }
                 BindKind::Class(cls) => {
                     self.line(&format!(
@@ -340,6 +342,18 @@ impl TemplateBuilder {
 /// listener body, not the event name).
 fn dom_event(ev: &EventBinding) -> String {
     ev.dom_event.clone()
+}
+
+/// The `rex-dom` decode function for a bind's wire encoding (an `Id` passes
+/// through already-encoded, so it shares `decodeText`'s no-op-on-non-`t:`
+/// behavior rather than needing its own decoder).
+fn decode_fn(encoding: Encoding) -> &'static str {
+    match encoding {
+        Encoding::Text | Encoding::Id => "decodeText",
+        Encoding::Int => "decodeInt",
+        Encoding::Money => "decodeMoney",
+        Encoding::Atom => "decodeAtom",
+    }
 }
 
 /// A child-index navigation expression from `root` down a path.

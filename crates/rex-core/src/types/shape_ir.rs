@@ -69,6 +69,9 @@ pub struct AttrBinding {
     /// Child-index path from the level's root element to the bound element.
     pub path: Vec<usize>,
     pub kind: BindKind,
+    /// The wire encoding of the bound value, so codegen decodes with
+    /// `decodeInt`/`decodeMoney`/`decodeAtom` rather than always `decodeText`.
+    pub encoding: Encoding,
 }
 
 /// How a bound value lands on its element.

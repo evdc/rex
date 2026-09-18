@@ -44,3 +44,18 @@ export function encodeMoney(cents: number): string {
 export function encodeAtom(name: string): string {
   return "@" + escape(name);
 }
+
+/** Decode an `i:` Int value back to a number (passes non-`i:` through as-is). */
+export function decodeInt(v: string): number {
+  return v.startsWith("i:") ? Number(v.slice(2)) : Number(v);
+}
+
+/** Decode an `m:` Money value back to its minor units (cents). */
+export function decodeMoney(v: string): number {
+  return v.startsWith("m:") ? Number(v.slice(2)) : Number(v);
+}
+
+/** Decode an `@` atom value back to its bare (unescaped) name, for display as text. */
+export function decodeAtom(v: string): string {
+  return v.startsWith("@") ? unescape(v.slice(1)) : v;
+}

@@ -264,7 +264,7 @@ vitest, the wasm build, and `npm run build` + Playwright for every
 need no CI changes); `scratch.rs` and the old `scripts.sh` removed; README's
 stale "`pkg/` is committed" line fixed (it's gitignored, not committed).
 
-#### S-02 Acceptance programs first (M, no deps) ∥ — *design story*
+#### S-02 Acceptance programs first (M, no deps) ∥ — *design story* — **drafted 2026-09-18, awaiting owner review** (`examples/todomvc/src/app.rex`, `examples/js-framework-benchmark/src/app.rex`, `examples/kanban/src/board.v1.rex`, `SYNTAX.md` §9 open questions, `crates/rex-core/tests/surface_v1.rs`)
 *Goal:* the three MVP apps written in the *target* surface before it exists.
 *Files:* `examples/todomvc/src/app.rex`, `examples/js-framework-benchmark/src/app.rex`,
 `examples/kanban/src/board.rex` (revised), `SYNTAX.md` (rewritten as the v1
@@ -303,7 +303,7 @@ than silently choosing.
 *Acceptance:* fixtures regenerate deterministically; a deliberate engine
 change to emit remove+mount instead of −/+ fails the TS test.
 
-#### S-04 Small checker/codegen bugs from README (S, no deps) ∥
+#### S-04 Small checker/codegen bugs from README (S, no deps) ∥ — **done 2026-09-18**
 *Files:* `crates/rex-core/src/types/check.rs`, `types/view.rs`, `rex-codegen/src/lib.rs`.
 *Subtasks:* (1) `where :f = @atom` on a view level accepted (co-keyed via the
 coreflexive rule, SPEC §3.1); (2) bare identifier in an element body is an
@@ -312,6 +312,29 @@ error "unknown element `cnt`; did you mean `{ :cnt }`?"; (3) binds decode by
 `decodeMoney`, `decodeAtom` to `js/rex-dom/src/encode.ts`; (4) `in` over
 integer literal sets (`expect_subset`).
 *Acceptance:* a checker test per item; Kanban snapshot unchanged.
+*Landed as:* (1) an atom literal grounds to `Const{lit, dom}` when checked
+against an `Id(sort)` ambient domain (`check_rel`'s `ExprKind::Atom` arm),
+matching how `Int`/`Text`/etc. already ground via `constant()`; outside an
+entity domain (e.g. a `{@a}`-typed recursive `let`, or an `in` set) it stays
+its prior standalone coreflexive, so `check_rec_group`'s `{@a}` case is
+unaffected. (2) `Desugar` now collects each entity's field name → declared
+`Type` up front (`entity_fields`, also reused by (3)); `LevelWalk::element`
+flags a childless, attr/handler-less `Content::Element` whose tag matches a
+field of the enclosing entity. (3) `AttrBinding` gained an `encoding: Encoding`
+field, resolved by walking `entity_fields` through dotted paths
+(`LevelWalk::field_encoding`, falling back to `Text` for a path it can't
+resolve — the checker rejects those independently); codegen's `decode_fn`
+picks `decodeInt`/`decodeMoney`/`decodeAtom`/`decodeText` accordingly (`Id`
+shares `decodeText`'s passthrough-on-non-`t:` behavior). (4) `check_in` now
+derives the `in` set's element type by folding `lit_ty`/`join` over the
+collected literals instead of re-`check_rel`-ing the set expression with no
+domain (which is why numeric `in` previously errored "needs a known domain"
+rather than hitting `expect_subset` at all); `expect_subset` itself now
+accepts equal non-atom scalar types, not just atom (co)products. Tests:
+`crates/rex-core/tests/check.rs` (5 new cases) and
+`crates/rex-codegen/tests/decode.rs` (new file). Kanban's generated
+`main.ts` only gained a `String(...)` wrapper around its (unchanged)
+`decodeText` calls — Playwright suite still green.
 
 ### E1 — Surface: grammar and AST
 

@@ -213,21 +213,27 @@ Core-language items, still open:
   no image emit nothing rather than `0` — there's no outer key to range over, so
   "count of customers with zero orders" is unrepresentable. Standard group-by
   behavior, but worth deciding deliberately given the incremental target.
-- **`in` is atoms-only.** `expect_subset` (`crates/rex-core/src/types/check.rs:902`) uses
-  `.atoms()`, so `x in (1 + 2 + 3)` over integers is rejected even though
-  `collect_lits` happily gathers the int literals. Either generalize or reject
-  earlier with a clearer message.
+- ~~**`in` is atoms-only.**~~ **Fixed.** `expect_subset` now accepts any scalar
+  type when both sides agree (not just atom (co)products), and `check_in`
+  derives the set's element type from the collected literals themselves
+  rather than re-typechecking the set expression with no domain — so
+  `x in (1 + 2 + 3)` over an `Int` field type-checks.
 - **`min`/`max` under retraction** take the recompute tier in the engine: the
   `Aggregate` node re-folds the affected group from its integral
   (`dbsp/node.rs`). Correct, but O(group) rather than O(Δ).
-- **Non-Text binds render the wire encoding.** Codegen applies every bind via
-  `decodeText`, so an `Int` field shows as `i:3` (likewise Money/Date/atoms).
-  Decode by the bound value's type.
-- **A bare identifier in an element body silently becomes a tag.**
-  `span { cnt }` compiles to a `<cnt>` element instead of an error (or a bind).
-- **`where :f = @atom` on a view level is rejected** ("not co-keyed"), though
-  `SYNTAX.md` says extra `where`s are ordinary restrictions; only
-  `where :f in @atom` works. Either accept `=` or fix the docs.
+- ~~**Non-Text binds render the wire encoding.**~~ **Fixed.** `AttrBinding` now
+  carries the bound field's `Encoding` (resolved from the entity's declared
+  field types at desugar time), and codegen picks `decodeInt`/`decodeMoney`/
+  `decodeAtom` accordingly instead of always `decodeText`.
+- ~~**A bare identifier in an element body silently becomes a tag.**~~
+  **Fixed.** A childless, attribute-less bare tag that names a field of the
+  enclosing entity is now a desugar-time error ("unknown element `cnt`; did
+  you mean `{ :cnt }`?"); a genuine tag (one that isn't a field name) is
+  unaffected.
+- ~~**`where :f = @atom` on a view level is rejected.**~~ **Fixed.** An atom
+  literal now grounds to a constant relation over the ambient entity domain
+  (like `Int`/`Text`/etc. literals already did via `constant()`), so `=`
+  co-keys correctly; `where :f in @atom` still works as before.
 
 ## Performance
 

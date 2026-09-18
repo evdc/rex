@@ -390,11 +390,23 @@ impl Checker {
 
             ExprKind::FieldPath(parts) => self.check_field_path(parts, span, dom),
 
-            ExprKind::Atom(a) => Ok(TExpr::new(
-                TExprKind::Atom(a.clone()),
-                RelTy::coreflexive(ValueTy::Atom(a.clone())),
-                span,
-            )),
+            // An atom literal grounds to a constant relation over an entity
+            // domain (like the other literals below), so `:f = @atom` at an
+            // entity-keyed ambient domain co-keys with `:f`. Outside an
+            // entity domain (e.g. a top-level `{@a}`-typed `let`, or an `in`
+            // set's element type) it stays its own standalone coreflexive.
+            ExprKind::Atom(a) => match &dom {
+                Some(ValueTy::Id(sort)) => Ok(TExpr::new(
+                    TExprKind::Const { lit: Lit::Atom(a.clone()), dom: *sort },
+                    RelTy::new(ValueTy::Id(*sort), ValueTy::Atom(a.clone())),
+                    span,
+                )),
+                _ => Ok(TExpr::new(
+                    TExprKind::Atom(a.clone()),
+                    RelTy::coreflexive(ValueTy::Atom(a.clone())),
+                    span,
+                )),
+            },
 
             ExprKind::Int(_) => self.constant(expr, dom, ValueTy::Int),
             ExprKind::Decimal(_) => self.constant(expr, dom, ValueTy::Money),
@@ -718,10 +730,16 @@ impl Checker {
         dom: Option<ValueTy>,
         span: Span,
     ) -> TResult<TExpr> {
-        let elem_ty = self.check_rel(rhs, None)?.ty.to;
         let Some(lits) = collect_lits(rhs) else {
             return self.error(rhs.span, "an `in` set must be a set of literals");
         };
+        // The set's element type, from the literals themselves — not from
+        // checking `rhs` as a relation, which would need a domain to ground
+        // scalar literals (`constant`) that an `in` set doesn't have.
+        let mut elem_ty = lit_ty(&lits[0]);
+        for lit in &lits[1..] {
+            elem_ty = self.join(span, &elem_ty, &lit_ty(lit))?;
+        }
         match lhs {
             Some(lhs) => {
                 let ta = self.check_rel(lhs, dom)?;
@@ -898,18 +916,28 @@ impl Checker {
         }
     }
 
-    /// Every atom of `subset` must appear in `universe` (used for `in`).
+    /// Every element of `subset` must be a valid member of `universe` (used
+    /// for `in`). Atom (co)products check literal membership; scalar types
+    /// (`Int`/`Money`/`Text`/`Date`) only need to agree, since any literal of
+    /// that type is a valid element (there's no fixed enumeration to check
+    /// membership against).
     fn expect_subset(&mut self, span: Span, subset: &ValueTy, universe: &ValueTy) -> TResult<()> {
-        match (subset.atoms(), universe.atoms()) {
-            (Some(sub), Some(univ)) if sub.iter().all(|a| univ.contains(a)) => Ok(()),
-            _ => self.error(
+        let ok = match (subset.atoms(), universe.atoms()) {
+            (Some(sub), Some(univ)) => sub.iter().all(|a| univ.contains(a)),
+            (None, None) => subset == universe,
+            _ => false,
+        };
+        if ok {
+            Ok(())
+        } else {
+            self.error(
                 span,
                 format!(
                     "`in` set `{}` is not within the value type `{}`",
                     self.env.show(subset),
                     self.env.show(universe)
                 ),
-            ),
+            )
         }
     }
 

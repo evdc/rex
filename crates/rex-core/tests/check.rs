@@ -349,3 +349,53 @@ fn non_monotone_off_the_recursive_path_is_fine() {
          let q : Node -> Node = distinct(p)\n",
     ));
 }
+
+// --- S-04: small checker/codegen bugs from README --------------------------
+
+#[test]
+fn where_field_eq_atom_on_a_view_level_is_accepted() {
+    // `:region = @west` used to be rejected ("not co-keyed") because the
+    // atom literal never grounded to the ambient entity domain the way
+    // `:field` does; only `where :region in @west` worked.
+    assert_ok(&with_schema(
+        "view board =\n  Customer where :region = @west select\n    li { :name }\n",
+    ));
+}
+
+#[test]
+fn bare_identifier_in_element_body_is_an_error() {
+    // A bare identifier naming a field of the enclosing entity, with no
+    // attrs/children of its own, is almost always a forgotten `:` — used to
+    // silently compile to a `<name>` tag instead.
+    assert_error_contains(
+        &with_schema("view board =\n  Customer select\n    li { name }\n"),
+        "unknown element `name`; did you mean `{ :name }`?",
+    );
+}
+
+#[test]
+fn bare_identifier_that_is_a_real_tag_is_unaffected() {
+    // A genuine element tag (not a field name of the enclosing entity)
+    // still compiles as an element.
+    assert_ok(&with_schema(
+        "view board =\n  Customer select\n    li { span { :name } }\n",
+    ));
+}
+
+#[test]
+fn in_over_integer_literals_is_accepted() {
+    // `expect_subset` used to require `.atoms()` on both sides, so `x in (1 +
+    // 2 + 3)` over an `Int` field was rejected even though `collect_lits`
+    // gathers the int literals fine.
+    assert_ok(&with_schema(
+        "view board =\n  Line where :qty in (1 + 2 + 3) select\n    li { :order }\n",
+    ));
+}
+
+#[test]
+fn in_over_mismatched_scalar_types_is_still_rejected() {
+    assert_error_contains(
+        &with_schema("let bad : Line -> Line = id[:qty in (\"x\" + \"y\")]\n"),
+        "is not within the value type",
+    );
+}
