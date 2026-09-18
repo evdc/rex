@@ -264,13 +264,13 @@ vitest, the wasm build, and `npm run build` + Playwright for every
 need no CI changes); `scratch.rs` and the old `scripts.sh` removed; README's
 stale "`pkg/` is committed" line fixed (it's gitignored, not committed).
 
-#### S-02 Acceptance programs first (M, no deps) ∥ — *design story* — **drafted 2026-09-18, awaiting owner review** (`examples/todomvc/src/app.rex`, `examples/js-framework-benchmark/src/app.rex`, `examples/kanban/src/board.v1.rex`, `SYNTAX.md` §9 open questions, `crates/rex-core/tests/surface_v1.rs`)
+#### S-02 Acceptance programs first (M, no deps) ∥ — *design story* — **revised 2026-09-18 after owner review** — rules: `.` is compose-join and `.f` replaces `:f`; `tag(props) { children }` elements; brace bodies with `=> stmt` shorthand; named union types; prefix verbs `new/update/delete/set/do`; DOM actions are statements. Programs: `examples/todomvc/src/app.rex`, `examples/js-framework-benchmark/src/app.rex`, `examples/chat/src/app.rex` (added: many-to-many via link entity, defaultless `state` as an empty singleton), `examples/kanban/src/board.v1.rex`, `SYNTAX.md` §9 open questions, `crates/rex-core/tests/surface_v1.rs`)
 *Goal:* the three MVP apps written in the *target* surface before it exists.
 *Files:* `examples/todomvc/src/app.rex`, `examples/js-framework-benchmark/src/app.rex`,
 `examples/kanban/src/board.rex` (revised), `SYNTAX.md` (rewritten as the v1
 surface reference).
 *Subtasks:*
-1. Translate `../elysium26/examples/todomvc-views.ely` and
+1. Translate `../elysium26/examples/todomvc-views.ely`, `chat.ely` and
    `../elysium26/bench/js-framework-benchmark/main.ely` into Rex brace syntax
    using: `event`/`on`, `do E(args)` in DOM handlers, `state`, `match`,
    `where … update/delete`, `insert … from`, `Unit`-root views, components
