@@ -1,6 +1,7 @@
 # Roadmap: from Rex to a whole-app incremental relational system
 
-**Status:** strategy document, July 2026.
+**Status:** strategy document, July 2026; revised Sept 2026 (engine/elysium
+comparison with measurements in §3.2, new M6 plan in §4).
 **Scope:** the path from today's four prototypes to one system: a relational language
 covering data model → logic → UI, incrementally maintained end to end, with deltas
 driving the DOM directly. Companion to the "Incremental Relational → DOM" spec
@@ -43,6 +44,11 @@ Four prototypes, each contributing a different proven piece:
 - **Gap = the thesis:** no circuit IR, no delay/integrate/differentiate, no delta
   processing. Eval fully materializes; the REPL re-checks and re-evaluates the whole
   session per line.
+- *(Sept 2026: the two bullets above describe the July starting point. Since then
+  M1–M3 and the M5 Kanban gate landed — circuit IR + delta engine with recursion,
+  nesting, WASM `RexApp`, TS shaper, `rex build` codegen; paths are now under
+  `crates/rex-core/src/`. The gap today is **surface-language breadth and the
+  event log**, not the engine — see M6.)*
 
 ### reactor-ts — the runtime reference
 - A working, tested TypeScript DBSP runtime: Z-sets (`src/zset.ts`), delta-driven
@@ -70,6 +76,16 @@ Four prototypes, each contributing a different proven piece:
   it.
 - Contribution going forward: surface-language feel, compiler structure, and honest
   knowledge of where the UX and semantics get hard. Not the codebase to extend.
+- *(Sept 2026 re-survey)* Healthy: 278 tests pass; TodoMVC, analytics, project
+  tracker, the js-framework-benchmark app, async/HTTP examples, and an event-log
+  sync bridge with an IndexedDB adapter. Its language is far more expressive than
+  Rex's today: named `event`s + `on` handlers, `where`-targeted bulk
+  `update`/`insert`/`delete` with expressions, `state`, `match`, `group by …
+  select {…}`, FK paths, components with props and local state. Two structural
+  limits Rex's design avoids: any query depending on `state` takes a **full
+  recompute** (`emitter-static.ts`, the state-driven branch), and `where .id = x`
+  mutations are a **predicate scan** (O(N) per update). It is now the designated
+  **surface-language donor** for M6.
 
 ### ripple — the type-system story
 - Pipeline-first relational language in Rust compiling to SQLite (working REPL,
@@ -126,6 +142,38 @@ classifier is the highest-risk piece and debugs JS-side, the fractional-indexing
 is JS, and the delta batch crosses the boundary anyway. The original decision criteria
 below are answered; kept for the record.
 
+**Re-examined Sept 2026 against elysium26 — decision stands, rationale revised.**
+Measured on one Kanban-shaped program and an identical log of single events (10k
+inserts, then 1k renames / moves / deletes; engine only, no DOM; µs/event at N=10k):
+
+| Engine | insert | rename | move | delete |
+|---|---|---|---|---|
+| Rex native (Rust) | 7.9 | 4.0 | 12.0 | 9.4 |
+| Rex WASM `-O3`, Bun (JSC) | 18 | 7 | 17 | 12 |
+| Rex WASM `-O3`, Node (V8) | 62 | 24 | 35 | 32 |
+| Rex WASM as shipped (`opt-level="z"`), Node | 87 | 40 | 60 | 42 |
+| elysium26 (TS), Node | 58 | 278 | 301 | 257 |
+
+Findings:
+- **The boundary is cheap** (~0.4 µs per bare call; delta `JSON.parse` ~1–8 µs).
+  What costs is V8 *executing* this WASM: 3–8× native, where JSC is within ~2×.
+  Likely the allocation-heavy `BTreeMap`/`Value`-cloning style under the WASM
+  allocator — unprofiled.
+- **In Chrome, WASM is not currently a speed win** over a well-built TS engine
+  (estimated 10–40 µs/event for these ops; elysium's O(N) updates are its
+  predicate-scan, not TS). At app scale both are far inside a frame budget; engine
+  speed matters only for bulk loads, **event-log replay**, and server fan-out.
+- **The shipped `wasm-release` profile (`opt-level = "z"`) costs ~1.4–1.7×** for
+  ~27 KB gzipped (155 → 182 KB at `-O3`). The earlier 121 KB figure is stale.
+
+**Why keep Rust+WASM, then:** not browser speed, but (1) **one engine everywhere** —
+the event log wants a server (replay, sync, multi-client fan-out), where native Rex is
+5–10× faster than either engine in V8; (2) the correctness investment (batch-oracle
+property tests, typed core) is in Rust; (3) the compiler is Rust regardless. All-TS
+would be simpler and is the right call **only** if the engine is committed to be
+browser-only forever. Follow-ups (M6.f): ship `-O3`; add a batch/transaction entry
+point across the boundary (`Engine::dispatch` already batches); profile under V8.
+
 Recommended end state: the compiler (already Rust) and the engine run as a WASM core;
 a thin JS/TS bridge owns the DOM. The delta protocol favors this split — deltas are
 small, and crossing the WASM↔JS boundary once per `step()` with a compact op batch is
@@ -179,7 +227,7 @@ internals de-risks it.
 |---|---|
 | **Rex** | The system. Core model, compiler, and (pending M0) engine. |
 | **reactor-ts** | Runtime semantics reference and test oracle; its platform is evaluated against, and likely ported to satisfy, the spec (M3). |
-| **elysium26** | Design reference for surface language, compiler structure, examples, and benchmarks. Frozen. |
+| **elysium26** | Design reference for surface language, compiler structure, examples, and benchmarks. Frozen as a codebase; **its surface language and event model are the M6 donor**, and its example apps (TodoMVC, js-framework-benchmark) are M6 acceptance targets. |
 | **ripple** | Type-system and IR donor (cardinality lattice, key tracking, decorrelation). Rewrite-onto-Rex question re-opened at M5, not before. |
 
 ---
@@ -195,7 +243,7 @@ The §3.3 comparison. Deliverable: a short written decision with the four exit
 criteria answered, plus the surviving mini-circuit as the seed of M1.
 **Gate:** engine choice committed. ✓
 
-### M1 — Rex incremental core
+### M1 — Rex incremental core — **effectively met** (engine, backfill, retraction property tests, recursion; the linearity-metadata consumer is still open)
 - Circuit IR lowered from `TProgram`; delay (`z⁻¹`), integrate, differentiate;
   delta-driven operator implementations reusing the existing Z-set algebra.
 - The REPL/Session stops re-evaluating the world: `let`/`entity` extend the circuit,
@@ -252,7 +300,8 @@ Build in the spec's §11 order:
 **Gate:** spec §12 obligations green: field edit preserves node identity, reorder is
 one move, subtree delete is one `removeChild`, coupled batches apply atomically.
 
-### M4 — Effects membrane (spec Part II)
+### M4 — Effects membrane (spec Part II) — **not started; sequenced after M6.a**
+The named-event log (M6.a) is its foundation: intents/outcomes are logged events.
 In the spec's §20 order: intent/claim/outcome relations + driver skeleton (GET only)
 → `Async<T>` and single `await` desugar with Pending/Loaded/Failed rendering →
 structural cancellation (unmount aborts in-flight GETs) → latest-wins slots + stale
@@ -293,9 +342,45 @@ and notes below kept for the record.
   smuggled language features. Encoding already shared (`encode.ts`).
 - **Deferred:** ripple's cardinality/key typing (not needed for the two MVP apps);
   the ripple-rewrite question.
-**Gate:** Kanban ✓. **Remaining:** TodoMVC (needs `state` singletons + a `match`
-membership construct for filter-gated visibility + bulk where-target dispatch);
-js-framework-benchmark numbers via elysium26's harness.
+**Gate:** Kanban ✓. **Remaining** (TodoMVC, js-framework-benchmark) is folded into
+M6, which generalizes it.
+
+### M6 — Surface convergence with elysium26 + event log (Sept 2026)
+**Decision: extend Rex, don't rewrite.** The novel, hard parts — Z-set DBSP with
+correct retraction, recursion, composite-key nesting, the delta shaper with
+node-identity guarantees — are built and tested here; a rewrite re-earns them. What's
+missing is surface, and Rex's architecture already takes it the right way: sugar
+desugars into the narrow core (as `types/view.rs` does). elysium26's
+pipeline/SQL-flavored language becomes the **user-facing front end**; Rex's
+point-free combinators become the IR users rarely write directly.
+
+Build order:
+- **M6.a — Named events + event log.** `event E(params)` / `on E(…)` handlers; DOM
+  handlers dispatch named events rather than inline mutation lists. Every change enters
+  through an append-only, replayable log (the "incrementally maintained against a log
+  of incoming events" goal). Log replay = snapshot restore; this also seeds
+  persistence and is M4's substrate.
+- **M6.b — Handler bodies.** `T where … update {f: expr}` / `insert` / `delete`:
+  bulk targets and expression values evaluated against the pre-event snapshot, still
+  one atomic step. Primary-key targets must be O(1) lookups, not scans.
+- **M6.c — `state` + `match`.** State as singleton relations, so a state change is an
+  ordinary delta — no recompute-on-state cliff. `match`/conditional membership for
+  filter-gated visibility.
+- **M6.d — Views over derived relations.** Bind any relation keyed by the level's
+  binder (aggregates, joins, FK paths), not just `:field`; components with props;
+  `if`/class expressions; type-directed decoding of binds (fixes Int rendering as
+  `i:3`).
+- **M6.e — Query sugar.** `select {…}` records, `group by`, FK paths, `order by` over
+  intrinsic fields — each desugaring to binary relations (records = forks of
+  per-field relations; wide rows only at the edge).
+- **M6.f — Engine/boundary performance** (see §3.2): `-O3` wasm profile, a batch
+  entry point for bulk load and log replay, V8 allocation profiling.
+- **Hide fractional order keys** (manual order as a language concept) alongside
+  M6.d/e.
+
+**Gate:** elysium26's TodoMVC and js-framework-benchmark apps ported to Rex, running
+on the generated code with no hand-written per-app JS; js-framework-benchmark
+numbers recorded for both, and a page reload restoring state via log replay.
 
 ---
 
@@ -303,9 +388,11 @@ js-framework-benchmark numbers via elysium26's harness.
 
 - **Delta fan-out amplification** (Rex SPEC §10) — cost-model open problem; revisit
   with M1 profiling data.
-- **Recursion / fixpoints** in the language (Rex SPEC §8, PARKED) — reactor-ts's
-  `iterate.ts` shows the runtime shape; no milestone needs it before M5.
+- ~~**Recursion / fixpoints**~~ — **done** (fix regions, stratification); fully
+  incremental nested deltas remain future work.
 - **Sync / multi-client** — elysium26's `sync/` package proves the event-sourcing
-  shape; out of scope until the single-client story is done.
+  shape; out of scope until the single-client story is done. M6.a's event log is
+  designed to be its substrate, and native Rex on a server is the reason §3.2 keeps
+  Rust.
 - **Firmament** — the distributed/ontology extension. The effect membrane (M4) and
   the derivation/justification model are its foundations; nothing more yet.

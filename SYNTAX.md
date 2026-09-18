@@ -65,7 +65,14 @@ view board =
 - **`where :list = l`** on a nested select is the **membership** conjunct: the
   cards whose `:list` points at *this* list row `l`. Exactly one `where` per
   nested level must equate a child relation (`:field` or a named `rel`) to the
-  parent binder; other `where`s are ordinary restrictions.
+  parent binder; other `where`s are ordinary restrictions. (Known wart: a
+  restriction against an atom must currently be spelled `where :done in @no`;
+  `where :done = @no` is rejected as "not co-keyed".)
+
+> **Known limits (Sept 2026, see ROADMAP M6):** binds are `:field`-only (no
+> aggregates/joins), non-Text binds render their wire encoding (`i:3`), a bare
+> identifier in an element body becomes a tag, and there is no `state`, `match`,
+> or named-event log yet.
 
 ## Elements
 
