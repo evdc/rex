@@ -50,8 +50,10 @@ cargo run -p rex-cli -- build app.rex -o app.ts   # compile `view`s to a TS modu
 Running a file prints the canonical s-expression AST, a type-check result, and
 each view's materialized contents. `cargo run -p rex-cli --
 crates/rex-core/tests/fixtures/spec12.rex` is the best core demo; the Kanban
-app is the best whole-system demo (see `scripts.sh` — the wasm-bindgen step is
-not yet scripted, and the built `pkg/` is committed).
+app is the best whole-system demo — run `scripts/build-wasm.sh` to build
+`rex-wasm` and generate the wasm-bindgen glue into `examples/kanban/src/pkg/`
+(gitignored, not committed), then `cd examples/kanban && npm run build` and
+`npx playwright test`.
 
 The REPL (`crates/rex-cli/src/repl.rs`) accepts `entity`/`let` statements
 (committed to the session) and bare expressions (evaluated in a scratch copy

@@ -60,7 +60,7 @@ pub fn desugar(program: &Program) -> Desugared {
             Stmt::Rel(r) => {
                 // `rel R(A, B)` -> `let R = A . :R` (A's identity, then the
                 // injected field). The field itself is added to A's entity decl.
-                let body = compose(ident(&r.from, r.span), field_path(&[r.name.clone()], r.span), r.span);
+                let body = compose(ident(&r.from, r.span), field_path(std::slice::from_ref(&r.name), r.span), r.span);
                 d.stmts.push(Stmt::Let(LetDecl {
                     name: Some(r.name.clone()),
                     ty: None,
@@ -244,8 +244,6 @@ impl LevelWalk<'_> {
                 AttrValue::Bind(field) => {
                     let kind = if let Some(cls) = a.name.strip_prefix("class.") {
                         BindKind::Class(cls.to_string())
-                    } else if a.name == "value" || a.name == "checked" {
-                        BindKind::Prop(a.name.clone())
                     } else {
                         BindKind::Prop(a.name.clone())
                     };
@@ -334,10 +332,7 @@ impl LevelWalk<'_> {
 
         let mut body = Vec::new();
         for m in &h.body {
-            match self.mutation(m, &scope) {
-                Some(mir) => body.push(mir),
-                None => return None,
-            }
+            body.push(self.mutation(m, &scope)?);
         }
 
         self.d.shapes.handlers.push(HandlerDef {

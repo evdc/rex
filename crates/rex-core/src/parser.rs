@@ -723,8 +723,7 @@ impl Parser {
 
     fn parse_expr(&mut self, min_bp: u8) -> PResult<Expr> {
         let mut lhs = self.parse_prefix()?;
-        loop {
-            let Some(lbp) = self.infix_bp() else { break };
+        while let Some(lbp) = self.infix_bp() {
             if lbp <= min_bp {
                 break;
             }

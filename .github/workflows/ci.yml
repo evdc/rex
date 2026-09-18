@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: cargo test / clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  wasm-build:
+    name: wasm build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install wasm-bindgen-cli (pinned to Cargo.lock)
+        run: |
+          version=$(grep -A2 '^name = "wasm-bindgen"$' Cargo.lock | grep '^version' | head -1 | sed -E 's/version = "(.*)"/\1/')
+          cargo install wasm-bindgen-cli --version "$version" --locked
+      - run: ./scripts/build-wasm.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kanban-pkg
+          path: examples/kanban/src/pkg
+
+  rex-dom:
+    name: rex-dom vitest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+        working-directory: js/rex-dom
+      - run: npx vitest run
+        working-directory: js/rex-dom
+
+  examples:
+    name: examples (build + Playwright)
+    needs: wasm-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/download-artifact@v4
+        with:
+          name: kanban-pkg
+          path: examples/kanban/src/pkg
+      - name: Build and test every example
+        run: |
+          set -euo pipefail
+          for dir in examples/*/; do
+            if [ -f "$dir/package.json" ]; then
+              echo "::group::$dir"
+              (
+                cd "$dir"
+                npm ci
+                npm run build
+                npx playwright install --with-deps chromium
+                npx playwright test
+              )
+              echo "::endgroup::"
+            fi
+          done

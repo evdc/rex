@@ -2,11 +2,15 @@
 resolver = "2"
 members = ["crates/rex-core", "crates/rex-cli", "crates/rex-wasm", "crates/rex-codegen"]
 
-# Small-and-fast profile for the wasm bundle (build with
+# Wasm bundle profile (build with
+# `scripts/build-wasm.sh`, or directly with
 # `cargo build -p rex-wasm --profile wasm-release --target wasm32-unknown-unknown`).
+# opt-level = 3 rather than "z": ROADMAP §3.2 measured the size-optimized
+# profile costing ~1.4-1.7x engine throughput, which matters more than the
+# extra bundle bytes for MVP.
 [profile.wasm-release]
 inherits = "release"
-opt-level = "z"
+opt-level = 3
 lto = true
 panic = "abort"
 codegen-units = 1

@@ -181,7 +181,6 @@ pub fn eval_fixpoint(
             changed |= cand != iterates[name];
             next.insert(name.clone(), cand);
         }
-        drop(overlay);
         iterates = next;
         if !changed {
             break;

@@ -232,7 +232,7 @@ E1 Surface spec ─┤                                            │
 
 ### E0 — Foundations and hygiene
 
-#### S-01 Build script, wasm profile, CI (M, no deps) ∥
+#### S-01 Build script, wasm profile, CI (M, no deps) ∥ — **done 2026-09-18**
 *Goal:* one command builds everything; CI proves it.
 *Files:* `scripts.sh` → `scripts/build-wasm.sh`, `Cargo.toml` (profile),
 `.github/workflows/ci.yml`, `README.md` (Building).
@@ -249,6 +249,20 @@ E1 Surface spec ─┤                                            │
 4. Remove `scratch.rs`; fix README's stale "pkg/ is committed" line.
 *Acceptance:* green CI on main; `scripts/build-wasm.sh && (cd examples/kanban
 && npx playwright test)` passes from a clean checkout.
+*Landed as:* `scripts/build-wasm.sh` (checks the `wasm-bindgen` CLI version
+against the crate version pinned in `Cargo.lock`, fails loudly on mismatch or
+if missing); `wasm-release` profile switched to `opt-level = 3` (512,931 bytes
+wasm / 169,716 bytes gzipped for Kanban, vs. 633,146 / 155,356 at `opt-level =
+"z"` — smaller binary *and* the ROADMAP §3.2 throughput win, gzip is slightly
+larger since `-O3` code is less compressible); `.github/workflows/ci.yml` runs
+`cargo test --workspace`, `cargo clippy --workspace --all-targets -D
+warnings` (fixed the 5 pre-existing lints this surfaced —
+`drop_non_drop`, `while_let_loop`, `cloned_ref_to_slice_refs`,
+`if_same_then_else`, `question_mark` — no behavior changes), `rex-dom`
+vitest, the wasm build, and `npm run build` + Playwright for every
+`examples/*` directory with a `package.json` (so S-90/S-91's new examples
+need no CI changes); `scratch.rs` and the old `scripts.sh` removed; README's
+stale "`pkg/` is committed" line fixed (it's gitignored, not committed).
 
 #### S-02 Acceptance programs first (M, no deps) ∥ — *design story*
 *Goal:* the three MVP apps written in the *target* surface before it exists.
