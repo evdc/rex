@@ -287,18 +287,32 @@ impl Circuit {
 
     /// Run one transaction through the circuit and return each view's delta.
     pub fn step(&mut self, tx: &Transaction) -> StepResult {
-        // Ensure every targeted base table exists *before* sizing the delta
-        // vector, so data arriving ahead of any view that reads it is kept.
+        let deltas = self.seed_deltas(tx);
+        self.run(0, deltas, true)
+    }
+
+    /// Run one transaction purely for its effect on state, skipping the
+    /// per-view delta collection `step` does (S-21) — the engine-only-cost
+    /// path replay wants: a page reload re-applies a whole log with nobody
+    /// listening for per-step deltas.
+    pub fn step_silent(&mut self, tx: &Transaction) {
+        let deltas = self.seed_deltas(tx);
+        self.run(0, deltas, false);
+    }
+
+    /// Ensure every targeted base table exists (so data arriving ahead of
+    /// any view that reads it is kept), then seed each input node's delta
+    /// from the transaction.
+    fn seed_deltas(&mut self, tx: &Transaction) -> Vec<BTreeRelation> {
         for (key, _, _, _) in &tx.deltas {
             self.input(*key);
         }
-
         let mut deltas: Vec<BTreeRelation> = vec![BTreeRelation::new(); self.nodes.len()];
         for (key, l, r, w) in &tx.deltas {
             let id = self.inputs[key];
             deltas[id.0].add(l.clone(), r.clone(), *w);
         }
-        self.run(0, deltas)
+        deltas
     }
 
     /// Evaluate the freshly appended node suffix `from..` over the data already
@@ -310,12 +324,15 @@ impl Circuit {
     /// their integrals are presented as deltas by reference (`Ctx::delta`
     /// redirects below-floor reads), so nothing is cloned.
     pub fn backfill(&mut self, from: usize) -> StepResult {
-        self.run(from, vec![BTreeRelation::new(); self.nodes.len()])
+        self.run(from, vec![BTreeRelation::new(); self.nodes.len()], true)
     }
 
     /// The shared driver: compute nodes `floor..` in topological order, commit
-    /// their deltas, and report deltas for views produced at or above `floor`.
-    fn run(&mut self, floor: usize, mut deltas: Vec<BTreeRelation>) -> StepResult {
+    /// their deltas, and — when `collect` — report deltas for views produced
+    /// at or above `floor`. `collect: false` (S-21's silent replay path)
+    /// skips only that final per-view clone; every node still computes and
+    /// commits, so state after a silent step is identical to a normal one.
+    fn run(&mut self, floor: usize, mut deltas: Vec<BTreeRelation>, collect: bool) -> StepResult {
         // Per-step cache of each fix region's member deltas (a region is
         // evaluated once even though it has one FixOutput per member).
         let mut region_cache: Vec<Option<Vec<BTreeRelation>>> = vec![None; self.fixes.len()];
@@ -361,9 +378,11 @@ impl Circuit {
         }
 
         let mut result = StepResult::default();
-        for (name, id) in &self.outputs {
-            if id.0 >= floor {
-                result.view_deltas.insert(name.clone(), deltas[id.0].clone());
+        if collect {
+            for (name, id) in &self.outputs {
+                if id.0 >= floor {
+                    result.view_deltas.insert(name.clone(), deltas[id.0].clone());
+                }
             }
         }
         result

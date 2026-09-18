@@ -422,7 +422,7 @@ event name; sequence-numbered handler names disappear.
 *Acceptance:* Kanban's snapshot test updated; Playwright unchanged;
 `tests/dispatch.rs` rewritten around named events.
 
-#### S-21 Engine event log (M, deps S-20)
+#### S-21 Engine event log (M, deps S-20) — **done 2026-09-18** (`crates/rex-core/src/dbsp/log.rs`, `engine.rs`, `crates/rex-core/tests/log.rs`; deviations below)
 *Goal:* every state change is an appended `Event`; replay reproduces state.
 *Files:* `crates/rex-core/src/dbsp/log.rs` (new), `engine.rs`, `tests/log.rs` (new).
 *Subtasks:*
@@ -442,6 +442,41 @@ event name; sequence-numbered handler names disappear.
    live engine's input integrals and every view.
 *Acceptance:* tests green; replay of a 10k-event log is within 2× of live
 apply time (record the number).
+*Landed as:* `dbsp/log.rs` defines `Event`/`ArgValue` plus the reserved
+`GENESIS`/`GENESIS_SORT` constants a genesis event tags its target sort
+with; `eval::encode::event_to_json` is the canonical (one-way for now —
+decode is S-22's `log_since`/`replay` wasm API's job) JSON encoding.
+`Engine::dispatch` is now `pub(crate)`; the public write surface is
+`Engine::apply_event(name, ops, args) -> (Vec<Value>, StepResult)`, which
+runs the transaction and appends the log entry, plus `apply_typed_stmt`
+(unchanged signature), whose `TStmt::New` arm now also logs a `@genesis`
+event carrying the target sort (`GENESIS_SORT`) and every field. **Deviation
+from subtask 2's literal signature:** `apply_event` takes already-derived
+`ops`/`args` rather than `(&EventDef, &Event)` — deriving ops from an
+`EventDef` (binding params, expanding nested `do`s) is `crate::events`'
+existing machinery (`dispatch_event`, unchanged besides now calling
+`apply_event`), and keeping that in `events.rs` rather than pulling
+`types::shape_ir::EventDef` into the `dbsp` layer preserves the
+engine/surface layering already in place. For the same reason,
+**`Engine::replay` is `crate::events::replay(engine, env, events, log,
+silent)`**, not a bare `Engine` method: replaying a non-genesis event needs
+the same `EventDef` registry `dispatch_event` does, to re-derive its ops
+from its logged args (`check_param` is skipped — the log was produced by an
+already-checked dispatch, so replay is pure engine cost per §2.2/§2.10); a
+`@genesis` event is special-cased (no `EventDef` — it never went through a
+declared `on`) and reconstructed straight from its tagged sort via a new
+`Engine::apply_new_silent`. `Circuit::step`/`backfill` share one `run(floor,
+deltas, collect: bool)`; `step_silent`/`Engine::dispatch_silent` pass
+`collect: false`. `crates/rex-core/tests/contract_fixtures.rs`'s direct
+`Engine::dispatch` calls moved to `apply_event` (now the only way an
+external crate can drive an arbitrary `DispatchOp` batch). Property test
+(`replay_matches_live_for_any_history`, 256 proptest cases of 0–16 random
+`AddList`/`Rename`/`MoveCard` ops) passes; perf recorded via an `#[ignore]`d
+test (`replay_of_10k_events_is_within_2x_of_live_apply`, run with
+`--release`): live apply of 10k events ~28ms, silent replay ~15ms — **0.53×**,
+comfortably under the 2× budget (silent replay skips the per-step delta
+clone `step` does, so it should generally beat live apply, not just meet
+it).
 
 #### S-22 wasm API around events (M, deps S-21)
 *Files:* `crates/rex-wasm/src/lib.rs`, `js/rex-runtime/src/app.ts` (new; see S-30).

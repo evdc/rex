@@ -11,7 +11,7 @@ pub mod interp;
 pub mod relation;
 pub mod value;
 
-pub use encode::{decode_value, encode_value, json_quote, rows_to_json, step_result_to_json};
+pub use encode::{decode_value, encode_value, event_to_json, json_quote, rows_to_json, step_result_to_json};
 pub use intern::{intern, Sym};
 pub use interp::{eval_expr_with, run, run_typed_values, EvalResult, Store};
 pub use relation::{BTreeRelation, BinaryRelation};

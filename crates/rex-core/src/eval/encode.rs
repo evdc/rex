@@ -22,7 +22,7 @@
 
 use super::relation::BinaryRelation;
 use super::value::Value;
-use crate::dbsp::StepResult;
+use crate::dbsp::{ArgValue, Event, StepResult};
 use std::fmt::Write;
 
 /// Canonically encode one value.
@@ -186,6 +186,59 @@ pub fn step_result_to_json(res: &StepResult) -> String {
     out
 }
 
+/// Canonical JSON encoding of one logged [`Event`] (S-21): `{"seq":0,
+/// "name":"MoveCard","args":{"card":"#1:0",...},"cause":null,"intent":null}`.
+/// A relation-valued arg (S-42) encodes as the same row-array shape
+/// `rows_to_json` uses for a view delta. The wire format a persistence
+/// adapter appends and a `log_since`/`replay` call (S-22) crosses the wasm
+/// boundary with.
+pub fn event_to_json(e: &Event) -> String {
+    let mut out = String::new();
+    out.push_str("{\"seq\":");
+    let _ = write!(out, "{}", e.seq);
+    out.push_str(",\"name\":");
+    json_string(&mut out, &e.name);
+    out.push_str(",\"args\":{");
+    for (i, (name, arg)) in e.args.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        json_string(&mut out, name);
+        out.push(':');
+        match arg {
+            ArgValue::Value(v) => json_string(&mut out, &encode_value(v)),
+            ArgValue::Rel(rows) => {
+                out.push('[');
+                for (ri, (l, r, w)) in rows.iter().enumerate() {
+                    if ri > 0 {
+                        out.push(',');
+                    }
+                    out.push('[');
+                    json_string(&mut out, &encode_value(l));
+                    out.push(',');
+                    json_string(&mut out, &encode_value(r));
+                    let _ = write!(out, ",{w}]");
+                }
+                out.push(']');
+            }
+        }
+    }
+    out.push_str("},\"cause\":");
+    match e.cause {
+        Some(c) => {
+            let _ = write!(out, "{c}");
+        }
+        None => out.push_str("null"),
+    }
+    out.push_str(",\"intent\":");
+    match &e.intent {
+        Some(i) => json_string(&mut out, i),
+        None => out.push_str("null"),
+    }
+    out.push('}');
+    out
+}
+
 /// One relation's rows as a JSON array `[["<key>","<value>",<weight>],...]` —
 /// the shared row-encoding used by both the per-step delta stream and the
 /// `read_view` escape hatch, so the two can't drift.
@@ -285,6 +338,26 @@ mod tests {
         let fake = Value::text("p(i:1,i:2)");
         let real = Value::Pair(Box::new(Value::Int(1)), Box::new(Value::Int(2)));
         assert_ne!(encode_value(&fake), encode_value(&real));
+    }
+
+    #[test]
+    fn event_json_shape() {
+        use crate::dbsp::Event;
+
+        let e = Event {
+            seq: 3,
+            name: "MoveCard".to_string(),
+            args: vec![
+                ("card".to_string(), ArgValue::Value(Value::Id(SortId(1), 0))),
+                ("pos".to_string(), ArgValue::Value(Value::text("a5"))),
+            ],
+            cause: None,
+            intent: None,
+        };
+        assert_eq!(
+            event_to_json(&e),
+            r##"{"seq":3,"name":"MoveCard","args":{"card":"#1:0","pos":"t:a5"},"cause":null,"intent":null}"##
+        );
     }
 
     #[test]

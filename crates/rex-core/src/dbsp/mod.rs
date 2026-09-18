@@ -14,10 +14,12 @@
 
 pub mod circuit;
 pub mod engine;
+pub mod log;
 pub mod lower;
 pub mod node;
 
 pub use circuit::{Circuit, StepResult, Transaction};
 pub use engine::{DispatchOp, Engine};
+pub use log::{ArgValue, Event, GENESIS, GENESIS_SORT};
 pub use lower::lower;
 pub use node::{CoKeyedFn, InputKey, KeyAgg, Node, NodeId, Updated};

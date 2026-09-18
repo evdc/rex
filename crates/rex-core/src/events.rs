@@ -7,7 +7,7 @@
 //! and only the outer event is what the host (and, from S-21, the log) sees.
 //! The desugarer has already rejected `do` cycles, so expansion terminates.
 
-use crate::dbsp::{DispatchOp, Engine, StepResult};
+use crate::dbsp::{ArgValue, DispatchOp, Engine, Event, StepResult, GENESIS, GENESIS_SORT};
 use crate::eval::interp::lit_value;
 use crate::eval::{encode_value, Value};
 use crate::types::shape_ir::{EventDef, MutationIR, ParamTy, ValRef};
@@ -15,7 +15,10 @@ use crate::types::{Env, SortId, ValueTy};
 use std::collections::HashMap;
 
 /// Dispatch `name` with `args` (keyed by the event's declared param names).
-/// Returns the ids minted by any `new`, in order, and the step's deltas.
+/// Returns the ids minted by any `new`, in order, and the step's deltas. This
+/// is the only write path a host should use once a program has booted — the
+/// wasm bridge and the tests share it — and it logs the event (S-21) so
+/// [`replay`] can reproduce the same effect later from an empty engine.
 pub fn dispatch_event(
     engine: &mut Engine,
     env: &Env,
@@ -26,16 +29,97 @@ pub fn dispatch_event(
     let def = find(events, name)?;
     // Bind the outer call's args by declared name, checking each.
     let mut bound = HashMap::new();
+    let mut logged = Vec::new();
     for p in &def.params {
         let v = args
             .get(&p.name)
             .ok_or_else(|| format!("event `{name}` missing arg `{}`", p.name))?;
         check_param(env, name, &p.name, &p.ty, v)?;
         bound.insert(p.name.clone(), v.clone());
+        logged.push((p.name.clone(), ArgValue::Value(v.clone())));
     }
     let mut ops = Vec::new();
     expand(env, events, def, &bound, &mut ops)?;
-    Ok(engine.dispatch(&ops))
+    Ok(engine.apply_event(name, &ops, logged))
+}
+
+/// Re-apply a whole event log against `engine` (expected to start with its
+/// views registered but no data — the boot sequence runs every non-`new`
+/// program statement, then this) in log order: a [`GENESIS`] event (a
+/// program-setup `new`, S-21 subtask 3) mints directly from its tagged sort;
+/// every other event re-derives its dispatch ops from the same declared
+/// handler `dispatch_event` used to produce it, then applies them. Doesn't
+/// re-append to `engine`'s log — the caller already has one (this *is* it).
+///
+/// `silent` skips per-step delta collection (`Circuit::step_silent`): the
+/// engine-only-cost path a page reload wants, since nobody is listening for
+/// per-step deltas mid-replay.
+pub fn replay(
+    engine: &mut Engine,
+    env: &Env,
+    events: &[EventDef],
+    log: &[Event],
+    silent: bool,
+) -> Result<(), String> {
+    for event in log {
+        if event.name == GENESIS {
+            replay_genesis(engine, event, silent)?;
+        } else {
+            let ops = ops_for_event(env, events, event)?;
+            if silent {
+                engine.dispatch_silent(&ops);
+            } else {
+                engine.dispatch(&ops);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn replay_genesis(engine: &mut Engine, event: &Event, silent: bool) -> Result<(), String> {
+    let mut sort = None;
+    let mut fields = Vec::new();
+    for (name, arg) in &event.args {
+        let ArgValue::Value(v) = arg else {
+            return Err(format!("genesis event: relation-valued arg `{name}` is not supported"));
+        };
+        if name == GENESIS_SORT {
+            let Value::Int(n) = v else {
+                return Err("genesis event: malformed sort tag".to_string());
+            };
+            sort = Some(SortId(usize::try_from(*n).map_err(|_| "genesis event: bad sort tag")?));
+        } else {
+            fields.push((name.clone(), v.clone()));
+        }
+    }
+    let sort = sort.ok_or_else(|| "genesis event missing sort tag".to_string())?;
+    if silent {
+        engine.apply_new_silent(sort, &fields);
+    } else {
+        engine.apply_new(sort, &fields);
+    }
+    Ok(())
+}
+
+/// Rebuild an event's dispatch ops from its logged args: the same
+/// bind-then-[`expand`] `dispatch_event` runs, minus `check_param` — the log
+/// was produced by an already-checked dispatch, so replay is pure engine
+/// cost (MVP-PLAN §2.2/§2.10).
+fn ops_for_event(env: &Env, events: &[EventDef], event: &Event) -> Result<Vec<DispatchOp>, String> {
+    let def = find(events, &event.name)?;
+    let mut bound = HashMap::new();
+    for (name, arg) in &event.args {
+        let ArgValue::Value(v) = arg else {
+            return Err(format!(
+                "event `{}`: relation-valued arg `{name}` is not supported yet (MVP-PLAN S-42)",
+                event.name
+            ));
+        };
+        bound.insert(name.clone(), v.clone());
+    }
+    let mut ops = Vec::new();
+    expand(env, events, def, &bound, &mut ops)?;
+    Ok(ops)
 }
 
 fn find<'a>(events: &'a [EventDef], name: &str) -> Result<&'a EventDef, String> {

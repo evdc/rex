@@ -9,7 +9,7 @@
 //!
 //! Regenerate with `UPDATE_FIXTURES=1 cargo test -p rex --test contract_fixtures`.
 
-use rex::dbsp::{DispatchOp, Engine};
+use rex::dbsp::{ArgValue, DispatchOp, Engine};
 use rex::eval::interp::lit_value;
 use rex::eval::value::Value;
 use rex::eval::{json_quote, rows_to_json, step_result_to_json};
@@ -41,8 +41,15 @@ fn snapshot_json(engine: &Engine) -> String {
 }
 
 fn set(engine: &mut Engine, id: &Value, field: &str, value: Value) -> String {
-    let (_, res) =
-        engine.dispatch(&[DispatchOp::Set { id: id.clone(), updates: vec![(field.to_string(), value)] }]);
+    let (_, res) = engine.apply_event(
+        "Set",
+        &[DispatchOp::Set { id: id.clone(), updates: vec![(field.to_string(), value.clone())] }],
+        vec![
+            ("id".to_string(), ArgValue::Value(id.clone())),
+            ("field".to_string(), ArgValue::Value(Value::text(field))),
+            ("value".to_string(), ArgValue::Value(value)),
+        ],
+    );
     step_result_to_json(&res)
 }
 
@@ -86,18 +93,22 @@ fn scripted_steps() -> Vec<(&'static str, String)> {
     steps.push(("03-reparent.json", set(&mut engine, &c1, "list", l_doing.clone())));
 
     // 4: delete c2.
-    let (_, res4) = engine.dispatch(&[DispatchOp::Retract { id: c2 }]);
+    let (_, res4) = engine.apply_event(
+        "Delete",
+        &[DispatchOp::Retract { id: c2.clone() }],
+        vec![("id".to_string(), ArgValue::Value(c2))],
+    );
     steps.push(("04-delete.json", step_result_to_json(&res4)));
 
     // 5: insert a new card into l_doing (a fresh mount).
-    let (_, res5) = engine.dispatch(&[DispatchOp::New {
-        sort: card_sort,
-        fields: vec![
-            ("title".to_string(), Value::text("Write tests")),
-            ("pos".to_string(), lit_value(&Lit::Str("b0".to_string()))),
-            ("list".to_string(), l_doing),
-        ],
-    }]);
+    let fields = vec![
+        ("title".to_string(), Value::text("Write tests")),
+        ("pos".to_string(), lit_value(&Lit::Str("b0".to_string()))),
+        ("list".to_string(), l_doing),
+    ];
+    let logged = fields.iter().map(|(f, v)| (f.clone(), ArgValue::Value(v.clone()))).collect();
+    let (_, res5) =
+        engine.apply_event("Insert", &[DispatchOp::New { sort: card_sort, fields }], logged);
     steps.push(("05-insert.json", step_result_to_json(&res5)));
 
     steps

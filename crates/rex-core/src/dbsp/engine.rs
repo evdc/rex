@@ -5,6 +5,7 @@
 //! shape with negated weights.
 
 use super::circuit::{Circuit, StepResult, Transaction};
+use super::log::{ArgValue, Event, GENESIS, GENESIS_SORT};
 use super::lower::lower;
 use super::node::InputKey;
 use crate::eval::intern::intern;
@@ -20,6 +21,12 @@ pub struct Engine {
     pub circuit: Circuit,
     /// Per-sort id sequence (the incremental home of `Interp::next_id`).
     next_id: HashMap<SortId, u64>,
+    /// The append-only event log (S-21): every write to this engine, in
+    /// order, seq'd by its index. Complete from empty — a program-setup
+    /// `new` (in [`apply_typed_stmt`](Self::apply_typed_stmt)) logs a
+    /// synthetic [`GENESIS`] event, so [`replay`](crate::events::replay)
+    /// never needs an out-of-band snapshot to make sense of the log.
+    log: Vec<Event>,
 }
 
 /// One operation in a handler dispatch (see [`Engine::dispatch`]).
@@ -44,6 +51,17 @@ impl Engine {
         (id, self.circuit.step(&tx))
     }
 
+    /// [`apply_new`](Self::apply_new)'s silent counterpart — no `StepResult`,
+    /// no state difference otherwise. Used by [`replay`](crate::events::replay)
+    /// to re-mint a [`GENESIS`]-logged entity without paying for a delta batch
+    /// nobody reads.
+    pub(crate) fn apply_new_silent(&mut self, sort: SortId, fields: &[(String, Value)]) -> Value {
+        let mut tx = Transaction::new();
+        let id = self.push_new(&mut tx, sort, fields);
+        self.circuit.step_silent(&tx);
+        id
+    }
+
     /// Mint an id and append its identity + field rows to `tx` (no step). The
     /// transaction-builder shared by [`apply_new`](Self::apply_new) and
     /// [`dispatch`](Self::dispatch).
@@ -63,7 +81,25 @@ impl Engine {
     /// rows a set/retract negates) sees the pre-step snapshot, since the whole
     /// transaction is built before the single `step()`. Returns the ids minted
     /// by any `New` ops, in order.
-    pub fn dispatch(&mut self, ops: &[DispatchOp]) -> (Vec<Value>, StepResult) {
+    ///
+    /// Crate-private (S-21): a write that runs but isn't logged is a
+    /// correctness bug the moment replay exists (MVP-PLAN §2.2 — "a direct
+    /// write is a corruption"), so every external write goes through
+    /// [`apply_event`](Self::apply_event) instead, which logs it.
+    pub(crate) fn dispatch(&mut self, ops: &[DispatchOp]) -> (Vec<Value>, StepResult) {
+        let (tx, ids) = self.build_tx(ops);
+        (ids, self.circuit.step(&tx))
+    }
+
+    /// [`dispatch`](Self::dispatch)'s silent counterpart, for
+    /// [`replay`](crate::events::replay).
+    pub(crate) fn dispatch_silent(&mut self, ops: &[DispatchOp]) -> Vec<Value> {
+        let (tx, ids) = self.build_tx(ops);
+        self.circuit.step_silent(&tx);
+        ids
+    }
+
+    fn build_tx(&mut self, ops: &[DispatchOp]) -> (Transaction, Vec<Value>) {
         let mut tx = Transaction::new();
         let mut ids = Vec::new();
         for op in ops {
@@ -75,7 +111,38 @@ impl Engine {
                 DispatchOp::Retract { id } => self.push_retract(&mut tx, id),
             }
         }
-        (ids, self.circuit.step(&tx))
+        (tx, ids)
+    }
+
+    /// Run `ops` as one transaction and append `name`/`args` to the log
+    /// (S-21) — the write path every declared-event dispatch goes through
+    /// (`crate::events::dispatch_event`). The only other public write path is
+    /// [`apply_typed_stmt`](Self::apply_typed_stmt), whose `new` statements
+    /// log a synthetic [`GENESIS`] event of their own.
+    pub fn apply_event(
+        &mut self,
+        name: &str,
+        ops: &[DispatchOp],
+        args: Vec<(String, ArgValue)>,
+    ) -> (Vec<Value>, StepResult) {
+        let (ids, res) = self.dispatch(ops);
+        self.log_event(name, args);
+        (ids, res)
+    }
+
+    /// Append one entry to the log with the next sequence number (the log's
+    /// current length — replay from empty naturally reproduces the same
+    /// seqs). Does not itself run anything; callers push the effect first.
+    fn log_event(&mut self, name: impl Into<String>, args: Vec<(String, ArgValue)>) -> u64 {
+        let seq = self.log.len() as u64;
+        self.log.push(Event { seq, name: name.into(), args, cause: None, intent: None });
+        seq
+    }
+
+    /// The full event log, in order — what a persistence adapter appends and
+    /// [`replay`](crate::events::replay) consumes.
+    pub fn log(&self) -> &[Event] {
+        &self.log
     }
 
     /// Retract an entity: negate exactly the base rows currently held for
@@ -212,6 +279,14 @@ impl Engine {
                     })
                     .collect();
                 let (id, res) = self.apply_new(*sort, &resolved);
+                // Genesis (S-21 subtask 3): seed data is event 0..k of the
+                // log, tagged with the target sort so `replay` can mint it
+                // back without a checked `EventDef` (there isn't one — this
+                // never went through a declared `on` handler).
+                let mut args: Vec<(String, ArgValue)> =
+                    vec![(GENESIS_SORT.to_string(), ArgValue::Value(Value::Int(sort.0 as i64)))];
+                args.extend(resolved.iter().map(|(f, v)| (f.clone(), ArgValue::Value(v.clone()))));
+                self.log_event(GENESIS, args);
                 if let Some(name) = name {
                     values.insert(name.clone(), id);
                 }
