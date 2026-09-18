@@ -7,6 +7,7 @@ pub mod ast;
 pub mod dbsp;
 pub mod diagnostic;
 pub mod eval;
+pub mod events;
 pub mod lexer;
 pub mod operator;
 pub mod parser;

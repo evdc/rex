@@ -264,7 +264,7 @@ vitest, the wasm build, and `npm run build` + Playwright for every
 need no CI changes); `scratch.rs` and the old `scripts.sh` removed; README's
 stale "`pkg/` is committed" line fixed (it's gitignored, not committed).
 
-#### S-02 Acceptance programs first (M, no deps) ∥ — *design story* — **revised 2026-09-18 after owner review** — rules: `.` is compose-join and `.f` replaces `:f`; `tag(props) { children }` elements; brace bodies with `=> stmt` shorthand; named union types; prefix verbs `new/update/delete/set/do`; DOM actions are statements. Programs: `examples/todomvc/src/app.rex`, `examples/js-framework-benchmark/src/app.rex`, `examples/chat/src/app.rex` (added: many-to-many via link entity, defaultless `state` as an empty singleton), `examples/kanban/src/board.v1.rex`, `SYNTAX.md` §9 open questions, `crates/rex-core/tests/surface_v1.rs`)
+#### S-02 Acceptance programs first (M, no deps) ∥ — *design story* — **revised 2026-09-18 after owner review** — rules: `.` is compose-join and `.f` replaces `:f`; `tag(props) { children }` elements; brace bodies with `=> stmt` shorthand; named union types; prefix verbs `new/update/delete/set/do`; DOM actions are statements. Programs: `examples/todomvc/src/app.rex`, `examples/js-framework-benchmark/src/app.rex`, `examples/chat/src/app.rex` (added: many-to-many via link entity, defaultless `state` as an empty singleton), `examples/kanban/src/board.rex`, `SYNTAX.md` §9 open questions, `crates/rex-core/tests/surface_v1.rs`)
 *Goal:* the three MVP apps written in the *target* surface before it exists.
 *Files:* `examples/todomvc/src/app.rex`, `examples/js-framework-benchmark/src/app.rex`,
 `examples/kanban/src/board.rex` (revised), `SYNTAX.md` (rewritten as the v1
@@ -398,7 +398,7 @@ No desugaring in the parser (README rule).
 
 ### E2 — Named events and the log
 
-#### S-20 Check `event`/`on`; EventIR replaces HandlerDef (L, deps S-10)
+#### S-20 Check `event`/`on`; EventIR replaces HandlerDef (L, deps S-10) — **done 2026-09-18** (`shape_ir::EventDef`/`Dispatch`/`ArgRef`/`UiAction`; `rex::events::dispatch_event` is the shared engine write path the wasm bridge and `tests/dispatch.rs` use; `focus`/`clear` are explicit `UiAction`s, the hard-coded focus-on-insert is gone; templates take `ancestors`; transaction writes to one cell compose (`Engine::net_rows`); non-path binds get their encoding from the elaborated view, so `examples/kanban/src/board.rex` is now the v1 program with the per-list count and `board.v1.rex` is deleted. Deviations: inline mutations in a DOM handler are a hard error rather than a deprecation warning; an `event` without an `on` is allowed (empty body); relation-typed params parse/check but dispatch rejects them until S-42)
 *Goal:* a declared event has a checked handler; DOM listeners dispatch by
 event name; sequence-numbered handler names disappear.
 *Files:* `types/view.rs`, `types/check.rs`, `types/shape_ir.rs`, `rex-codegen/src/lib.rs`.

@@ -3,7 +3,7 @@
 **Status:** S-02 proposal, revised 2026-09-18 after owner review. This is the
 surface the MVP acceptance programs are written in:
 `examples/todomvc/src/app.rex`, `examples/js-framework-benchmark/src/app.rex`,
-`examples/chat/src/app.rex`, `examples/kanban/src/board.v1.rex`. Constructs
+`examples/chat/src/app.rex`, `examples/kanban/src/board.rex`. Constructs
 marked **(v1)** are not implemented yet (MVP-PLAN.md E1–E5); everything else
 is what `rex build` accepts today. The programs are the acceptance tests: the
 grammar is whatever they need, and no more.

@@ -52,8 +52,10 @@ export interface ShapeNode<El> {
   readonly name: string;
   /** View `child -> parent` (for the root level: `child -> anything`). */
   readonly membershipView: string;
-  /** Build the skeleton element for a child (attrs are applied separately). */
-  readonly template: (driver: DomDriver<El>, key: string) => El;
+  /** Build the skeleton element for a child (attrs are applied separately).
+   *  `ancestors` are the enclosing rows' keys, nearest first (`[0]` is the
+   *  parent row), so a listener can pass an enclosing binder to a dispatch. */
+  readonly template: (driver: DomDriver<El>, key: string, ancestors: readonly string[]) => El;
   /** Attribute views (`child -> value`) and how each lands on the element. */
   readonly attrs: readonly {
     readonly view: string;

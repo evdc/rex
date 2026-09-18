@@ -1,11 +1,11 @@
 //! M5.b gate: a `view` desugars to auto-derived membership/order/attribute
 //! `let`s whose integrated contents match the hand-written 6NF `let`s the
-//! Kanban app used before (the manual `board.rex`), and its ShapeIR/HandlerIR
+//! Kanban app used before (the manual `board.rex`), and its ShapeIR/EventIR
 //! carry the roles a compiler needs.
 
 use rex::dbsp::Engine;
 use rex::eval::relation::BTreeRelation;
-use rex::types::shape_ir::{BindKind, MutationIR, Tpl};
+use rex::types::shape_ir::{ArgRef, BindKind, MutationIR, Tpl, UiAction};
 use rex::types::typed::TProgram;
 use std::collections::HashMap;
 
@@ -32,18 +32,28 @@ let card_title : Card -> Text = .title
 "#;
 
 const VIEW: &str = r#"
+event AddCard(list: List, pos: Text)
+event MoveCard(card: Card, list: List, pos: Text)
+event RenameCard(card: Card, title: Text)
+event DeleteCard(card: Card)
+
+on AddCard(list, pos)        => new Card { title: "New card", pos: pos, list: list }
+on MoveCard(card, list, pos) => update card { list: list, pos: pos }
+on RenameCard(card, title)   => card.title := title
+on DeleteCard(card)          => delete card
+
 view board =
   List as l order by .pos select
     section(class="list" dropTarget
-      on drop(card = drag(Card), pos = dropPos(c, card)) { update card { list: l, pos: pos } }) {
+      on drop(card = drag(Card), pos = dropPos(c, card)) => do MoveCard(card, l, pos)) {
       header {
         span { .title }
-        button(on click(pos = endOf(c)) => new Card { title: "New card", pos: pos, list: l }) "+ card"
+        button(on click(pos = endOf(c)) { do AddCard(l, pos); focus(c) }) "+ card"
       }
       Card as c where .list = l order by .pos select
         div(class="card" draggable) {
-          input(value=.title on change(v = value) => .title := v)
-          button(on click => delete c) "x"
+          input(value=.title on change(v = value) => do RenameCard(c, v))
+          button(on click { do DeleteCard(c); do RenameCard(c, "gone") }) "x"
         }
     }
 "#;
@@ -167,19 +177,95 @@ fn shape_ir_roles() {
     // card has a change handler and a delete handler.
     assert_eq!(card.events.len(), 2);
 
-    // The drop handler on the list is one atomic multi-set on the dragged card.
-    let drop = shapes
-        .handlers
+    // Every DOM listener dispatches by event name; args name the event's
+    // declared params and bind them to the listener's key/params.
+    let drop = list
+        .events
         .iter()
-        .find(|h| h.name.contains("@drop"))
-        .expect("drop handler");
-    // `update card { list: l, pos: pos }` is ONE set with two field updates.
-    assert_eq!(drop.body.len(), 1, "drop is a single update");
-    let MutationIR::Set { entity, updates, .. } = &drop.body[0] else {
-        panic!("drop body is a Set");
+        .find(|e| e.dom_event == "drop")
+        .expect("drop listener");
+    assert_eq!(drop.dispatches.len(), 1);
+    let d = &drop.dispatches[0];
+    assert_eq!(d.event, "MoveCard");
+    assert_eq!(
+        d.args,
+        vec![
+            ("card".to_string(), ArgRef::Param("card".into())),
+            ("list".to_string(), ArgRef::SelfKey),
+            ("pos".to_string(), ArgRef::Param("pos".into())),
+        ]
+    );
+    // `focus(c)` after a `do` is a UI action naming the child level.
+    let add = list.events.iter().find(|e| e.dom_event == "click").expect("+ card");
+    assert_eq!(add.actions, vec![UiAction::FocusNew { level: "board#list#card".into() }]);
+    // Two `do`s are two dispatches, in order; a literal arg is carried.
+    let del = card.events.iter().find(|e| e.dom_event == "click").expect("x");
+    assert_eq!(del.dispatches.len(), 2);
+    assert_eq!(del.dispatches[1].args[1].1, ArgRef::Lit(rex::types::typed::Lit::Str("gone".into())));
+
+    // The MoveCard event's body is one atomic multi-set on the dragged card.
+    let mv = shapes.events.iter().find(|e| e.name == "MoveCard").expect("MoveCard");
+    assert_eq!(mv.params.len(), 3);
+    // `update card { list: list, pos: pos }` is ONE set with two field updates.
+    assert_eq!(mv.body.len(), 1, "move is a single update");
+    let MutationIR::Set { entity, updates, .. } = &mv.body[0] else {
+        panic!("move body is a Set");
     };
     assert_eq!(entity, "Card");
-    assert_eq!(updates.len(), 2, "drop sets list and pos");
+    assert_eq!(updates.len(), 2, "move sets list and pos");
+}
+
+/// Handlers deeper in the tree may pass an enclosing level's binder: the
+/// desugarer records how far up it is, and the shaper hands templates their
+/// ancestor keys.
+#[test]
+fn enclosing_binders_in_do_args() {
+    let src = format!(
+        "{SEED}
+event MoveCard(card: Card, list: List)
+on MoveCard(card, list) => card.list := list
+view board =
+  List as l select
+    section {{
+      Card as c where .list = l select
+        div(on click => do MoveCard(c, l))
+    }}
+"
+    );
+    let parsed = rex::parse(&src);
+    let checked = rex::check(&parsed.program);
+    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+    let card = &checked.shapes.views[0].children[0];
+    let d = &card.events[0].dispatches[0];
+    assert_eq!(d.args[0].1, ArgRef::SelfKey);
+    assert_eq!(d.args[1].1, ArgRef::Ancestor(1));
+}
+
+fn check_errors(src: &str) -> Vec<String> {
+    let parsed = rex::parse(src);
+    assert!(parsed.diagnostics.is_empty(), "parse: {:?}", parsed.diagnostics);
+    rex::check(&parsed.program).diagnostics.iter().map(|d| d.message.clone()).collect()
+}
+
+#[test]
+fn event_checking_rejects_bad_programs() {
+    let base = "entity Card { title: Text }\n";
+    let cases: &[(&str, &str)] = &[
+        ("on Rename(c, t) => c.title := t", "no such event"),
+        ("event Rename(card: Card, title: Text)\non Rename(c) => c.title := \"x\"", "binds 1 parameter(s) but the event declares 2"),
+        ("event Rename(card: Card, title: Text)\non Rename(c, t) => t.title := c", "not an entity id"),
+        ("event Rename(card: Card, title: Text)\non Rename(c, t) => c.title := 3", "expects `Text`"),
+        ("event A(c: Card)\nevent B(c: Card)\non A(c) => do B(c)\non B(c) => do A(c)", "synchronous `do` cycle: A -> B -> A"),
+        ("event A(c: Card)\non A(c) => delete c\nview v =\n  Card as c select\n    li(on click => delete c)", "may not mutate directly"),
+        ("event A(c: Card, n: Int)\non A(c, n) => delete c\nview v =\n  Card as c select\n    li(on click => do A(c, \"s\"))", "argument for `n` has the wrong type"),
+    ];
+    for (src, want) in cases {
+        let errs = check_errors(&format!("{base}{src}\n"));
+        assert!(
+            errs.iter().any(|e| e.contains(want)),
+            "for {src:?}: expected an error containing {want:?}, got {errs:?}"
+        );
+    }
 }
 
 #[test]

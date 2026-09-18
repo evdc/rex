@@ -34,7 +34,7 @@ pub fn check(program: &Program) -> CheckResult {
     // before type-checking; the checker only ever sees the core language.
     let desugared = super::view::desugar(program);
     let program = &desugared.program;
-    let shapes = desugared.shapes;
+    let mut shapes = desugared.shapes;
 
     let mut cx = Checker {
         env: Env::new(),
@@ -43,6 +43,12 @@ pub fn check(program: &Program) -> CheckResult {
     };
     let stmts = cx.run(program);
     let prog = TProgram { stmts };
+    // A bind over an arbitrary co-keyed expression (`span { cards }`) gets
+    // its wire encoding from the elaborated attribute view's codomain — the
+    // desugarer only knows the types of `.field` paths.
+    for view in &mut shapes.views {
+        type_binds(view, &cx.env);
+    }
     // Groundedness (§9.1) runs only on a clean type-check, since the elaborated AST
     // is well-formed only then. A rejection here nulls `elaborated`, so every
     // downstream caller refuses to evaluate the program. Warnings (the §8
@@ -70,6 +76,25 @@ pub fn check(program: &Program) -> CheckResult {
 
 struct Bail;
 type TResult<T> = Result<T, Bail>;
+
+fn type_binds(level: &mut super::shape_ir::ShapeLevel, env: &Env) {
+    use super::shape_ir::Encoding;
+    for a in &mut level.attrs {
+        if let Some(Binding::Rel(rt)) = env.binding(&a.view) {
+            a.encoding = match &rt.to {
+                ValueTy::Int => Encoding::Int,
+                ValueTy::Money => Encoding::Money,
+                ValueTy::Text | ValueTy::Date | ValueTy::Unit => Encoding::Text,
+                ValueTy::Id(_) => Encoding::Id,
+                ValueTy::Atom(_) | ValueTy::Coproduct(_) => Encoding::Atom,
+                ValueTy::Product(..) => Encoding::Text,
+            };
+        }
+    }
+    for child in &mut level.children {
+        type_binds(child, env);
+    }
+}
 
 struct Checker {
     env: Env,

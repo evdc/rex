@@ -1,11 +1,14 @@
-//! M5.c: `Engine::dispatch` runs a batch of create/set/retract ops as ONE
-//! atomic transaction (one step, one delta batch), with all reads against the
-//! pre-step snapshot.
+//! S-20: a named `event` dispatches as ONE atomic transaction (one step, one
+//! delta batch), with every read against the pre-event snapshot, through the
+//! shared [`rex::events::dispatch_event`] path the wasm bridge also uses.
 
-use rex::dbsp::{DispatchOp, Engine};
+use rex::dbsp::Engine;
 use rex::eval::relation::BinaryRelation;
 use rex::eval::Value;
+use rex::events::dispatch_event;
+use rex::types::shape_ir::EventDef;
 use rex::types::typed::TProgram;
+use rex::types::Env;
 use std::collections::HashMap;
 
 const SRC: &str = r#"
@@ -18,9 +21,40 @@ let c0 = new Card { title: "Design", pos: "a0", list: l0 }
 
 let card_list  : Card -> ListID = .list
 let card_pos   : Card -> Text = .pos
+
+event MoveCard(card: Card, list: List, pos: Text)
+event AddList(title: Text, pos: Text)
+event AddCardAndMove(title: Text, list: List, card: Card)
+event Rename(card: Card, title: Text)
+event RenameTwice(card: Card)
+event Nope(card: Card)
+
+on MoveCard(card, list, pos) => update card { list: list, pos: pos }
+on AddList(title, pos)       => new List { title: title, pos: pos }
+on AddCardAndMove(title, list, card) {
+  new Card { title: title, pos: "a2", list: list }
+  do MoveCard(card, list, "a3")
+}
+on Rename(card, title) => card.title := title
+on RenameTwice(card) { do Rename(card, "first"); do Rename(card, "second") }
+on Nope(card) => card.title := "never"
 "#;
 
-fn setup() -> (Engine, HashMap<String, Value>) {
+struct App {
+    engine: Engine,
+    env: Env,
+    events: Vec<EventDef>,
+    values: HashMap<String, Value>,
+}
+
+impl App {
+    fn dispatch(&mut self, name: &str, args: &[(&str, Value)]) -> Result<(Vec<Value>, rex::dbsp::StepResult), String> {
+        let args: HashMap<String, Value> = args.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+        dispatch_event(&mut self.engine, &self.env, &self.events, name, &args)
+    }
+}
+
+fn setup() -> App {
     let parsed = rex::parse(SRC);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let checked = rex::check(&parsed.program);
@@ -31,7 +65,7 @@ fn setup() -> (Engine, HashMap<String, Value>) {
     for stmt in &prog.stmts {
         engine.apply_typed_stmt(stmt, &mut values);
     }
-    (engine, values)
+    App { engine, env: checked.env, events: checked.shapes.events, values }
 }
 
 fn text(s: &str) -> Value {
@@ -39,76 +73,102 @@ fn text(s: &str) -> Value {
 }
 
 #[test]
-fn drag_is_one_atomic_reparent() {
-    // A Kanban drag sets both `list` and `pos` of a card. As one dispatch it
-    // is a single step: the membership view (`card_list`) shows exactly the
+fn move_is_one_atomic_reparent() {
+    // A Kanban drag sets both `list` and `pos` of a card. As one event it is a
+    // single step: the membership view (`card_list`) shows exactly the
     // −old/+new pair for the moved card, never a torn intermediate.
-    let (mut engine, values) = setup();
-    let c0 = values["c0"].clone();
-    let l1 = values["l1"].clone();
+    let mut app = setup();
+    let c0 = app.values["c0"].clone();
+    let l0 = app.values["l0"].clone();
+    let l1 = app.values["l1"].clone();
 
-    let (ids, res) = engine.dispatch(&[DispatchOp::Set {
-        id: c0.clone(),
-        updates: vec![("list".into(), l1.clone()), ("pos".into(), text("a5"))],
-    }]);
+    let (ids, res) = app
+        .dispatch("MoveCard", &[("card", c0.clone()), ("list", l1.clone()), ("pos", text("a5"))])
+        .unwrap();
     assert!(ids.is_empty(), "no ids minted by a pure set");
 
     let membership = res.view_deltas.get("card_list").expect("card_list delta");
-    // Exactly the −old-list / +new-list pair at c0.
-    assert_eq!(membership.weight(&c0, &values["l0"]), -1);
+    assert_eq!(membership.weight(&c0, &l0), -1);
     assert_eq!(membership.weight(&c0, &l1), 1);
 
-    // Final integrated state: c0 now under l1.
-    assert_eq!(engine.circuit.view("card_list").unwrap().weight(&c0, &l1), 1);
-    assert_eq!(engine.circuit.view("card_list").unwrap().weight(&c0, &values["l0"]), 0);
+    assert_eq!(app.engine.circuit.view("card_list").unwrap().weight(&c0, &l1), 1);
+    assert_eq!(app.engine.circuit.view("card_list").unwrap().weight(&c0, &l0), 0);
 }
 
 #[test]
 fn new_returns_minted_id() {
-    let (mut engine, values) = setup();
-    let list_sort = match &values["l0"] {
-        Value::Id(s, _) => *s,
-        _ => unreachable!(),
-    };
-    let (ids, _res) = engine.dispatch(&[DispatchOp::New {
-        sort: list_sort,
-        fields: vec![("title".into(), text("New list")), ("pos".into(), text("a9"))],
-    }]);
+    let mut app = setup();
+    let (ids, _res) = app
+        .dispatch("AddList", &[("title", text("New list")), ("pos", text("a9"))])
+        .unwrap();
     assert_eq!(ids.len(), 1, "one id minted");
 }
 
 #[test]
-fn multi_op_is_one_step() {
-    // A create plus a set on an existing card, one dispatch. Both land in a
-    // single delta batch (one step): the new card's membership and the moved
-    // card's membership both appear in the same `card_list` delta.
-    let (mut engine, values) = setup();
-    let c0 = values["c0"].clone();
-    let l0 = values["l0"].clone();
-    let l1 = values["l1"].clone();
-    let card_sort = match &c0 {
-        Value::Id(s, _) => *s,
-        _ => unreachable!(),
-    };
-    let (ids, res) = engine.dispatch(&[
-        DispatchOp::New {
-            sort: card_sort,
-            fields: vec![
-                ("title".into(), text("Fresh")),
-                ("pos".into(), text("a2")),
-                ("list".into(), l1.clone()),
-            ],
-        },
-        DispatchOp::Set {
-            id: c0.clone(),
-            updates: vec![("list".into(), l1.clone())],
-        },
-    ]);
+fn synchronous_do_joins_the_transaction() {
+    // `AddCardAndMove` creates a card and `do`es `MoveCard` for another: both
+    // land in a single delta batch (one step), and only the outer event is
+    // what the host dispatched.
+    let mut app = setup();
+    let c0 = app.values["c0"].clone();
+    let l0 = app.values["l0"].clone();
+    let l1 = app.values["l1"].clone();
+    let (ids, res) = app
+        .dispatch(
+            "AddCardAndMove",
+            &[("title", text("Fresh")), ("list", l1.clone()), ("card", c0.clone())],
+        )
+        .unwrap();
     assert_eq!(ids.len(), 1);
     let new_id = ids[0].clone();
     let m = res.view_deltas.get("card_list").expect("card_list delta");
-    // New card mounts under l1; c0 reparents from l0 to l1 — same batch.
     assert_eq!(m.weight(&new_id, &l1), 1);
     assert_eq!(m.weight(&c0, &l0), -1);
     assert_eq!(m.weight(&c0, &l1), 1);
+    let pos = res.view_deltas.get("card_pos").expect("card_pos delta");
+    assert_eq!(pos.weight(&c0, &text("a3")), 1);
+}
+
+#[test]
+fn nested_do_reads_the_pre_event_snapshot() {
+    // Two `do Rename`s in one event both negate the ORIGINAL title (the
+    // pre-event snapshot), so the integrated result is one live row — the
+    // last write — and never a double-retracted or duplicated title.
+    let mut app = setup();
+    let c0 = app.values["c0"].clone();
+    let (_, res) = app.dispatch("RenameTwice", &[("card", c0.clone())]).unwrap();
+    let _ = res;
+    let titles: Vec<(Value, i64)> = app
+        .engine
+        .circuit
+        .input_integral(&rex::dbsp::InputKey::Field(
+            match &c0 {
+                Value::Id(s, _) => *s,
+                _ => unreachable!(),
+            },
+            rex::eval::intern("title"),
+        ))
+        .unwrap()
+        .row(&c0)
+        .collect();
+    let live: Vec<_> = titles.iter().filter(|(_, w)| *w != 0).collect();
+    assert_eq!(live.len(), 1, "exactly one live title: {titles:?}");
+}
+
+#[test]
+fn dispatch_rejects_bad_args() {
+    let mut app = setup();
+    let c0 = app.values["c0"].clone();
+    let l1 = app.values["l1"].clone();
+    // Unknown event.
+    assert!(app.dispatch("Vanish", &[]).unwrap_err().contains("unknown event"));
+    // Missing arg.
+    assert!(app.dispatch("Nope", &[]).unwrap_err().contains("missing arg `card`"));
+    // Wrong entity for an id param.
+    assert!(app.dispatch("Nope", &[("card", l1.clone())]).unwrap_err().contains("wrong type"));
+    // Scalar of the wrong kind.
+    assert!(app
+        .dispatch("MoveCard", &[("card", c0.clone()), ("list", l1.clone()), ("pos", Value::Int(1))])
+        .unwrap_err()
+        .contains("wrong type"));
 }

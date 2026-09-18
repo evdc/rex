@@ -19,10 +19,10 @@ function dispatch(name: string, args: Record<string, string>): string[] {
   return res.ids as string[];
 }
 
-const shape_board_list_card: ShapeNode<HTMLElement> = {
-  name: "board#list#card",
-  membershipView: "board#list#card",
-  orderView: "board#list#card#order",
+const shape_main_list_card: ShapeNode<HTMLElement> = {
+  name: "main#list#card",
+  membershipView: "main#list#card",
+  orderView: "main#list#card#order",
   template: (d, key) => {
     const e0 = d.createElement("div");
     e0.className = "card";
@@ -35,16 +35,18 @@ const shape_board_list_card: ShapeNode<HTMLElement> = {
     e0.dataset.key = key;
     ((e0.childNodes[0] as HTMLElement)).addEventListener("change", (ev) => {
       const v = encodeText((ev.currentTarget as HTMLInputElement).value);
-      const _ids = dispatch("board#list#card@change3", { "c": key, "v": v });
+      const _ids: string[] = [];
+      _ids.push(...dispatch("RenameCard", { "card": key, "title": v }));
     });
     ((e0.childNodes[1] as HTMLElement)).addEventListener("click", (ev) => {
-      const _ids = dispatch("board#list#card@click4", { "c": key });
+      const _ids: string[] = [];
+      _ids.push(...dispatch("DeleteCard", { "card": key }));
     });
     return e0;
   },
   attrs: [
     {
-      view: "board#list#card#title",
+      view: "main#list#card#title",
       apply: (_d, el, v) => {
         const _i = ((el.childNodes[0] as HTMLElement)) as HTMLInputElement;
         const _s = String(decodeText(v));
@@ -55,10 +57,10 @@ const shape_board_list_card: ShapeNode<HTMLElement> = {
   children: [],
 };
 
-const shape_board_list: ShapeNode<HTMLElement> = {
-  name: "board#list",
-  membershipView: "board#list",
-  orderView: "board#list#order",
+const shape_main_list: ShapeNode<HTMLElement> = {
+  name: "main#list",
+  membershipView: "main#list",
+  orderView: "main#list#order",
   template: (d, key) => {
     const e0 = d.createElement("section");
     e0.className = "list";
@@ -66,35 +68,46 @@ const shape_board_list: ShapeNode<HTMLElement> = {
     const e1 = d.createElement("header");
     const e2 = d.createElement("span");
     e1.appendChild(e2);
-    const e3 = d.createElement("button");
-    e3.appendChild(document.createTextNode("+ card"));
+    const e3 = d.createElement("span");
+    e3.className = "count";
     e1.appendChild(e3);
+    const e4 = d.createElement("button");
+    e4.appendChild(document.createTextNode("+ card"));
+    e1.appendChild(e4);
     e0.appendChild(e1);
     e0.dataset.key = key;
     (e0).addEventListener("drop", (ev) => {
       const card = dragValue(ev);
-      const pos = encodeText(dropPos(shaper, "board#list#card", key, (ev as DragEvent).clientY, card));
-      const _ids = dispatch("board#list@drop1", { "l": key, "card": card, "pos": pos });
-      maybeRebalance(app, apply, shaper, "board#list#card", key, "pos", encodeText);
+      const pos = encodeText(dropPos(shaper, "main#list#card", key, (ev as DragEvent).clientY, card));
+      const _ids: string[] = [];
+      _ids.push(...dispatch("MoveCard", { "card": card, "list": key, "pos": pos }));
+      maybeRebalance(app, apply, shaper, "main#list#card", key, "pos", encodeText);
     });
-    (((e0.childNodes[0] as HTMLElement).childNodes[1] as HTMLElement)).addEventListener("click", (ev) => {
-      const pos = encodeText(endOf(shaper, "board#list#card", key));
-      const _ids = dispatch("board#list@click2", { "l": key, "pos": pos });
-      shaper.el("board#list#card", _ids[0])?.querySelector("input, textarea")?.focus();
-      maybeRebalance(app, apply, shaper, "board#list#card", key, "pos", encodeText);
+    (((e0.childNodes[0] as HTMLElement).childNodes[2] as HTMLElement)).addEventListener("click", (ev) => {
+      const pos = encodeText(endOf(shaper, "main#list#card", key));
+      const _ids: string[] = [];
+      _ids.push(...dispatch("AddCard", { "list": key, "pos": pos }));
+      for (const _id of _ids) { const _el = shaper.el("main#list#card", _id); if (_el) { (_el.querySelector("input, textarea") as HTMLElement | null)?.focus(); break; } }
+      maybeRebalance(app, apply, shaper, "main#list#card", key, "pos", encodeText);
     });
     return e0;
   },
   attrs: [
     {
-      view: "board#list#title",
+      view: "main#list#title",
       apply: (_d, el, v) => {
         (((el.childNodes[0] as HTMLElement).childNodes[0] as HTMLElement)).textContent = String(decodeText(v));
       },
     },
+    {
+      view: "main#list#bind1",
+      apply: (_d, el, v) => {
+        (((el.childNodes[0] as HTMLElement).childNodes[1] as HTMLElement)).textContent = String(decodeInt(v));
+      },
+    },
   ],
-  children: [shape_board_list_card],
+  children: [shape_main_list_card],
 };
 
-const shaper = new Shaper<HTMLElement>(driver, container, [shape_board_list]);
+const shaper = new Shaper<HTMLElement>(driver, container, [shape_main_list]);
 shaper.applyStep(parseStepJson(app.snapshot()));

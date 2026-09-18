@@ -81,7 +81,7 @@ src → lex → parse → check/elaborate → eval
 | **Eval** | `crates/rex-core/src/eval/` | Batch interpreter over the typed AST. `interp.rs` walks `TProgram`; `algebra.rs` is the relational algebra; `relation.rs` is the Z-set store; `value.rs` is the runtime domain element. |
 | **Support** | `crates/rex-core/src/diagnostic.rs`, `crates/rex-core/src/span.rs`, `crates/rex-core/src/pretty.rs`, `crates/rex-core/src/operator.rs` | Spans + rendered diagnostics; canonical s-expr printer (used for test assertions and `--ast`-style output); the §7 operator-metadata table. |
 | **Incremental engine** | `crates/rex-core/src/dbsp/` | `lower.rs` lowers `TProgram` to a circuit of delta nodes (`node.rs`); `circuit.rs` steps it (incl. fix regions); `engine.rs` is the transactional API (`apply_new`, `update_fields`, `retract_entity`, `dispatch`). |
-| **View desugar** | `crates/rex-core/src/types/view.rs`, `shape_ir.rs` | `view … select` → ordinary `let`s (membership / order / per-attribute) + a shape IR + checked handler bodies. |
+| **View desugar** | `crates/rex-core/src/types/view.rs`, `shape_ir.rs` | `view … select` → ordinary `let`s (membership / order / per-attribute) + a shape IR + checked `event`/`on` bodies (the EventIR). |
 | **Codegen / edge** | `crates/rex-codegen`, `crates/rex-wasm`, `crates/rex-core/src/eval/encode.rs`, `js/rex-dom` | Shape IR → TS; the WASM API; the canonical value/delta wire encoding; the shaper that turns per-view deltas into DOM mutations. |
 
 Key design choices realized in code:
@@ -155,9 +155,9 @@ grow the user-facing surface toward elysium26's (it is the language donor)
 while keeping the narrow binary core as the IR, with a **named-event log** as
 the entry point for all change. Priority order:
 
-1. **Events + log (M6.a).** Named `event`s and `on E(…)` handlers; an
-   append-only, replayable event log. Today handlers are anonymous inline DOM
-   handlers that write straight to the engine — nothing is logged or replayable.
+1. **Events + log (M6.a).** Named `event`s and `on E(…)` handlers landed
+   (MVP-PLAN S-20): DOM handlers `do` a declared event and never mutate
+   directly. Next is the append-only, replayable event log (S-21).
 2. **Handler expressiveness (M6.b).** `where`-targeted bulk
    update/insert/delete; mutation values as expressions over the pre-event
    snapshot (today: literals and params only — `t:n := t:n * 2` is rejected).

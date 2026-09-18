@@ -151,7 +151,7 @@ export class Shaper<El> {
         level.parentOf.set(child, parentKey);
         level.orderOf.set(child, orderKey);
         level.order.insert(parentKey, orderKey, child);
-        const el = level.shape.template(this.driver, child);
+        const el = level.shape.template(this.driver, child, this.ancestorKeys(level, parentKey));
         for (const attr of level.shape.attrs) {
           const v = this.resolveOne(attr.view, child);
           if (v !== undefined) attr.apply(this.driver, el, v);
@@ -286,6 +286,20 @@ export class Shaper<El> {
       lvl = lvl.parent;
     }
     return false;
+  }
+
+  /** The enclosing rows' keys for a child mounted under `parentKey`, nearest
+   *  first — read from the (already updated) membership mirrors. */
+  private ancestorKeys(level: Level<El>, parentKey: string): string[] {
+    const keys: string[] = [];
+    let lvl = level.parent;
+    let key: string | undefined = parentKey;
+    while (lvl && key !== undefined) {
+      keys.push(key);
+      key = lvl.parentOf.get(key);
+      lvl = lvl.parent;
+    }
+    return keys;
   }
 
   /** The next *mounted* sibling after (orderKey, child) — the insertBefore

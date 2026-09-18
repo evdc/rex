@@ -5,7 +5,7 @@
 const TODOMVC: &str = include_str!("../../../examples/todomvc/src/app.rex");
 const BENCH: &str = include_str!("../../../examples/js-framework-benchmark/src/app.rex");
 const CHAT: &str = include_str!("../../../examples/chat/src/app.rex");
-const KANBAN_V1: &str = include_str!("../../../examples/kanban/src/board.v1.rex");
+const KANBAN_V1: &str = include_str!("../../../examples/kanban/src/board.rex");
 
 fn parses_clean(src: &str) {
     let parsed = rex::parse(src);
@@ -48,5 +48,4 @@ fn todomvc_checks() { checks_clean(TODOMVC); }
 fn bench_checks() { checks_clean(BENCH); }
 
 #[test]
-#[ignore = "S-20/S-60: named events, derived binds"]
 fn kanban_v1_checks() { checks_clean(KANBAN_V1); }

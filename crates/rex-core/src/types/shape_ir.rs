@@ -7,9 +7,9 @@
 //!    the auto-derived membership / order / attribute views (ordinary `let`s
 //!    the checker elaborates) and carrying the static DOM skeleton plus the
 //!    child-index paths where dynamic values and event listeners land; and
-//!  - a **HandlerIR** — one [`HandlerDef`] per inline `on … =>` handler, a
-//!    checked list of relational mutations the engine dispatches as one
-//!    transaction.
+//!  - an **EventIR** — one [`EventDef`] per declared `event`, carrying its
+//!    typed params and the checked mutation body of its `on` handler; the
+//!    engine runs one dispatch as one transaction.
 //!
 //! Codegen is a dumb emitter over these: no naming logic, no re-derivation.
 
@@ -20,8 +20,8 @@ use crate::ast::Extractor;
 pub struct ShapeProgram {
     /// One root level per `view` declaration.
     pub views: Vec<ShapeLevel>,
-    /// Every inline handler, keyed by its generated `name`.
-    pub handlers: Vec<HandlerDef>,
+    /// Every declared `event` with its handler, keyed by event name.
+    pub events: Vec<EventDef>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -92,10 +92,47 @@ pub struct EventBinding {
     pub dom_event: String,
     /// Event sub-selectors (`keydown.enter` -> `["enter"]`).
     pub modifiers: Vec<String>,
-    /// The [`HandlerDef::name`] to dispatch.
-    pub handler: String,
-    /// How to materialize each dispatch argument from the DOM event.
-    pub args: Vec<ArgSpec>,
+    /// The handler's extracted params, materialized from the DOM event in
+    /// declaration order (later extractors may read earlier params).
+    pub params: Vec<ArgSpec>,
+    /// The `do E(args)` dispatches, run in order — each is its own logged
+    /// event / engine transaction.
+    pub dispatches: Vec<Dispatch>,
+    /// Presentation actions run after the dispatches, in order.
+    pub actions: Vec<UiAction>,
+}
+
+/// One `do E(args)` from a DOM handler: the event's params, each bound to a
+/// value the listener has at hand.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Dispatch {
+    pub event: String,
+    /// `(event param name, value)` in the event's declared order.
+    pub args: Vec<(String, ArgRef)>,
+}
+
+/// A value a DOM listener can pass to a dispatch.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ArgRef {
+    /// This level's row key.
+    SelfKey,
+    /// An enclosing level's row key: `1` is the parent row, `2` its parent…
+    Ancestor(usize),
+    /// One of the handler's extracted params, by name.
+    Param(String),
+    Lit(super::typed::Lit),
+}
+
+/// A presentation action in a DOM handler (`focus`, `clear`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum UiAction {
+    /// Focus the first input of the row a preceding dispatch created at the
+    /// named child level.
+    FocusNew { level: String },
+    /// Focus a child element of this row by class.
+    FocusClass(String),
+    /// Reset the listening input's value.
+    Clear,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -116,24 +153,48 @@ pub enum Encoding {
     Id,
 }
 
-// --- handlers -------------------------------------------------------------
+// --- events ---------------------------------------------------------------
 
+/// A declared `event E(p: T, …)` together with its `on E(p…)` handler body.
 #[derive(Clone, Debug, PartialEq)]
-pub struct HandlerDef {
-    /// Unique name (`board#list#card@drop`).
+pub struct EventDef {
     pub name: String,
-    /// The binders in scope, name -> encoding of the value passed as an arg.
-    /// Includes `self` (the current row key) and every enclosing binder.
-    pub binders: Vec<(String, Encoding)>,
-    /// Declared parameters, name -> encoding.
-    pub params: Vec<(String, Encoding)>,
-    /// The checked mutation body, run as one transaction.
+    /// Declared parameters, in order.
+    pub params: Vec<EventParam>,
+    /// The checked mutation body, run as one transaction. Empty when the
+    /// event has no `on` handler.
     pub body: Vec<MutationIR>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct EventParam {
+    pub name: String,
+    pub ty: ParamTy,
+}
+
+/// What an event parameter carries across the boundary.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ParamTy {
+    /// A scalar with its wire encoding (`Text`, `Int`, `Bool`…).
+    Scalar(Encoding),
+    /// An entity id of the named entity.
+    Id(String),
+    /// A relation `A -> B` (bulk args; dispatch support arrives in S-42).
+    Rel(String, String),
+}
+
+impl ParamTy {
+    pub fn encoding(&self) -> Encoding {
+        match self {
+            ParamTy::Scalar(e) => *e,
+            ParamTy::Id(_) | ParamTy::Rel(..) => Encoding::Id,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum MutationIR {
-    /// Set fields of the entity a reference names (a binder or param).
+    /// Set fields of the entity a reference names (a param).
     Set {
         target: Ref,
         /// Entity name of the target (for field validation at dispatch).
@@ -142,18 +203,22 @@ pub enum MutationIR {
     },
     /// Retract the entity a reference names.
     Delete { target: Ref },
-    /// Create an entity, binding the new id to `bind` for later ops.
+    /// Create an entity.
     Insert {
         entity: String,
         fields: Vec<(String, ValRef)>,
     },
+    /// Synchronous `do E(args)`: the callee's mutations join this
+    /// transaction (same pre-event snapshot); only the outer event is logged.
+    /// `args` are in the callee's declared param order.
+    Do { event: String, args: Vec<ValRef> },
 }
 
-/// A reference to a row key: a handler arg (binder or param) by name.
+/// A reference to a row key: an event param by name.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ref(pub String);
 
-/// A value in a mutation: a literal, or a reference to an arg.
+/// A value in a mutation: a literal, or a reference to a param.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ValRef {
     Lit(super::typed::Lit),

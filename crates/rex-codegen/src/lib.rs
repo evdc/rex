@@ -23,8 +23,8 @@ pub fn generate(source: &str, program_import: &str) -> Result<String, Vec<Diagno
 }
 
 /// Like [`generate`], but `debug` emits `console.debug` tracing at the engine
-/// boundary (every dispatch: handler name, args, minted ids, delta view names)
-/// so a running app can be traced back to the `.rex` handler that fired.
+/// boundary (every dispatch: event name, args, minted ids, delta view names)
+/// so a running app can be traced back to the `.rex` event that fired.
 pub fn generate_with(
     source: &str,
     program_import: &str,
@@ -44,7 +44,6 @@ pub fn generate_with(
 fn emit(shapes: &ShapeProgram, program_import: &str, debug: bool) -> String {
     let mut e = Emit {
         out: String::new(),
-        shapes,
         debug,
     };
     e.preamble(program_import);
@@ -58,13 +57,12 @@ fn emit(shapes: &ShapeProgram, program_import: &str, debug: bool) -> String {
     e.out
 }
 
-struct Emit<'a> {
+struct Emit {
     out: String,
-    shapes: &'a ShapeProgram,
     debug: bool,
 }
 
-impl Emit<'_> {
+impl Emit {
     fn line(&mut self, s: &str) {
         self.out.push_str(s);
         self.out.push('\n');
@@ -123,7 +121,15 @@ impl Emit<'_> {
     }
 
     fn template(&mut self, level: &ShapeLevel) {
-        self.line("  template: (d, key) => {");
+        let uses_ancestors = level.events.iter().any(|ev| {
+            ev.dispatches
+                .iter()
+                .any(|d| d.args.iter().any(|(_, a)| matches!(a, ArgRef::Ancestor(_))))
+        });
+        self.line(&format!(
+            "  template: (d, key{}) => {{",
+            if uses_ancestors { ", ancestors" } else { "" }
+        ));
         // Build the DOM skeleton; e0 is the root.
         let mut b = TemplateBuilder { emit_lines: Vec::new(), counter: 0 };
         b.build(&level.template, None);
@@ -141,37 +147,50 @@ impl Emit<'_> {
 
     fn event(&mut self, level: &ShapeLevel, ev: &EventBinding) {
         let target = nav_expr("e0", &ev.path);
-        let handler = self
-            .shapes
-            .handlers
-            .iter()
-            .find(|h| h.name == ev.handler)
-            .expect("handler exists");
         self.line(&format!(
             "    ({target}).addEventListener({}, (ev) => {{",
             js_str(&dom_event(ev))
         ));
-        // Materialize each arg into a local (order preserved for dependencies).
-        for a in &ev.args {
+        // Materialize each param into a local (order preserved for dependencies).
+        for a in &ev.params {
             let expr = self.arg_expr(level, a);
             self.out
                 .push_str(&format!("      const {} = {expr};\n", a.name));
         }
-        // Build the dispatch args object: self binder key + params.
-        let mut fields = Vec::new();
-        for (binder, _) in &handler.binders {
-            fields.push(format!("{}: key", js_str(binder)));
+        // One dispatch per `do`, each its own transaction; ids minted by any
+        // of them feed the `focus(c)` action.
+        self.line("      const _ids: string[] = [];");
+        for d in &ev.dispatches {
+            let fields: Vec<String> = d
+                .args
+                .iter()
+                .map(|(name, a)| format!("{}: {}", js_str(name), arg_ref(a)))
+                .collect();
+            self.line(&format!(
+                "      _ids.push(...dispatch({}, {{ {} }}));",
+                js_str(&d.event),
+                fields.join(", ")
+            ));
         }
-        for a in &ev.args {
-            fields.push(format!("{}: {}", js_str(&a.name), a.name));
+        for a in &ev.actions {
+            match a {
+                UiAction::FocusNew { level } => {
+                    self.line(&format!(
+                        "      for (const _id of _ids) {{ const _el = shaper.el({}, _id); if (_el) {{ (_el.querySelector(\"input, textarea\") as HTMLElement | null)?.focus(); break; }} }}",
+                        js_str(level)
+                    ));
+                }
+                UiAction::FocusClass(cls) => {
+                    self.line(&format!(
+                        "      (e0.querySelector({}) as HTMLElement | null)?.focus();",
+                        js_str(&format!(".{cls}"))
+                    ));
+                }
+                UiAction::Clear => {
+                    self.line("      (ev.currentTarget as HTMLInputElement).value = \"\";");
+                }
+            }
         }
-        self.line(&format!(
-            "      const _ids = dispatch({}, {{ {} }});",
-            js_str(&ev.handler),
-            fields.join(", ")
-        ));
-        // Auto-focus a freshly inserted, editable row (the "+ card" idiom).
-        self.focus_inserts(handler);
         // Amortized rebalance of any ordered child levels under this row.
         for child in &level.children {
             if let (Some(_), Some(field)) = (&child.order_view, &child.order_field) {
@@ -183,34 +202,6 @@ impl Emit<'_> {
             }
         }
         self.line("    });");
-    }
-
-    /// After a handler that creates entities, focus the first input of each
-    /// newly mounted row that some level renders — the natural "new item is
-    /// ready to edit" behavior.
-    fn focus_inserts(&mut self, handler: &HandlerDef) {
-        let mut insert_idx = 0;
-        for m in &handler.body {
-            if let MutationIR::Insert { entity, .. } = m {
-                if let Some(level_name) = self.level_for_entity(entity) {
-                    self.line(&format!(
-                        "      shaper.el({}, _ids[{insert_idx}])?.querySelector(\"input, textarea\")?.focus();",
-                        js_str(&level_name)
-                    ));
-                }
-                insert_idx += 1;
-            }
-        }
-    }
-
-    fn level_for_entity(&self, entity: &str) -> Option<String> {
-        fn search(level: &ShapeLevel, entity: &str) -> Option<String> {
-            if level.entity == entity {
-                return Some(level.name.clone());
-            }
-            level.children.iter().find_map(|c| search(c, entity))
-        }
-        self.shapes.views.iter().find_map(|v| search(v, entity))
     }
 
     fn arg_expr(&self, _level: &ShapeLevel, a: &ArgSpec) -> String {
@@ -336,6 +327,29 @@ impl TemplateBuilder {
                 usize::MAX
             }
         }
+    }
+}
+
+/// The listener-local expression for a dispatch argument.
+fn arg_ref(a: &ArgRef) -> String {
+    match a {
+        ArgRef::SelfKey => "key".to_string(),
+        // `ancestors[0]` is the parent row's key, `[1]` its parent's, …
+        ArgRef::Ancestor(n) => format!("ancestors[{}]", n - 1),
+        ArgRef::Param(p) => p.clone(),
+        ArgRef::Lit(l) => js_lit(l),
+    }
+}
+
+/// A literal dispatch argument in canonical wire encoding.
+fn js_lit(l: &rex::types::typed::Lit) -> String {
+    use rex::types::typed::Lit;
+    match l {
+        Lit::Str(s) => format!("encodeText({})", js_str(s)),
+        Lit::Atom(a) => format!("encodeAtom({})", js_str(a)),
+        Lit::Int(n) => js_str(&format!("i:{n}")),
+        Lit::Decimal(d) => js_str(&format!("m:{d}")),
+        Lit::Date { year, month, day } => js_str(&format!("d:{year:04}-{month:02}-{day:02}")),
     }
 }
 

@@ -5,15 +5,16 @@
 //! becomes composite-keyed membership relations, its `order by` an order
 //! relation, its bound attributes attribute relations — all auto-derived
 //! `let`s the existing checker elaborates. What can't be a relation (the DOM
-//! skeleton, event wiring) becomes the ShapeIR/HandlerIR, consumed by codegen.
+//! skeleton, event wiring) becomes the ShapeIR/EventIR, consumed by codegen.
 //!
 //! The load-bearing rule (see plan): binders are second-class — they denote
 //! row keys, never relations. A binder appears only as the RHS of a membership
-//! conjunct (`:list == List`), as a value in a mutation, or as the implicit
-//! subject of `:field` paths in its own body. A handler may reference its own
-//! level's binder (the row it renders) and its params — enclosing binders are
-//! rejected, so every generated listener closes over exactly the key the
-//! shaper hands its template.
+//! conjunct (`.list = l`), as a `do` argument, or as the implicit subject of
+//! `.field` paths in its own body. A DOM handler never mutates directly: it
+//! `do`es named events, passing its own level's binder, any enclosing
+//! binder (the shaper hands each template its ancestor keys), and its
+//! extracted params. Named events (`event E(…)` + `on E(…)`) own the checked
+//! mutation bodies (the EventIR).
 
 use super::shape_ir::*;
 use super::typed::Lit;
@@ -56,10 +57,23 @@ pub fn desugar(program: &Program) -> Desugared {
         stmts: Vec::new(),
         shapes: ShapeProgram::default(),
         diagnostics: Vec::new(),
-        handler_seq: 0,
         attr_seq: 0,
         entity_fields,
+        event_spans: Default::default(),
     };
+    // Pass 0: `event` declarations, then their `on` handlers (order-free, so a
+    // view or a handler may `do` an event declared later in the file).
+    for stmt in &program.stmts {
+        if let Stmt::Event(e) = stmt {
+            d.event_decl(e);
+        }
+    }
+    for stmt in &program.stmts {
+        if let Stmt::On(o) = stmt {
+            d.on_decl(o);
+        }
+    }
+    d.check_do_graph();
     // Pass 1: collect `rel` decls so each becomes a functional field on its
     // source entity (grouped by entity name), regardless of decl order.
     let mut rel_fields: std::collections::HashMap<String, Vec<FieldDecl>> = Default::default();
@@ -81,17 +95,11 @@ pub fn desugar(program: &Program) -> Desugared {
                 s.span,
                 "`state` is not supported yet (MVP-PLAN S-51)".to_string(),
             )),
-            Stmt::Event(e) => d.diagnostics.push(Diagnostic::error(
-                e.span,
-                "`event` is not supported yet (MVP-PLAN S-20)".to_string(),
-            )),
-            Stmt::On(o) => d.diagnostics.push(Diagnostic::error(
-                o.span,
-                "`on` handlers for named events are not supported yet (MVP-PLAN S-20)".to_string(),
-            )),
+            // Consumed in pass 0.
+            Stmt::Event(_) | Stmt::On(_) => {}
             Stmt::Type(t) => d.diagnostics.push(Diagnostic::error(
                 t.span,
-                "`type` is not supported yet (MVP-PLAN S-20)".to_string(),
+                "`type` is not supported yet (MVP-PLAN S-50)".to_string(),
             )),
             Stmt::Import(i) => d.diagnostics.push(Diagnostic::error(
                 i.span,
@@ -130,7 +138,6 @@ struct Desugar {
     stmts: Vec<Stmt>,
     shapes: ShapeProgram,
     diagnostics: Vec<Diagnostic>,
-    handler_seq: usize,
     /// Sequence for auto-named attribute views of non-path binds.
     attr_seq: usize,
     /// Each entity's field names and declared types (declared + `rel`-injected).
@@ -138,11 +145,320 @@ struct Desugar {
     /// field but was meant as a bind (`{ cnt }` instead of `{ :cnt }`), and
     /// (b) pick the wire `Encoding` for a `:field` bind.
     entity_fields: std::collections::HashMap<String, std::collections::HashMap<String, Type>>,
+    /// Event name -> (decl span, `on` span if any); for diagnostics.
+    event_spans: std::collections::HashMap<String, (Span, Option<Span>)>,
 }
+
+/// A name a handler body may reference, with what it denotes.
+type Scope = Vec<(String, ParamTy)>;
 
 impl Desugar {
     fn error(&mut self, span: Span, msg: impl Into<String>) {
         self.diagnostics.push(Diagnostic::error(span, msg.into()));
+    }
+
+    // --- events -----------------------------------------------------------
+
+    fn event_decl(&mut self, e: &EventDecl) {
+        if self.event_spans.contains_key(&e.name) {
+            self.error(e.span, format!("event `{}` is declared twice", e.name));
+            return;
+        }
+        let mut params = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for p in &e.params {
+            if !seen.insert(p.name.clone()) {
+                self.error(p.span, format!("duplicate parameter `{}`", p.name));
+            }
+            match self.param_ty(&p.ty) {
+                Some(ty) => params.push(EventParam { name: p.name.clone(), ty }),
+                None => return,
+            }
+        }
+        self.event_spans.insert(e.name.clone(), (e.span, None));
+        self.shapes.events.push(EventDef { name: e.name.clone(), params, body: Vec::new() });
+    }
+
+    fn on_decl(&mut self, o: &OnDecl) {
+        let Some(idx) = self.shapes.events.iter().position(|e| e.name == o.event) else {
+            self.error(o.span, format!("`on {}`: no such event; declare it with `event {}(…)`", o.event, o.event));
+            return;
+        };
+        if self.event_spans[&o.event].1.is_some() {
+            self.error(o.span, format!("event `{}` already has an `on` handler", o.event));
+            return;
+        }
+        self.event_spans.get_mut(&o.event).unwrap().1 = Some(o.span);
+        let decl_params = self.shapes.events[idx].params.clone();
+        if o.params.len() != decl_params.len() {
+            self.error(
+                o.span,
+                format!(
+                    "`on {}` binds {} parameter(s) but the event declares {}",
+                    o.event,
+                    o.params.len(),
+                    decl_params.len()
+                ),
+            );
+            return;
+        }
+        let scope: Scope = o
+            .params
+            .iter()
+            .zip(&decl_params)
+            .map(|(n, p)| (n.clone(), p.ty.clone()))
+            .collect();
+        let mut body = Vec::new();
+        for m in &o.body {
+            match self.mutation(m, &scope, None) {
+                Some(ir) => body.push(ir),
+                None => return,
+            }
+        }
+        self.shapes.events[idx].body = body;
+    }
+
+    /// Reject a cycle in the static synchronous-`do` graph (§5 decision 2:
+    /// a `do` inside an `on` body joins the caller's transaction, so a cycle
+    /// would never terminate).
+    fn check_do_graph(&mut self) {
+        let names: Vec<String> = self.shapes.events.iter().map(|e| e.name.clone()).collect();
+        for name in names {
+            let mut stack = vec![name.clone()];
+            if let Some(cycle) = self.find_cycle(&name, &mut stack) {
+                let span = self.event_spans[&name].1.unwrap_or(self.event_spans[&name].0);
+                self.error(span, format!("synchronous `do` cycle: {}", cycle.join(" -> ")));
+                return;
+            }
+        }
+    }
+
+    fn find_cycle(&self, at: &str, stack: &mut Vec<String>) -> Option<Vec<String>> {
+        let def = self.shapes.events.iter().find(|e| e.name == at)?;
+        for m in &def.body {
+            if let MutationIR::Do { event, .. } = m {
+                if let Some(pos) = stack.iter().position(|s| s == event) {
+                    let mut cycle = stack[pos..].to_vec();
+                    cycle.push(event.clone());
+                    return Some(cycle);
+                }
+                stack.push(event.clone());
+                if let Some(c) = self.find_cycle(event, stack) {
+                    return Some(c);
+                }
+                stack.pop();
+            }
+        }
+        None
+    }
+
+    /// The wire shape of a declared parameter type.
+    fn param_ty(&mut self, ty: &Type) -> Option<ParamTy> {
+        match &ty.kind {
+            TypeKind::Named(n) => match n.as_str() {
+                "Int" | "Money" | "Text" | "Date" | "Bool" => Some(ParamTy::Scalar(encoding_of_type(ty))),
+                _ if self.entity_fields.contains_key(n) => Some(ParamTy::Id(n.clone())),
+                // The sort-name spelling `ListID` names the same entity.
+                _ if n.strip_suffix("ID").is_some_and(|e| self.entity_fields.contains_key(e)) => {
+                    Some(ParamTy::Id(n.strip_suffix("ID").unwrap().to_string()))
+                }
+                _ => {
+                    self.error(ty.span, format!("unknown type `{n}`"));
+                    None
+                }
+            },
+            TypeKind::AtomSingleton(_) | TypeKind::Coproduct(_) => Some(ParamTy::Scalar(Encoding::Atom)),
+            TypeKind::Arrow(a, b) => match (&a.kind, &b.kind) {
+                (TypeKind::Named(x), TypeKind::Named(y)) => Some(ParamTy::Rel(x.clone(), y.clone())),
+                _ => {
+                    self.error(ty.span, "a relation-typed parameter must be `A -> B` with named types");
+                    None
+                }
+            },
+            TypeKind::Product(..) => {
+                self.error(ty.span, "product-typed event parameters are not supported");
+                None
+            }
+        }
+    }
+
+    /// Lower one handler-body statement against `scope`. `implicit` is the
+    /// binder a bare `.f := v` targets (a DOM handler's own row); `None` in
+    /// an `on` body, where every target must be named.
+    fn mutation(&mut self, m: &HStmt, scope: &Scope, implicit: Option<&str>) -> Option<MutationIR> {
+        let span = m.span();
+        match m {
+            HStmt::Assign { binder, field, value, .. } => {
+                let Some(target_name) = binder.clone().or_else(|| implicit.map(str::to_string)) else {
+                    self.error(span, "`.f := v` needs a target: write `x.f := v` for a parameter `x`");
+                    return None;
+                };
+                let entity = self.target_entity(&target_name, scope, span)?;
+                let val = self.val(value, scope)?;
+                self.check_field_value(&entity, field, &val, scope, value.span)?;
+                Some(MutationIR::Set {
+                    target: Ref(target_name),
+                    entity,
+                    updates: vec![(field.clone(), val)],
+                })
+            }
+            HStmt::Update { target, sets, .. } => {
+                let ExprKind::Ident(target_name) = &target.kind else {
+                    self.error(target.span, "`update` of a `where`-targeted keyset is not supported yet (MVP-PLAN S-41)");
+                    return None;
+                };
+                let entity = self.target_entity(target_name, scope, span)?;
+                let mut updates = Vec::new();
+                for f in sets {
+                    let v = self.val(&f.value, scope)?;
+                    self.check_field_value(&entity, &f.name, &v, scope, f.value.span)?;
+                    updates.push((f.name.clone(), v));
+                }
+                Some(MutationIR::Set { target: Ref(target_name.clone()), entity, updates })
+            }
+            HStmt::Delete { target, .. } => {
+                let ExprKind::Ident(target_name) = &target.kind else {
+                    self.error(target.span, "`delete` of a `where`-targeted keyset is not supported yet (MVP-PLAN S-41)");
+                    return None;
+                };
+                self.target_entity(target_name, scope, span)?;
+                Some(MutationIR::Delete { target: Ref(target_name.clone()) })
+            }
+            HStmt::New { bind, entity, from, fields, .. } => {
+                if bind.is_some() {
+                    self.error(span, "`let x = new …` in a handler is not supported yet (MVP-PLAN S-40)");
+                    return None;
+                }
+                if from.is_some() {
+                    self.error(span, "`new … from` is not supported yet (MVP-PLAN S-42)");
+                    return None;
+                }
+                if !self.entity_fields.contains_key(entity) {
+                    self.error(span, format!("unknown entity `{entity}`"));
+                    return None;
+                }
+                let mut fs = Vec::new();
+                for f in fields {
+                    let v = self.val(&f.value, scope)?;
+                    self.check_field_value(entity, &f.name, &v, scope, f.value.span)?;
+                    fs.push((f.name.clone(), v));
+                }
+                Some(MutationIR::Insert { entity: entity.clone(), fields: fs })
+            }
+            HStmt::Do { event, args, .. } => {
+                let params = self.event_params(event, args.len(), span)?;
+                let mut vals = Vec::new();
+                for (a, p) in args.iter().zip(&params) {
+                    let v = self.val(a, scope)?;
+                    self.check_arg(&v, &p.ty, scope, a.span, event, &p.name)?;
+                    vals.push(v);
+                }
+                Some(MutationIR::Do { event: event.clone(), args: vals })
+            }
+            HStmt::Set { .. } => {
+                self.error(span, "`set` is not supported yet (MVP-PLAN S-51)");
+                None
+            }
+            HStmt::Clear { .. } | HStmt::Focus { .. } => {
+                self.error(span, "`clear`/`focus` are DOM actions; they are not allowed in an `on` body");
+                None
+            }
+        }
+    }
+
+    /// The declared params of `event`, checking the call's arity.
+    fn event_params(&mut self, event: &str, nargs: usize, span: Span) -> Option<Vec<EventParam>> {
+        let Some(def) = self.shapes.events.iter().find(|e| e.name == event) else {
+            self.error(span, format!("`do {event}`: no such event"));
+            return None;
+        };
+        if def.params.len() != nargs {
+            self.error(
+                span,
+                format!("`do {event}` passes {nargs} argument(s) but the event declares {}", def.params.len()),
+            );
+            return None;
+        }
+        Some(def.params.clone())
+    }
+
+    /// The wire type of a mutation value: a literal's own, or a parameter's.
+    fn val_ty(v: &ValRef, scope: &Scope) -> Option<ParamTy> {
+        match v {
+            ValRef::Arg(n) => scope.iter().find(|(s, _)| s == n).map(|(_, t)| t.clone()),
+            ValRef::Lit(l) => Some(ParamTy::Scalar(match l {
+                Lit::Int(_) => Encoding::Int,
+                Lit::Decimal(_) => Encoding::Money,
+                Lit::Str(_) => Encoding::Text,
+                Lit::Atom(_) => Encoding::Atom,
+                Lit::Date { .. } => Encoding::Text,
+            })),
+        }
+    }
+
+    /// Check one `do` argument against the callee's declared param type.
+    fn check_arg(&mut self, v: &ValRef, want: &ParamTy, scope: &Scope, span: Span, event: &str, pname: &str) -> Option<()> {
+        if Self::val_ty(v, scope).as_ref() != Some(want) {
+            self.error(span, format!("`do {event}`: argument for `{pname}` has the wrong type"));
+            return None;
+        }
+        Some(())
+    }
+
+    /// Check a field initializer/update against the entity's declared field
+    /// type (the checker never sees handler bodies, so this is their typing).
+    fn check_field_value(&mut self, entity: &str, field: &str, v: &ValRef, scope: &Scope, span: Span) -> Option<()> {
+        let Some(ty) = self.entity_fields.get(entity).and_then(|f| f.get(field)).cloned() else {
+            self.error(span, format!("no field `{field}` on `{entity}`"));
+            return None;
+        };
+        let want = self.param_ty(&ty)?;
+        if Self::val_ty(v, scope).as_ref() != Some(&want) {
+            self.error(span, format!("field `{field}` of `{entity}` expects `{}`", show_type(&ty)));
+            return None;
+        }
+        Some(())
+    }
+
+    /// The entity of a mutation target named in `scope`.
+    fn target_entity(&mut self, name: &str, scope: &Scope, span: Span) -> Option<String> {
+        match scope.iter().find(|(n, _)| n == name) {
+            Some((_, ParamTy::Id(e))) => Some(e.clone()),
+            Some(_) => {
+                self.error(span, format!("`{name}` is not an entity id and cannot be a mutation target"));
+                None
+            }
+            None => {
+                self.error(span, format!("unknown parameter `{name}` in mutation"));
+                None
+            }
+        }
+    }
+
+    fn val(&mut self, e: &Expr, scope: &Scope) -> Option<ValRef> {
+        match &e.kind {
+            ExprKind::Str(s) => Some(ValRef::Lit(Lit::Str(s.clone()))),
+            ExprKind::Int(n) => Some(ValRef::Lit(Lit::Int(*n))),
+            ExprKind::Decimal(s) => Some(ValRef::Lit(Lit::Decimal(s.clone()))),
+            ExprKind::Atom(a) => Some(ValRef::Lit(Lit::Atom(a.clone()))),
+            ExprKind::Date { year, month, day } => Some(ValRef::Lit(Lit::Date {
+                year: *year,
+                month: *month,
+                day: *day,
+            })),
+            ExprKind::Ident(name) => {
+                if scope.iter().any(|(n, _)| n == name) {
+                    Some(ValRef::Arg(name.clone()))
+                } else {
+                    self.error(e.span, format!("unknown parameter `{name}` in mutation value"));
+                    None
+                }
+            }
+            _ => {
+                self.error(e.span, "mutation values may be literals or parameters only (expressions arrive in MVP-PLAN S-40)");
+                None
+            }
+        }
     }
 
     fn view(&mut self, v: &ViewDecl) {
@@ -157,7 +473,7 @@ impl Desugar {
         match &v.body {
             ViewBody::Select(sel) => {
                 let root_name = format!("{}#{}", v.name, sel.entity.to_lowercase());
-                if let Some(level) = self.level(sel, &root_name, None) {
+                if let Some(level) = self.level(sel, &root_name, &[]) {
                     self.shapes.views.push(level);
                 }
             }
@@ -169,17 +485,24 @@ impl Desugar {
     }
 
     /// Lower one nesting level (a `select`), emitting its membership/order/attr
-    /// `let`s and recursing into nested selects.
+    /// `let`s and recursing into nested selects. `ancestors` are the enclosing
+    /// levels' `(binder, entity)` pairs, outermost first; the last is the
+    /// parent whose binder a membership `where` must reference.
     fn level(
         &mut self,
         sel: &SelectExpr,
         name: &str,
-        parent: Option<&str>,
+        ancestors: &[(String, String)],
     ) -> Option<ShapeLevel> {
         let e = &sel.entity;
         // The row binder in scope: the explicit `as l` alias, or the entity name.
         let binder = sel.binder.clone().unwrap_or_else(|| e.clone());
         let span = sel.span;
+        let parent = ancestors.last().map(|(b, _)| b.as_str());
+        if ancestors.iter().any(|(b, _)| b == &binder) {
+            self.error(span, format!("binder `{binder}` shadows an enclosing level's binder"));
+            return None;
+        }
 
         // Split the `where` conjuncts into the membership relation (`:f = P` or
         // a named `rel R = P`) and ordinary domain restrictions.
@@ -245,6 +568,7 @@ impl Desugar {
             d: self,
             entity: e,
             binder: &binder,
+            ancestors,
             level_name: name,
             child_levels,
             attrs: Vec::new(),
@@ -305,6 +629,8 @@ struct LevelWalk<'a> {
     /// The row binder name in scope (alias or entity name) — what membership
     /// conjuncts of nested selects and handler bodies reference.
     binder: &'a str,
+    /// Enclosing levels' `(binder, entity)`, outermost first.
+    ancestors: &'a [(String, String)],
     level_name: &'a str,
     /// Binder -> level name of every `select` nested directly in this level.
     child_levels: std::collections::HashMap<String, String>,
@@ -377,11 +703,11 @@ impl LevelWalk<'_> {
                 }
                 Content::Select(sel) => {
                     let child_name = format!("{}#{}", self.level_name, sel.entity.to_lowercase());
-                    // The child's membership `where :f = <binder>` references THIS
-                    // level's binder (alias or entity name), so pass it as parent.
-                    if let Some(level) =
-                        self.d.level(sel, &child_name, Some(self.binder))
-                    {
+                    // The child's membership `where .f = <binder>` references THIS
+                    // level's binder (alias or entity name), the last ancestor.
+                    let mut chain = self.ancestors.to_vec();
+                    chain.push((self.binder.to_string(), self.entity.to_string()));
+                    if let Some(level) = self.d.level(sel, &child_name, &chain) {
                         self.children.push(level);
                     }
                 }
@@ -441,62 +767,102 @@ impl LevelWalk<'_> {
         ty.map(encoding_of_type).unwrap_or(Encoding::Text)
     }
 
-    /// Lower an inline handler into an [`EventBinding`], recording its
-    /// [`HandlerDef`]. Returns `None` on error.
+    /// Lower a DOM handler into an [`EventBinding`]: extract params, then
+    /// `do` named events with this level's key, any enclosing level's key,
+    /// params or literals as arguments; `focus`/`clear` become UI actions.
+    /// Returns `None` on error.
     fn handler(&mut self, h: &HandlerDecl, path: &[usize]) -> Option<EventBinding> {
-        self.d.handler_seq += 1;
-        let name = format!("{}@{}{}", self.level_name, h.event, self.d.handler_seq);
+        // What a `do` argument may name, and how the listener gets it.
+        let mut scope: Vec<(String, ParamTy, ArgRef)> = Vec::new();
+        let depth = self.ancestors.len();
+        for (i, (b, e)) in self.ancestors.iter().enumerate() {
+            scope.push((b.clone(), ParamTy::Id(e.clone()), ArgRef::Ancestor(depth - i)));
+        }
+        scope.push((self.binder.to_string(), ParamTy::Id(self.entity.to_string()), ArgRef::SelfKey));
 
-        // Scope: the level's own binder (self) plus params. The binder maps to
-        // this level's entity so `delete l` / `new Card { list: l }` type-check.
-        let self_binder = self.binder.to_string();
-        let mut scope: Vec<(String, String)> = vec![(self_binder.clone(), self.entity.to_string())];
         let mut params = Vec::new();
-        let mut args = Vec::new();
         for p in &h.params {
             let ty = match &p.ty {
                 Some(t) => t.clone(),
                 None => match infer_param_type(&p.extractor, p.span) {
                     Some(t) => t,
                     None => {
-                        self.d.error(
-                            p.span,
-                            format!("parameter `{}` needs a type annotation", p.name),
-                        );
+                        self.d.error(p.span, format!("parameter `{}` needs a type annotation", p.name));
                         return None;
                     }
                 },
             };
-            let enc = encoding_of_type(&ty);
-            let entity = entity_of_type(&ty);
-            scope.push((p.name.clone(), entity.unwrap_or_default()));
-            params.push((p.name.clone(), enc));
+            let pty = self.d.param_ty(&ty)?;
             let extractor = self.resolve_extractor(&p.extractor, p.span)?;
-            args.push(ArgSpec {
-                name: p.name.clone(),
-                encoding: enc,
-                extractor,
-            });
+            params.push(ArgSpec { name: p.name.clone(), encoding: pty.encoding(), extractor });
+            scope.push((p.name.clone(), pty, ArgRef::Param(p.name.clone())));
         }
 
-        let mut body = Vec::new();
-        for m in &h.body {
-            body.push(self.mutation(m, &scope)?);
+        let mut dispatches = Vec::new();
+        let mut actions = Vec::new();
+        for stmt in &h.body {
+            let span = stmt.span();
+            match stmt {
+                HStmt::Do { event, args, .. } => {
+                    if !actions.is_empty() {
+                        self.d.error(span, "`do` must come before `focus`/`clear` in a DOM handler");
+                        return None;
+                    }
+                    let decl = self.d.event_params(event, args.len(), span)?;
+                    let mut bound = Vec::new();
+                    for (a, p) in args.iter().zip(&decl) {
+                        let (val, got) = match &a.kind {
+                            ExprKind::Ident(n) => match scope.iter().find(|(s, _, _)| s == n) {
+                                Some((_, t, r)) => (r.clone(), t.clone()),
+                                None => {
+                                    self.d.error(a.span, format!("unknown name `{n}`: not a binder in scope or a handler param"));
+                                    return None;
+                                }
+                            },
+                            ExprKind::Str(x) => (ArgRef::Lit(Lit::Str(x.clone())), ParamTy::Scalar(Encoding::Text)),
+                            ExprKind::Int(x) => (ArgRef::Lit(Lit::Int(*x)), ParamTy::Scalar(Encoding::Int)),
+                            ExprKind::Decimal(x) => (ArgRef::Lit(Lit::Decimal(x.clone())), ParamTy::Scalar(Encoding::Money)),
+                            ExprKind::Atom(x) => (ArgRef::Lit(Lit::Atom(x.clone())), ParamTy::Scalar(Encoding::Atom)),
+                            _ => {
+                                self.d.error(a.span, "`do` arguments in a DOM handler may be binders, params or literals");
+                                return None;
+                            }
+                        };
+                        if got != p.ty {
+                            self.d.error(a.span, format!("`do {event}`: argument for `{}` has the wrong type", p.name));
+                            return None;
+                        }
+                        bound.push((p.name.clone(), val));
+                    }
+                    dispatches.push(Dispatch { event: event.clone(), args: bound });
+                }
+                HStmt::Focus { target: FocusTarget::Level(b), .. } => match self.child_levels.get(b) {
+                    Some(level) => actions.push(UiAction::FocusNew { level: level.clone() }),
+                    None => {
+                        self.d.error(span, format!("`focus({b})`: `{b}` is not the binder of a `select` nested in this level"));
+                        return None;
+                    }
+                },
+                HStmt::Focus { target: FocusTarget::Class(c), .. } => actions.push(UiAction::FocusClass(c.clone())),
+                HStmt::Clear { .. } => actions.push(UiAction::Clear),
+                HStmt::Set { .. } => {
+                    self.d.error(span, "`set` is not supported yet (MVP-PLAN S-51)");
+                    return None;
+                }
+                HStmt::New { .. } | HStmt::Assign { .. } | HStmt::Update { .. } | HStmt::Delete { .. } => {
+                    self.d.error(span, "a DOM handler may not mutate directly: declare an `event` with an `on` body and `do` it (MVP-PLAN S-20)");
+                    return None;
+                }
+            }
         }
-
-        self.d.shapes.handlers.push(HandlerDef {
-            name: name.clone(),
-            binders: vec![(self_binder, Encoding::Id)],
-            params,
-            body,
-        });
 
         Some(EventBinding {
             path: path.to_vec(),
             dom_event: h.event.clone(),
             modifiers: h.modifiers.clone(),
-            handler: name,
-            args,
+            params,
+            dispatches,
+            actions,
         })
     }
 
@@ -527,105 +893,6 @@ impl LevelWalk<'_> {
             }
             other => other.clone(),
         })
-    }
-
-    fn mutation(&mut self, m: &HStmt, scope: &[(String, String)]) -> Option<MutationIR> {
-        let lookup = |name: &str| scope.iter().find(|(n, _)| n == name).map(|(_, e)| e.clone());
-        let span = m.span();
-        match m {
-            HStmt::Assign { binder, field, value, .. } => {
-                let target_name = binder.clone().unwrap_or_else(|| self.binder.to_string());
-                let Some(entity) = lookup(&target_name) else {
-                    self.d.error(span, format!("unknown binder `{target_name}` in mutation"));
-                    return None;
-                };
-                let val = self.val(value, scope)?;
-                Some(MutationIR::Set {
-                    target: Ref(target_name),
-                    entity,
-                    updates: vec![(field.clone(), val)],
-                })
-            }
-            HStmt::Update { target, sets, .. } => {
-                let ExprKind::Ident(target_name) = &target.kind else {
-                    self.d.error(target.span, "`update` of a `where`-targeted keyset is not supported yet (MVP-PLAN S-41)");
-                    return None;
-                };
-                let Some(entity) = lookup(target_name) else {
-                    self.d.error(span, format!("unknown binder `{target_name}` in `update`"));
-                    return None;
-                };
-                let mut updates = Vec::new();
-                for f in sets {
-                    updates.push((f.name.clone(), self.val(&f.value, scope)?));
-                }
-                Some(MutationIR::Set {
-                    target: Ref(target_name.clone()),
-                    entity,
-                    updates,
-                })
-            }
-            HStmt::Delete { target, .. } => {
-                let ExprKind::Ident(target_name) = &target.kind else {
-                    self.d.error(target.span, "`delete` of a `where`-targeted keyset is not supported yet (MVP-PLAN S-41)");
-                    return None;
-                };
-                if lookup(target_name).is_none() {
-                    self.d.error(span, format!("unknown binder `{target_name}` in `delete`"));
-                    return None;
-                }
-                Some(MutationIR::Delete { target: Ref(target_name.clone()) })
-            }
-            HStmt::New { bind, entity, from, fields, .. } => {
-                if bind.is_some() {
-                    self.d.error(span, "`let x = new …` in a handler is not supported yet (MVP-PLAN S-40)");
-                    return None;
-                }
-                if from.is_some() {
-                    self.d.error(span, "`new … from` is not supported yet (MVP-PLAN S-42)");
-                    return None;
-                }
-                let mut fs = Vec::new();
-                for f in fields {
-                    fs.push((f.name.clone(), self.val(&f.value, scope)?));
-                }
-                Some(MutationIR::Insert { entity: entity.clone(), fields: fs })
-            }
-            HStmt::Set { .. } | HStmt::Do { .. } => {
-                self.d.error(span, "`do`/`set` in a DOM handler are not supported yet (MVP-PLAN S-20)");
-                None
-            }
-            HStmt::Clear { .. } | HStmt::Focus { .. } => {
-                self.d.error(span, "`clear`/`focus` actions are not supported yet (MVP-PLAN S-20)");
-                None
-            }
-        }
-    }
-
-    fn val(&mut self, e: &Expr, scope: &[(String, String)]) -> Option<ValRef> {
-        match &e.kind {
-            ExprKind::Str(s) => Some(ValRef::Lit(Lit::Str(s.clone()))),
-            ExprKind::Int(n) => Some(ValRef::Lit(Lit::Int(*n))),
-            ExprKind::Decimal(s) => Some(ValRef::Lit(Lit::Decimal(s.clone()))),
-            ExprKind::Atom(a) => Some(ValRef::Lit(Lit::Atom(a.clone()))),
-            ExprKind::Date { year, month, day } => Some(ValRef::Lit(Lit::Date {
-                year: *year,
-                month: *month,
-                day: *day,
-            })),
-            ExprKind::Ident(name) => {
-                if scope.iter().any(|(n, _)| n == name) {
-                    Some(ValRef::Arg(name.clone()))
-                } else {
-                    self.d.error(e.span, format!("unknown binder/param `{name}` in mutation value"));
-                    None
-                }
-            }
-            _ => {
-                self.d.error(e.span, "unsupported mutation value");
-                None
-            }
-        }
     }
 }
 
@@ -675,6 +942,16 @@ fn collect_child_levels(
             }
             _ => {}
         }
+    }
+}
+
+fn show_type(ty: &Type) -> String {
+    match &ty.kind {
+        TypeKind::Named(n) => n.clone(),
+        TypeKind::AtomSingleton(a) => format!("@{a}"),
+        TypeKind::Arrow(a, b) => format!("{} -> {}", show_type(a), show_type(b)),
+        TypeKind::Product(a, b) => format!("{} * {}", show_type(a), show_type(b)),
+        TypeKind::Coproduct(ts) => format!("{{{}}}", ts.iter().map(show_type).collect::<Vec<_>>().join(" | ")),
     }
 }
 

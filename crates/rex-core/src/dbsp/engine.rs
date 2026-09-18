@@ -91,32 +91,53 @@ impl Engine {
         self.circuit.step(&tx)
     }
 
-    /// Append the negation of every base row currently held for `id` (identity
-    /// + fields) to `tx`. Reads pre-step integrals; no step.
+    /// The rows a base cell `(key, id)` will hold after `tx` is applied: the
+    /// pre-step integral plus whatever `tx` has already pushed for that cell.
+    /// A transaction's *reads* see the pre-event snapshot, but its *writes*
+    /// to one cell compose (two `set`s of the same field in one event leave
+    /// exactly the last value live, never a double-negated original).
+    fn net_rows(&self, tx: &Transaction, key: &InputKey, id: &Value) -> Vec<(Value, i64)> {
+        let mut rows: Vec<(Value, i64)> = self
+            .circuit
+            .input_integral(key)
+            .map(|rel| rel.row(id).collect())
+            .unwrap_or_default();
+        for (k, l, r, w) in &tx.deltas {
+            if k == key && l == id {
+                match rows.iter_mut().find(|(v, _)| v == r) {
+                    Some(row) => row.1 += w,
+                    None => rows.push((r.clone(), *w)),
+                }
+            }
+        }
+        rows.retain(|(_, w)| *w != 0);
+        rows
+    }
+
+    /// Append the negation of every base row held for `id` (identity +
+    /// fields) after `tx`'s pending writes, to `tx`. No step.
     fn push_retract(&mut self, tx: &mut Transaction, id: &Value) {
         let Value::Id(sort, _) = id else {
             panic!("retract requires an entity id, got {id}")
         };
         let identity = InputKey::Identity(*sort);
-        if let Some(ids) = self.circuit.input_integral(&identity) {
-            let w = ids.weight(id, id);
-            if w != 0 {
-                tx.push(identity, id.clone(), id.clone(), -w);
-            }
+        for (v, w) in self.net_rows(tx, &identity, id) {
+            tx.push(identity, id.clone(), v, -w);
         }
-        let field_keys: Vec<InputKey> = self
+        let mut field_keys: Vec<InputKey> = self
             .circuit
             .input_keys()
             .filter(|k| matches!(k, InputKey::Field(s, _) if s == sort))
             .copied()
             .collect();
+        // Fields first written in this transaction (a `new` then `delete`).
+        for (k, l, _, _) in &tx.deltas {
+            if matches!(k, InputKey::Field(s, _) if s == sort) && l == id && !field_keys.contains(k) {
+                field_keys.push(*k);
+            }
+        }
         for key in field_keys {
-            let rows: Vec<(Value, i64)> = self
-                .circuit
-                .input_integral(&key)
-                .map(|rel| rel.row(id).collect())
-                .unwrap_or_default();
-            for (v, w) in rows {
+            for (v, w) in self.net_rows(tx, &key, id) {
                 tx.push(key, id.clone(), v, -w);
             }
         }
@@ -145,28 +166,20 @@ impl Engine {
     }
 
     /// Append the `−old/+new` field rows for an update to `tx`. A no-op (pushes
-    /// nothing) if `id` has no live identity row — a stale update to a deleted
-    /// entity must not resurrect it as an orphaned field row. Reads pre-step
-    /// integrals; no step.
+    /// nothing) if `id` has no live identity row after `tx`'s pending writes —
+    /// a stale update to a deleted entity must not resurrect it as an
+    /// orphaned field row. No step.
     fn push_set(&mut self, tx: &mut Transaction, id: &Value, updates: &[(String, Value)]) {
         let Value::Id(sort, _) = id else {
             panic!("set requires an entity id, got {id}")
         };
-        let alive = self
-            .circuit
-            .input_integral(&InputKey::Identity(*sort))
-            .is_some_and(|ids| ids.weight(id, id) != 0);
+        let alive = !self.net_rows(tx, &InputKey::Identity(*sort), id).is_empty();
         if !alive {
             return;
         }
         for (field, new) in updates {
             let key = InputKey::Field(*sort, intern(field));
-            let rows: Vec<(Value, i64)> = self
-                .circuit
-                .input_integral(&key)
-                .map(|rel| rel.row(id).collect())
-                .unwrap_or_default();
-            for (v, w) in rows {
+            for (v, w) in self.net_rows(tx, &key, id) {
                 tx.push(key, id.clone(), v, -w);
             }
             tx.push(key, id.clone(), new.clone(), 1);
