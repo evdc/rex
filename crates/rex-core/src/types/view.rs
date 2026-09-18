@@ -57,6 +57,7 @@ pub fn desugar(program: &Program) -> Desugared {
         shapes: ShapeProgram::default(),
         diagnostics: Vec::new(),
         handler_seq: 0,
+        attr_seq: 0,
         entity_fields,
     };
     // Pass 1: collect `rel` decls so each becomes a functional field on its
@@ -78,7 +79,23 @@ pub fn desugar(program: &Program) -> Desugared {
             Stmt::View(v) => d.view(v),
             Stmt::State(s) => d.diagnostics.push(Diagnostic::error(
                 s.span,
-                "`state` is not supported yet".to_string(),
+                "`state` is not supported yet (MVP-PLAN S-51)".to_string(),
+            )),
+            Stmt::Event(e) => d.diagnostics.push(Diagnostic::error(
+                e.span,
+                "`event` is not supported yet (MVP-PLAN S-20)".to_string(),
+            )),
+            Stmt::On(o) => d.diagnostics.push(Diagnostic::error(
+                o.span,
+                "`on` handlers for named events are not supported yet (MVP-PLAN S-20)".to_string(),
+            )),
+            Stmt::Type(t) => d.diagnostics.push(Diagnostic::error(
+                t.span,
+                "`type` is not supported yet (MVP-PLAN S-20)".to_string(),
+            )),
+            Stmt::Import(i) => d.diagnostics.push(Diagnostic::error(
+                i.span,
+                "`import js` is not supported yet (MVP-PLAN S-42)".to_string(),
             )),
             Stmt::Rel(r) => {
                 // `rel R(A, B)` -> `let R = A . :R` (A's identity, then the
@@ -114,6 +131,8 @@ struct Desugar {
     shapes: ShapeProgram,
     diagnostics: Vec<Diagnostic>,
     handler_seq: usize,
+    /// Sequence for auto-named attribute views of non-path binds.
+    attr_seq: usize,
     /// Each entity's field names and declared types (declared + `rel`-injected).
     /// Used to (a) catch a bare identifier in an element body that names a
     /// field but was meant as a bind (`{ cnt }` instead of `{ :cnt }`), and
@@ -127,9 +146,25 @@ impl Desugar {
     }
 
     fn view(&mut self, v: &ViewDecl) {
-        let root_name = format!("{}#{}", v.name, v.body.entity.to_lowercase());
-        if let Some(level) = self.level(&v.body, &root_name, None) {
-            self.shapes.views.push(level);
+        if !v.params.is_empty() {
+            self.error(v.span, "components (`view Name(params)`) are not supported yet (MVP-PLAN S-61)");
+            return;
+        }
+        if let Some(l) = v.locals.first() {
+            self.error(l.span, "`local` state is not supported yet (MVP-PLAN S-62)");
+            return;
+        }
+        match &v.body {
+            ViewBody::Select(sel) => {
+                let root_name = format!("{}#{}", v.name, sel.entity.to_lowercase());
+                if let Some(level) = self.level(sel, &root_name, None) {
+                    self.shapes.views.push(level);
+                }
+            }
+            ViewBody::Element(e) => self.error(
+                e.span,
+                "a view whose body is a bare element (an implicit `Unit` root) is not supported yet (MVP-PLAN S-53)",
+            ),
         }
     }
 
@@ -163,7 +198,7 @@ impl Desugar {
         if parent.is_some() && membership_rel.is_none() {
             self.error(
                 span,
-                format!("nested `select {e}` needs a membership `where` relating a field to the enclosing binder, e.g. `where :field == Parent`"),
+                format!("nested `select {e}` needs a membership `where` relating a field to the enclosing binder, e.g. `where .field = parent`"),
             );
             return None;
         }
@@ -182,13 +217,28 @@ impl Desugar {
         };
         self.emit_let(name, membership_expr);
 
-        // Order view.
-        let order_view = sel.order_by.as_ref().map(|path| {
+        // Order view: `E . <order expr>` (a field path or any co-keyed expression).
+        let order_view = sel.order_by.as_ref().map(|o| {
+            if o.desc {
+                self.error(o.expr.span, "`order by … desc` is not supported yet (MVP-PLAN S-70)");
+            }
             let vname = format!("{name}#order");
-            self.emit_let(&vname, compose(ident(e, span), field_path(path, span), span));
+            self.emit_let(&vname, compose(ident(e, span), o.expr.clone(), span));
             vname
         });
-        let order_field = sel.order_by.as_ref().map(|p| p.join("."));
+        let order_field = sel.order_by.as_ref().and_then(|o| match &o.expr.kind {
+            ExprKind::FieldPath(p) => Some(p.join(".")),
+            _ => None,
+        });
+
+        // Child levels by binder, so `endOf(c)` / `dropPos(c, x)` in this
+        // level's handlers can name the level they range over.
+        let Content::Element(body) = &sel.body else {
+            self.error(span, "a `select` whose body is a component call is not supported yet (MVP-PLAN S-61)");
+            return None;
+        };
+        let mut child_levels = std::collections::HashMap::new();
+        collect_child_levels(&body.children, name, &mut child_levels);
 
         // Walk the element into a template + bindings + events + child levels.
         let mut lw = LevelWalk {
@@ -196,11 +246,12 @@ impl Desugar {
             entity: e,
             binder: &binder,
             level_name: name,
+            child_levels,
             attrs: Vec::new(),
             events: Vec::new(),
             children: Vec::new(),
         };
-        let template = lw.element(&sel.body, &[]);
+        let template = lw.element(body, &[]);
         let attrs = std::mem::take(&mut lw.attrs);
         let events = std::mem::take(&mut lw.events);
         let children = std::mem::take(&mut lw.children);
@@ -255,6 +306,8 @@ struct LevelWalk<'a> {
     /// conjuncts of nested selects and handler bodies reference.
     binder: &'a str,
     level_name: &'a str,
+    /// Binder -> level name of every `select` nested directly in this level.
+    child_levels: std::collections::HashMap<String, String>,
     attrs: Vec<AttrBinding>,
     events: Vec<EventBinding>,
     children: Vec<ShapeLevel>,
@@ -266,17 +319,22 @@ impl LevelWalk<'_> {
     fn element(&mut self, el: &ElementExpr, path: &[usize]) -> Tpl {
         // Attribute bindings on this element.
         let mut static_attrs = Vec::new();
+        let mut classes = Vec::new();
         for a in &el.attrs {
             match &a.value {
+                // `class="a b"` is the static class list (the Tpl keeps it apart
+                // from other attributes so codegen sets `className` once).
+                AttrValue::Static(s) if a.name == "class" => {
+                    classes.extend(s.split_whitespace().map(str::to_string));
+                }
                 AttrValue::Static(s) => static_attrs.push((a.name.clone(), s.clone())),
-                AttrValue::Bind(field) => {
+                AttrValue::Bind(expr) => {
                     let kind = if let Some(cls) = a.name.strip_prefix("class.") {
                         BindKind::Class(cls.to_string())
                     } else {
                         BindKind::Prop(a.name.clone())
                     };
-                    let encoding = self.field_encoding(field);
-                    let view = self.attr_view(field);
+                    let (view, encoding) = self.bind_view(expr);
                     self.attrs.push(AttrBinding { view, path: path.to_vec(), kind, encoding });
                 }
             }
@@ -293,10 +351,9 @@ impl LevelWalk<'_> {
         for c in &el.children {
             match c {
                 Content::Text(s) => tpl_children.push(Tpl::Static(s.clone())),
-                Content::Bind(field) => {
+                Content::Bind(expr) => {
                     // Bind this element's textContent; not a static child node.
-                    let encoding = self.field_encoding(field);
-                    let view = self.attr_view(field);
+                    let (view, encoding) = self.bind_view(expr);
                     self.attrs.push(AttrBinding {
                         view,
                         path: path.to_vec(),
@@ -305,33 +362,18 @@ impl LevelWalk<'_> {
                     });
                 }
                 Content::Element(child) => {
-                    // A childless, attribute-less bare tag that happens to
-                    // name a field of the enclosing entity is almost always
-                    // a forgotten `:` (`{ cnt }` meant `{ :cnt }`), not a
-                    // deliberate empty element — reject it instead of
-                    // silently emitting `<cnt>`.
-                    if child.classes.is_empty()
-                        && child.modifiers.is_empty()
-                        && child.attrs.is_empty()
-                        && child.handlers.is_empty()
-                        && child.children.is_empty()
-                        && self
-                            .d
-                            .entity_fields
-                            .get(self.entity)
-                            .is_some_and(|fields| fields.contains_key(&child.tag))
-                    {
-                        self.d.error(
-                            child.span,
-                            format!(
-                                "unknown element `{}`; did you mean `{{ :{} }}`?",
-                                child.tag, child.tag
-                            ),
-                        );
-                    }
                     let mut cp = path.to_vec();
                     cp.push(tpl_children.len());
                     tpl_children.push(self.element(child, &cp));
+                }
+                Content::If { span, .. } => {
+                    self.d.error(*span, "`if (…) { … }` in a view is not supported yet (MVP-PLAN S-53)");
+                }
+                Content::Component { span, .. } => {
+                    self.d.error(*span, "component calls are not supported yet (MVP-PLAN S-61)");
+                }
+                Content::ChildrenSlot(span) => {
+                    self.d.error(*span, "`children` slots are not supported yet (MVP-PLAN S-61)");
                 }
                 Content::Select(sel) => {
                     let child_name = format!("{}#{}", self.level_name, sel.entity.to_lowercase());
@@ -347,11 +389,27 @@ impl LevelWalk<'_> {
         }
         Tpl::Elem {
             tag: el.tag.clone(),
-            classes: el.classes.clone(),
+            classes,
             modifiers: el.modifiers.clone(),
             attrs: static_attrs,
             children: tpl_children,
         }
+    }
+
+    /// The attribute view for a bind expression: a `.field` path keeps its
+    /// typed encoding; any other co-keyed expression gets an auto-named view
+    /// and (until S-60 types it) a `Text` encoding.
+    fn bind_view(&mut self, expr: &Expr) -> (String, Encoding) {
+        if let ExprKind::FieldPath(parts) = &expr.kind {
+            return (self.attr_view(parts), self.field_encoding(parts));
+        }
+        self.d.attr_seq += 1;
+        let name = format!("{}#bind{}", self.level_name, self.d.attr_seq);
+        self.d.emit_let(
+            &name,
+            compose(ident(self.entity, Span::point(0)), expr.clone(), Span::point(0)),
+        );
+        (name, Encoding::Text)
     }
 
     fn attr_view(&mut self, field: &[String]) -> String {
@@ -396,14 +454,28 @@ impl LevelWalk<'_> {
         let mut params = Vec::new();
         let mut args = Vec::new();
         for p in &h.params {
-            let enc = encoding_of_type(&p.ty);
-            let entity = entity_of_type(&p.ty);
+            let ty = match &p.ty {
+                Some(t) => t.clone(),
+                None => match infer_param_type(&p.extractor, p.span) {
+                    Some(t) => t,
+                    None => {
+                        self.d.error(
+                            p.span,
+                            format!("parameter `{}` needs a type annotation", p.name),
+                        );
+                        return None;
+                    }
+                },
+            };
+            let enc = encoding_of_type(&ty);
+            let entity = entity_of_type(&ty);
             scope.push((p.name.clone(), entity.unwrap_or_default()));
             params.push((p.name.clone(), enc));
+            let extractor = self.resolve_extractor(&p.extractor, p.span)?;
             args.push(ArgSpec {
                 name: p.name.clone(),
                 encoding: enc,
-                extractor: p.extractor.clone(),
+                extractor,
             });
         }
 
@@ -428,39 +500,104 @@ impl LevelWalk<'_> {
         })
     }
 
-    fn mutation(&mut self, m: &Mutation, scope: &[(String, String)]) -> Option<MutationIR> {
+    /// Resolve the surface extractor's level binders (`endOf(c)`) to level
+    /// names, so codegen never re-derives naming.
+    fn resolve_extractor(&mut self, x: &Extractor, span: Span) -> Option<Extractor> {
+        let level = |this: &mut Self, binder: &str| -> Option<String> {
+            match this.child_levels.get(binder) {
+                Some(l) => Some(l.clone()),
+                None => {
+                    this.d.error(
+                        span,
+                        format!("`{binder}` is not the binder of a `select` nested in this level"),
+                    );
+                    None
+                }
+            }
+        };
+        Some(match x {
+            Extractor::EndOf(b) => Extractor::EndOf(level(self, b)?),
+            Extractor::DropPos { level: b, exclude } => Extractor::DropPos {
+                level: level(self, b)?,
+                exclude: exclude.clone(),
+            },
+            Extractor::Js { .. } => {
+                self.d.error(span, "JS extractors (`import js`) are not supported yet (MVP-PLAN S-42)");
+                return None;
+            }
+            other => other.clone(),
+        })
+    }
+
+    fn mutation(&mut self, m: &HStmt, scope: &[(String, String)]) -> Option<MutationIR> {
         let lookup = |name: &str| scope.iter().find(|(n, _)| n == name).map(|(_, e)| e.clone());
+        let span = m.span();
         match m {
-            Mutation::Set { binder, field, value, span } => {
+            HStmt::Assign { binder, field, value, .. } => {
                 let target_name = binder.clone().unwrap_or_else(|| self.binder.to_string());
                 let Some(entity) = lookup(&target_name) else {
-                    self.d.error(*span, format!("unknown binder `{target_name}` in mutation"));
+                    self.d.error(span, format!("unknown binder `{target_name}` in mutation"));
                     return None;
                 };
-                if field.len() != 1 {
-                    self.d.error(*span, "only single-field assignment is supported");
-                    return None;
-                }
                 let val = self.val(value, scope)?;
                 Some(MutationIR::Set {
                     target: Ref(target_name),
                     entity,
-                    updates: vec![(field[0].clone(), val)],
+                    updates: vec![(field.clone(), val)],
                 })
             }
-            Mutation::Delete { target, span } => {
-                if lookup(target).is_none() {
-                    self.d.error(*span, format!("unknown binder `{target}` in `delete`"));
+            HStmt::Update { target, sets, .. } => {
+                let ExprKind::Ident(target_name) = &target.kind else {
+                    self.d.error(target.span, "`update` of a `where`-targeted keyset is not supported yet (MVP-PLAN S-41)");
+                    return None;
+                };
+                let Some(entity) = lookup(target_name) else {
+                    self.d.error(span, format!("unknown binder `{target_name}` in `update`"));
+                    return None;
+                };
+                let mut updates = Vec::new();
+                for f in sets {
+                    updates.push((f.name.clone(), self.val(&f.value, scope)?));
+                }
+                Some(MutationIR::Set {
+                    target: Ref(target_name.clone()),
+                    entity,
+                    updates,
+                })
+            }
+            HStmt::Delete { target, .. } => {
+                let ExprKind::Ident(target_name) = &target.kind else {
+                    self.d.error(target.span, "`delete` of a `where`-targeted keyset is not supported yet (MVP-PLAN S-41)");
+                    return None;
+                };
+                if lookup(target_name).is_none() {
+                    self.d.error(span, format!("unknown binder `{target_name}` in `delete`"));
                     return None;
                 }
-                Some(MutationIR::Delete { target: Ref(target.clone()) })
+                Some(MutationIR::Delete { target: Ref(target_name.clone()) })
             }
-            Mutation::New { entity, fields, span: _ } => {
+            HStmt::New { bind, entity, from, fields, .. } => {
+                if bind.is_some() {
+                    self.d.error(span, "`let x = new …` in a handler is not supported yet (MVP-PLAN S-40)");
+                    return None;
+                }
+                if from.is_some() {
+                    self.d.error(span, "`new … from` is not supported yet (MVP-PLAN S-42)");
+                    return None;
+                }
                 let mut fs = Vec::new();
                 for f in fields {
                     fs.push((f.name.clone(), self.val(&f.value, scope)?));
                 }
                 Some(MutationIR::Insert { entity: entity.clone(), fields: fs })
+            }
+            HStmt::Set { .. } | HStmt::Do { .. } => {
+                self.d.error(span, "`do`/`set` in a DOM handler are not supported yet (MVP-PLAN S-20)");
+                None
+            }
+            HStmt::Clear { .. } | HStmt::Focus { .. } => {
+                self.d.error(span, "`clear`/`focus` actions are not supported yet (MVP-PLAN S-20)");
+                None
             }
         }
     }
@@ -506,12 +643,48 @@ fn compose(a: Expr, b: Expr, span: Span) -> Expr {
     Expr { kind: ExprKind::Compose(Box::new(a), Box::new(b)), span }
 }
 
+/// The type a DOM handler param has when its extractor fixes it (`value`
+/// is Text, `drag(E)` is `E`, …); `None` when an annotation is required.
+fn infer_param_type(x: &Extractor, span: Span) -> Option<Type> {
+    let named = |n: &str| Type { kind: TypeKind::Named(n.to_string()), span };
+    Some(match x {
+        Extractor::Value | Extractor::EndOf(_) | Extractor::DropPos { .. } => named("Text"),
+        Extractor::Checked => named("Bool"),
+        Extractor::Drag(e) => named(e),
+        Extractor::Js { .. } => return None,
+    })
+}
+
+/// Binder -> level name for every `select` nested directly under `contents`
+/// (descending through plain elements, not through nested selects).
+fn collect_child_levels(
+    contents: &[Content],
+    level_name: &str,
+    out: &mut std::collections::HashMap<String, String>,
+) {
+    for c in contents {
+        match c {
+            Content::Select(sel) => {
+                let binder = sel.binder.clone().unwrap_or_else(|| sel.entity.clone());
+                out.insert(binder, format!("{level_name}#{}", sel.entity.to_lowercase()));
+            }
+            Content::Element(e) => collect_child_levels(&e.children, level_name, out),
+            Content::If { children, .. } => collect_child_levels(children, level_name, out),
+            Content::Component { children: Some(kids), .. } => {
+                collect_child_levels(kids, level_name, out)
+            }
+            _ => {}
+        }
+    }
+}
+
 fn encoding_of_type(ty: &Type) -> Encoding {
     match &ty.kind {
         TypeKind::Named(n) => match n.as_str() {
             "Int" => Encoding::Int,
             "Money" => Encoding::Money,
             "Text" => Encoding::Text,
+            "Bool" => Encoding::Atom,
             _ => Encoding::Id, // an entity type
         },
         TypeKind::AtomSingleton(_) | TypeKind::Coproduct(_) => Encoding::Atom,
@@ -521,7 +694,7 @@ fn encoding_of_type(ty: &Type) -> Encoding {
 
 fn entity_of_type(ty: &Type) -> Option<String> {
     match &ty.kind {
-        TypeKind::Named(n) if !matches!(n.as_str(), "Int" | "Money" | "Text" | "Date" | "Unit") => {
+        TypeKind::Named(n) if !matches!(n.as_str(), "Int" | "Money" | "Text" | "Date" | "Unit" | "Bool") => {
             Some(n.clone())
         }
         _ => None,

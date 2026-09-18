@@ -213,22 +213,23 @@ impl Emit<'_> {
         self.shapes.views.iter().find_map(|v| search(v, entity))
     }
 
-    fn arg_expr(&self, level: &ShapeLevel, a: &ArgSpec) -> String {
-        // The single child level (used by dropPos/endOf on ordered lists).
-        let child = level.children.first().map(|c| c.name.clone()).unwrap_or_default();
+    fn arg_expr(&self, _level: &ShapeLevel, a: &ArgSpec) -> String {
+        // `endOf`/`dropPos` name the child level they range over; the
+        // desugarer has already resolved the surface binder to a level name.
         let raw = match &a.extractor {
             Extractor::Value => "(ev.currentTarget as HTMLInputElement).value".to_string(),
             Extractor::Checked => {
                 return "((ev.currentTarget as HTMLInputElement).checked ? encodeAtom(\"true\") : encodeAtom(\"false\"))".to_string()
             }
             Extractor::Drag(_) => return "dragValue(ev)".to_string(),
-            Extractor::DropPos(exclude) => format!(
+            Extractor::DropPos { level, exclude } => format!(
                 "dropPos(shaper, {}, key, (ev as DragEvent).clientY, {})",
-                js_str(&child),
+                js_str(level),
                 exclude
             ),
-            Extractor::EndOf(_) => format!("endOf(shaper, {}, key)", js_str(&child)),
-            Extractor::Prompt(msg) => format!("(window.prompt({}) ?? \"\")", js_str(msg)),
+            Extractor::EndOf(level) => format!("endOf(shaper, {}, key)", js_str(level)),
+            // Rejected by the desugarer until S-42 wires `import js` through.
+            Extractor::Js { module, func, .. } => format!("{module}.{func}()"),
         };
         // Encode per the arg's declared encoding.
         match a.encoding {

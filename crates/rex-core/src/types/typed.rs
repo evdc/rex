@@ -94,6 +94,8 @@ pub enum TExprKind {
     Antijoin(Box<TExpr>, Box<TExpr>),
     Mul(Box<TExpr>, Box<TExpr>),
     Concat(Box<TExpr>, Box<TExpr>),
+    /// `+ - / %` on co-keyed numeric columns (SYNTAX v1 §4).
+    Arith(ArithKind, Box<TExpr>, Box<TExpr>),
 
     /// A standalone coreflexive built-in (rare; usually folded into `Filter`).
     Coreflexive(Pred),
@@ -134,4 +136,15 @@ pub enum TStmt {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TProgram {
     pub stmts: Vec<TStmt>,
+}
+
+/// The four arithmetic operators beyond `*` (which predates them and keeps
+/// its own node). `Div`/`Mod` are Int-only; `Add`/`Sub` follow `*`'s
+/// Money-if-either rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArithKind {
+    Add,
+    Sub,
+    Div,
+    Mod,
 }

@@ -16,8 +16,8 @@ let l0 = new List { title: "Todo",  pos: "a0" }
 let l1 = new List { title: "Doing", pos: "a1" }
 let c0 = new Card { title: "Design", pos: "a0", list: l0 }
 
-let card_list  : Card -> ListID = :list
-let card_pos   : Card -> Text = :pos
+let card_list  : Card -> ListID = .list
+let card_pos   : Card -> Text = .pos
 "#;
 
 fn setup() -> (Engine, HashMap<String, Value>) {

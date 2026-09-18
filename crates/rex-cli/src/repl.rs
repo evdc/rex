@@ -245,12 +245,18 @@ impl Session {
             .any(|s| {
                 matches!(
                     s,
-                    rex::ast::Stmt::View(_) | rex::ast::Stmt::State(_) | rex::ast::Stmt::Rel(_)
+                    rex::ast::Stmt::View(_)
+                        | rex::ast::Stmt::State(_)
+                        | rex::ast::Stmt::Rel(_)
+                        | rex::ast::Stmt::Event(_)
+                        | rex::ast::Stmt::On(_)
+                        | rex::ast::Stmt::Type(_)
+                        | rex::ast::Stmt::Import(_)
                 )
             })
         {
             println!(
-                "`view`/`state`/`rel` aren't supported in the REPL — compile with `rex build`."
+                "`view`/`state`/`rel`/`event`/`on`/`type`/`import` aren't supported in the REPL — compile with `rex build`."
             );
             return false;
         }
@@ -289,6 +295,10 @@ impl Session {
                     rex::ast::Stmt::View(v) => println!("view {} defined", v.name),
                     rex::ast::Stmt::State(s) => println!("state {} defined", s.name),
                     rex::ast::Stmt::Rel(r) => println!("rel {} defined", r.name),
+                    rex::ast::Stmt::Event(e) => println!("event {} defined", e.name),
+                    rex::ast::Stmt::On(o) => println!("handler for {} defined", o.event),
+                    rex::ast::Stmt::Type(t) => println!("type {} defined", t.name),
+                    rex::ast::Stmt::Import(i) => println!("import {} defined", i.alias),
                 }
             }
         } else {
@@ -322,7 +332,11 @@ impl Session {
                     // Rejected earlier in `commit`; unreachable here.
                     rex::ast::Stmt::View(_)
                     | rex::ast::Stmt::State(_)
-                    | rex::ast::Stmt::Rel(_) => si += 1,
+                    | rex::ast::Stmt::Rel(_)
+                    | rex::ast::Stmt::Event(_)
+                    | rex::ast::Stmt::On(_)
+                    | rex::ast::Stmt::Type(_)
+                    | rex::ast::Stmt::Import(_) => si += 1,
                 }
             }
             debug_assert_eq!(ti, typed.stmts.len());
@@ -550,7 +564,7 @@ mod tests {
             session.typed_stmts.len(),
             session.engine.circuit.node_count(),
         );
-        assert!(!session.eval_committing_line("let x : Customer -> Text = :nosuchfield"));
+        assert!(!session.eval_committing_line("let x : Customer -> Text = .nosuchfield"));
         assert_eq!(
             before,
             (
@@ -575,10 +589,10 @@ mod tests {
             "let c = new Node { name: \"c\" }",
             "let _ = new Edge { src: a, dst: b }",
             "let _ = new Edge { src: b, dst: c }",
-            "let srcof : Edge -> Node = :src",
-            "let dstof : Edge -> Node = :dst",
+            "let srcof : Edge -> Node = .src",
+            "let dstof : Edge -> Node = .dst",
             "let edge : Node -> Node = dstof by srcof",
-            "let recursive path : Node -> Node = edge + edge . path",
+            "let recursive path : Node -> Node = edge | edge . path",
         ] {
             assert!(session.eval_committing_line(line), "failed to commit: {line}");
         }
@@ -588,7 +602,7 @@ mod tests {
         // Adjacent recursive let: re-checking merges it into `path`'s group,
         // the applied prefix restructures, and the session rebuilds.
         assert!(session.eval_committing_line(
-            "let recursive path2 : Node -> Node = edge + path2 . edge"
+            "let recursive path2 : Node -> Node = edge | path2 . edge"
         ));
         assert_eq!(session.engine.circuit.view("path").unwrap().len(), 3);
         assert_eq!(session.engine.circuit.view("path2").unwrap().len(), 3);

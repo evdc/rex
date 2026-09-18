@@ -50,6 +50,12 @@ fn op_name(kind: &TExprKind) -> Option<&'static str> {
         BinCompare(..) => "compare",
         InRel(..) => "in",
         Mul(..) => "mul",
+        Arith(k, ..) => match k {
+            crate::types::typed::ArithKind::Add => "add",
+            crate::types::typed::ArithKind::Sub => "sub",
+            crate::types::typed::ArithKind::Div => "div",
+            crate::types::typed::ArithKind::Mod => "mod",
+        },
         Concat(..) => "concat",
         Identity(..) | View(..) | RecVar(..) | ValueRef(..) | Field(..) | Const { .. }
         | Atom(..) | Filter(..) | Coreflexive(..) => return None,
@@ -76,6 +82,7 @@ fn walk(e: &TExpr, out: &mut Vec<Diagnostic>) -> bool {
         | Antijoin(a, b)
         | BinCompare(_, a, b)
         | Mul(a, b)
+        | Arith(_, a, b)
         | Concat(a, b) => {
             // Both sides always walked so every offending node is reported.
             let ra = walk(a, out);

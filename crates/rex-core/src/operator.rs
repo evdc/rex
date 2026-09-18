@@ -59,6 +59,10 @@ pub const OPERATORS: &[OpMeta] = &[
     meta("compare", Relational, true, false, Infinite),
     meta("in", Relational, true, false, Infinite),
     meta("mul", Functional, true, true, Infinite),
+    meta("add", Functional, true, true, Infinite),
+    meta("sub", Functional, true, true, Infinite),
+    meta("div", Functional, true, true, Infinite),
+    meta("mod", Functional, true, true, Infinite),
     meta("concat", Functional, true, true, Infinite),
     // The fixpoint itself is monotone (it *requires* a monotone body, §8) but
     // firmly in the non-linear/expensive tier — never "free" like a filter.
@@ -98,7 +102,7 @@ mod tests {
         let expected = [
             "compose", "restrict", "inverse", "fork", "union", "intersect",
             "distinct", "proj", "except", "antijoin", "by", "aggregate", "compare",
-            "in", "mul", "concat", "fix",
+            "in", "mul", "add", "sub", "div", "mod", "concat", "fix",
         ];
         for name in expected {
             assert!(lookup(name).is_some(), "missing metadata for `{name}`");

@@ -13,11 +13,11 @@ entity User {
 }
 entity Message {
   text: Text
-  by: User
+  sender: User
 }
 entity Like {
   msg: Message
-  by: User
+  user: User
 }
 
 state current : User            // no default: empty until a user is selected
@@ -32,18 +32,18 @@ on SeedSynthetic() {
   let alice = new User { name: "Alice" }
   let bob   = new User { name: "Bob" }
   let chloe = new User { name: "Chloe" }
-  let m1 = new Message { text: "Welcome to Rex chat", by: alice }
-  let m2 = new Message { text: "Like messages to test many-to-many joins", by: bob }
-  new Like { msg: m1, by: bob }
-  new Like { msg: m1, by: chloe }
+  let m1 = new Message { text: "Welcome to Rex chat", sender: alice }
+  let m2 = new Message { text: "Like messages to test many-to-many joins", sender: bob }
+  new Like { msg: m1, user: bob }
+  new Like { msg: m1, user: chloe }
   set current = alice
 }
 
-// `current` is `Unit -> User` with 0 or 1 rows; when empty, `by: current`
-// writes no `by` row (6NF: the field is simply absent) — the checker warns
+// `current` is `Unit -> User` with 0 or 1 rows; when empty, `sender: current`
+// writes no `sender` row (6NF: the field is simply absent) — the checker warns
 // that the value may be empty.
-on MessageSent(text)     => new Message { text: text, by: current }
-on MessageLiked(msg)     => new Like { msg: msg, by: current }
+on MessageSent(text)     => new Message { text: text, sender: current }
+on MessageLiked(msg)     => new Like { msg: msg, user: current }
 on MessageDeleted(msg)   { delete Like where .msg = msg; delete msg }
 on UserSelected(user)    => set current = user
 
@@ -66,17 +66,17 @@ view main =
   }
 
 // Likes of this message: a nested level over the link entity, joined out to
-// the liker's name through `l.by.name` (compose, spelled as a path).
+// the liker's name through `l.user.name` (compose, spelled as a path).
 view MessageItem(m: Message) =
   tr {
-    td { .by.name ":" }
+    td { .sender.name ":" }
     td { .text }
     td {
       Like as l where .msg = m select
-        div { l.by.name " likes this!" }
+        div { l.user.name " likes this!" }
     }
     td { button(on click => do MessageLiked(m)) "Like!" }
-    if (.by = current) {
+    if (.sender = current) {
       td { button(on click => do MessageDeleted(m)) "Delete" }
     }
   }

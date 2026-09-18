@@ -141,7 +141,13 @@ impl Checker {
                 // pre-pass (see [`super::view`]); by the time the checker runs
                 // they appear as ordinary statements, so any surviving
                 // `View`/`State`/`Rel` here is a no-op.
-                Stmt::View(_) | Stmt::State(_) | Stmt::Rel(_) => i += 1,
+                Stmt::View(_)
+                | Stmt::State(_)
+                | Stmt::Rel(_)
+                | Stmt::Event(_)
+                | Stmt::On(_)
+                | Stmt::Type(_)
+                | Stmt::Import(_) => i += 1,
             }
         }
         stmts
@@ -415,7 +421,19 @@ impl Checker {
 
             ExprKind::Compose(a, b) => {
                 let ta = self.check_rel(a, dom)?;
-                let tb = self.check_rel(b, Some(ta.ty.to.clone()))?;
+                // `x.f`: an identifier after `.` resolves as a field of the
+                // left side's codomain entity before it resolves as a name —
+                // a field is a relation you join with (SYNTAX v1 rule 1).
+                let field_hop = match (&b.kind, &ta.ty.to) {
+                    (ExprKind::Ident(n), ValueTy::Id(sort)) if self.env.field_ty(*sort, n).is_some() => {
+                        Some(vec![n.clone()])
+                    }
+                    _ => None,
+                };
+                let tb = match field_hop {
+                    Some(parts) => self.check_field_path(&parts, b.span, Some(ta.ty.to.clone()))?,
+                    None => self.check_rel(b, Some(ta.ty.to.clone()))?,
+                };
                 self.expect_join(span, &ta.ty.to, &tb.ty.from, "composition `.`")?;
                 let ty = RelTy::new(ta.ty.from.clone(), tb.ty.to.clone());
                 Ok(TExpr::new(TExprKind::Compose(Box::new(ta), Box::new(tb)), ty, span))
@@ -490,7 +508,14 @@ impl Checker {
             }
 
             ExprKind::Mul(a, b) => self.check_arith(a, b, dom, span, ArithOp::Mul),
+            ExprKind::Add(a, b) => self.check_arith(a, b, dom, span, ArithOp::Add),
+            ExprKind::Sub(a, b) => self.check_arith(a, b, dom, span, ArithOp::Sub),
+            ExprKind::Div(a, b) => self.check_arith(a, b, dom, span, ArithOp::Div),
+            ExprKind::Mod(a, b) => self.check_arith(a, b, dom, span, ArithOp::Mod),
             ExprKind::Concat(a, b) => self.check_arith(a, b, dom, span, ArithOp::Concat),
+            ExprKind::Not(_) => self.error(span, "`not` is not supported yet (MVP-PLAN S-40)"),
+            ExprKind::Match { .. } => self.error(span, "`match` is not supported yet (MVP-PLAN S-52)"),
+            ExprKind::If { .. } => self.error(span, "`if … then … else` is not supported yet (MVP-PLAN S-52)"),
 
             ExprKind::Compare { op, lhs, rhs } => self.check_compare(*op, lhs, rhs, dom, span),
             ExprKind::In { lhs, rhs } => self.check_in(lhs, rhs, dom, span),
@@ -540,10 +565,10 @@ impl Checker {
         let Some(dom) = dom else {
             return self.error(
                 span,
-                "cannot resolve a `:field` without a known domain (add a type annotation)",
+                "cannot resolve a `.field` without a known domain (add a type annotation)",
             );
         };
-        let mut sort = self.as_sort(span, &dom, &format!("`:{}`", parts.join(".")))?;
+        let mut sort = self.as_sort(span, &dom, &format!("`.{}`", parts.join(".")))?;
         let mut running = dom.clone();
         let mut hops = Vec::new();
         for (i, field) in parts.iter().enumerate() {
@@ -641,12 +666,13 @@ impl Checker {
         let tb = self.check_rel(b, dom)?;
         self.expect_cokeyed(span, &ta.ty.from, &tb.ty.from, op.name())?;
         let to = match op {
-            ArithOp::Mul => {
+            ArithOp::Mul | ArithOp::Add | ArithOp::Sub => {
                 if !ta.ty.to.is_numeric() || !tb.ty.to.is_numeric() {
                     return self.error(
                         span,
                         format!(
-                            "`*` needs numeric operands, got `{}` and `{}`",
+                            "{} needs numeric operands, got `{}` and `{}`",
+                            op.name(),
                             self.env.show(&ta.ty.to),
                             self.env.show(&tb.ty.to)
                         ),
@@ -658,12 +684,26 @@ impl Checker {
                     ValueTy::Int
                 }
             }
+            ArithOp::Div | ArithOp::Mod => {
+                if ta.ty.to != ValueTy::Int || tb.ty.to != ValueTy::Int {
+                    return self.error(
+                        span,
+                        format!(
+                            "{} needs Int operands, got `{}` and `{}`",
+                            op.name(),
+                            self.env.show(&ta.ty.to),
+                            self.env.show(&tb.ty.to)
+                        ),
+                    );
+                }
+                ValueTy::Int
+            }
             ArithOp::Concat => {
                 if ta.ty.to != ValueTy::Text || tb.ty.to != ValueTy::Text {
                     return self.error(
                         span,
                         format!(
-                            "`||` needs Text operands, got `{}` and `{}`",
+                            "`++` needs Text operands, got `{}` and `{}`",
                             self.env.show(&ta.ty.to),
                             self.env.show(&tb.ty.to)
                         ),
@@ -678,6 +718,10 @@ impl Checker {
         let kind = match op {
             ArithOp::Mul => TExprKind::Mul(a, b),
             ArithOp::Concat => TExprKind::Concat(a, b),
+            ArithOp::Add => TExprKind::Arith(ArithKind::Add, a, b),
+            ArithOp::Sub => TExprKind::Arith(ArithKind::Sub, a, b),
+            ArithOp::Div => TExprKind::Arith(ArithKind::Div, a, b),
+            ArithOp::Mod => TExprKind::Arith(ArithKind::Mod, a, b),
         };
         Ok(TExpr::new(kind, ty, span))
     }
@@ -972,6 +1016,10 @@ impl Checker {
 #[derive(Clone, Copy)]
 enum ArithOp {
     Mul,
+    Add,
+    Sub,
+    Div,
+    Mod,
     Concat,
 }
 
@@ -979,7 +1027,11 @@ impl ArithOp {
     fn name(self) -> &'static str {
         match self {
             ArithOp::Mul => "`*`",
-            ArithOp::Concat => "`||`",
+            ArithOp::Add => "`+`",
+            ArithOp::Sub => "`-`",
+            ArithOp::Div => "`/`",
+            ArithOp::Mod => "`%`",
+            ArithOp::Concat => "`++`",
         }
     }
 }

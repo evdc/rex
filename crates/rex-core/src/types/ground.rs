@@ -92,6 +92,7 @@ fn walk(e: &TExpr, env: &Env, out: &mut Vec<Diagnostic>) -> bool {
         | Antijoin(a, b)
         | BinCompare(_, a, b)
         | Mul(a, b)
+        | Arith(_, a, b)
         | Concat(a, b) => {
             let ga = walk(a, env, out);
             let gb = walk(b, env, out);

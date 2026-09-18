@@ -35,10 +35,10 @@ const shape_board_list_card: ShapeNode<HTMLElement> = {
     e0.dataset.key = key;
     ((e0.childNodes[0] as HTMLElement)).addEventListener("change", (ev) => {
       const v = encodeText((ev.currentTarget as HTMLInputElement).value);
-      const _ids = dispatch("board#list#card@change3", { "Card": key, "v": v });
+      const _ids = dispatch("board#list#card@change3", { "c": key, "v": v });
     });
     ((e0.childNodes[1] as HTMLElement)).addEventListener("click", (ev) => {
-      const _ids = dispatch("board#list#card@click4", { "Card": key });
+      const _ids = dispatch("board#list#card@click4", { "c": key });
     });
     return e0;
   },
@@ -74,12 +74,12 @@ const shape_board_list: ShapeNode<HTMLElement> = {
     (e0).addEventListener("drop", (ev) => {
       const card = dragValue(ev);
       const pos = encodeText(dropPos(shaper, "board#list#card", key, (ev as DragEvent).clientY, card));
-      const _ids = dispatch("board#list@drop1", { "List": key, "card": card, "pos": pos });
+      const _ids = dispatch("board#list@drop1", { "l": key, "card": card, "pos": pos });
       maybeRebalance(app, apply, shaper, "board#list#card", key, "pos", encodeText);
     });
     (((e0.childNodes[0] as HTMLElement).childNodes[1] as HTMLElement)).addEventListener("click", (ev) => {
       const pos = encodeText(endOf(shaper, "board#list#card", key));
-      const _ids = dispatch("board#list@click2", { "List": key, "pos": pos });
+      const _ids = dispatch("board#list@click2", { "l": key, "pos": pos });
       shaper.el("board#list#card", _ids[0])?.querySelector("input, textarea")?.focus();
       maybeRebalance(app, apply, shaper, "board#list#card", key, "pos", encodeText);
     });

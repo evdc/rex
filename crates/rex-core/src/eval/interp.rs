@@ -271,6 +271,11 @@ pub fn eval_expr_with(store: &dyn Store, te: &TExpr) -> BTreeRelation {
             algebra::value_join(&eval(a), &eval(b), move |x, y| mul_values(x, y, money))
         }
         TExprKind::Concat(a, b) => algebra::value_join(&eval(a), &eval(b), concat_values),
+        TExprKind::Arith(kind, a, b) => {
+            let money = te.ty.to == ValueTy::Money;
+            let kind = *kind;
+            algebra::value_join(&eval(a), &eval(b), move |x, y| arith_values(kind, x, y, money))
+        }
 
         TExprKind::Coreflexive(pred) => {
             // Standalone coreflexive built-in: materializable only over an
@@ -397,8 +402,28 @@ pub fn mul_values(a: &Value, b: &Value, money: bool) -> Value {
     }
 }
 
-/// `a || b` text concatenation. Shared with the incremental backend's co-keyed
+/// `a ++ b` text concatenation. Shared with the incremental backend's co-keyed
 /// kernel.
+/// `a + b`, `a - b`, `a / b`, `a % b` over Int/Money cents. Division by
+/// zero yields 0 (a relation has no place for a runtime error; the checker
+/// may later reject non-grounded divisors).
+pub fn arith_values(kind: crate::types::typed::ArithKind, a: &Value, b: &Value, money: bool) -> Value {
+    use crate::types::typed::ArithKind::*;
+    let x = a.as_cents().or_else(|| a.as_i64()).unwrap_or(0);
+    let y = b.as_cents().or_else(|| b.as_i64()).unwrap_or(0);
+    let n = match kind {
+        Add => x + y,
+        Sub => x - y,
+        Div => if y == 0 { 0 } else { x / y },
+        Mod => if y == 0 { 0 } else { x % y },
+    };
+    if money {
+        Value::Money(n)
+    } else {
+        Value::Int(n)
+    }
+}
+
 pub fn concat_values(a: &Value, b: &Value) -> Value {
     match (a, b) {
         (Value::Text(x), Value::Text(y)) => {
@@ -415,6 +440,7 @@ pub fn compare_values(op: crate::ast::CmpOp, a: &Value, b: &Value) -> bool {
     if let (Some(x), Some(y)) = (a.as_cents(), b.as_cents()) {
         return match op {
             Eq => x == y,
+            Ne => x != y,
             Lt => x < y,
             Gt => x > y,
             Le => x <= y,
@@ -427,6 +453,7 @@ pub fn compare_values(op: crate::ast::CmpOp, a: &Value, b: &Value) -> bool {
     let ord = a.cmp_semantic(b);
     match op {
         Eq => ord.is_eq(),
+        Ne => ord.is_ne(),
         Lt => ord.is_lt(),
         Gt => ord.is_gt(),
         Le => ord.is_le(),

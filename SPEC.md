@@ -40,9 +40,9 @@ Everything is a **binary relation** `A → B`. Relations form a category: object
 **A "table" is not primitive.** An entity with fields is a family of binary relations sharing a common ID key:
 
 ```
-Person:name    : PersonID → Text
-Person:age     : PersonID → Int
-Person:address : PersonID → Address
+Person.name    : PersonID → Text
+Person.age     : PersonID → Int
+Person.address : PersonID → Address
 ```
 
 This is **columnar by construction** and maps directly onto vectorized/columnar execution. Wide rows are assembled only at the **edge** (serialization to a client), never required mid-computation.
@@ -55,10 +55,10 @@ This is **columnar by construction** and maps directly onto vectorized/columnar 
 | semijoin | `R[S]` | `(A→B), (B→C) ⟹ A→B` | same join as `.` but **keeps R's columns** `(A,B)` — see §3.2 |
 | inverse | `~R` | `(A→B) ⟹ B→A` | converse |
 | fork | `R , S` | `(X→Y),(X→Z) ⟹ X→(Y×Z)` | tupling; the only combinator that *builds* nesting |
-| union | `R + S` | Z-set addition | additive; structural; **linear** |
+| union | `R \| S` | Z-set addition | additive; structural; **linear** (spelled `\|`, freeing `+` for arithmetic — surface v1, 2026-09-18) |
 | intersect | `R & S` | `(A→B),(A→B) ⟹ A→B` | elementwise `min` of weights; **non-linear** (cost like `distinct`) |
 | distinct | `distinct R` | `(A→B) ⟹ A→B` | clamp weights to {0,1}; **non-linear** |
-| subtract | `R − S` | Z-set subtraction | **core-only, never user surface** — see §6 |
+| subtract | `R − S` | Z-set subtraction | **core-only, never user surface** — see §6 (`-` at the surface is arithmetic only; `R - S` on relations is a type error suggesting `except`) |
 
 Constants are nullary columns: `1000 : X → Int` is the everywhere-1000 relation.
 
@@ -73,8 +73,8 @@ Comparisons/predicates desugar to **coreflexives** (sub-identity relations): `=`
 
 This single rule (due to treating entities as their identity relations, §3.3) **eliminates the earlier `where`-vs-`[]` confusion without any type-dispatch magic**: the two forms are distinct, both well-typed, and choosing between them is a meaningful question of *which columns you want to keep*, not a hidden mode. Crucially, the historically-confusable mistake now **fails to typecheck**: e.g. `custspend[custspend . >30]` joins `Money` (R's right) against `CustID` (S's left) → type error, instead of silently doing the wrong thing.
 
-- **To filter on a value and keep the entity:** `Line[:product.name = "Widget"] : LineID→LineID`.
-- **To filter on a value and move to the new column:** `Line . (:product.name = "Widget") : LineID→Text`.
+- **To filter on a value and keep the entity:** `Line[.product.name = "Widget"] : LineID→LineID`.
+- **To filter on a value and move to the new column:** `Line . (.product.name = "Widget") : LineID→Text`.
 
 `where` is retained only as **optional sugar**: `R where P ≡ R[P]`. It carries no distinct semantics and does no dispatch; it reads as English for the bracket. Use it or not.
 
@@ -84,7 +84,7 @@ This single rule (due to treating entities as their identity relations, §3.3) *
 
 - "All customers" (a set) and "the identity on CustID" are literally the same object; a *subset* of customers is a *sub-diagonal* coreflexive. This is the set ≅ coreflexive correspondence used throughout.
 - `id` is available as the generic identity when no entity name applies; `Customer` is just `id` at `CustID`.
-- This identification is what makes §3.2's column-typing precise, so it is a **definition**, not an incidental convenience: filtering an entity (`Customer[:region = @west]`) yields a sub-diagonal `CustID→CustID`, i.e. exactly the set of matching customers.
+- This identification is what makes §3.2's column-typing precise, so it is a **definition**, not an incidental convenience: filtering an entity (`Customer[.region = @west]`) yields a sub-diagonal `CustID→CustID`, i.e. exactly the set of matching customers.
 
 ---
 
@@ -99,7 +99,7 @@ A OP B   ≡   (A , B) . OP
 Operators carry a **relational-vs-functional** tag:
 
 - **Relational** operators (`=`, `<`, `>`, `⊆`, …) yield a **coreflexive** → used to *filter*. For these the desugarer applies the rewrite `(A,B).OP  ⟶  A . OP . ~B`, which avoids materializing the pair. (These two forms are provably equal for sub-identity `OP`; the converse form is the optimization.) Comparing two non-key columns is therefore **not** a missing primitive — it is `A . OP . ~B`. (No `guard₂` needed.)
-- **Functional** operators (`+arith`, `*`, `||`, …) yield a **value** → desugar to `(A,B) . OP` with `OP : (T×T)→T`.
+- **Functional** operators (`+`, `-`, `*`, `/`, `%`, `++` text concat) yield a **value** → desugar to `(A,B) . OP` with `OP : (T×T)→T`.
 
 **Precondition (must be a clear error):** `A OP B` requires both operands **co-keyed** (same left type). Correlated comparisons (e.g. `amount > cust.avg`) require rotating the RHS to the operand key first (via composition) — the rotation is the programmer's/compiler's job, and "operands not co-keyed" is a first-class diagnostic.
 
@@ -108,21 +108,26 @@ Operators carry a **relational-vs-functional** tag:
 **`let NAME = EXPR`** introduces a binding (a view definition *or* a data reference). Bare **`=`** is the **comparison** relation (the diagonal coreflexive). They never collide: every `=` in expression position is a comparison, every definition is `let`. (Rejected: single `=` for both — comparisons appear mid-expression constantly, so `=` must be theirs.)
 
 ```
-let lineprice : Line → Money = :qty * :product.price
-let widgetline : Line        = id where :product.name = "Widget"
+let lineprice : Line → Money = .qty * .product.price
+let widgetline : Line        = id where .product.name = "Widget"
 ```
+
+(Surface v1, 2026-09-18: field paths are spelled `.f`, not `:f` — `.` is
+compose-join everywhere and a field is a relation you join with, so
+`t.completed` is literally `t . completed`. `:` now means only type
+ascription. See SYNTAX.md.)
 
 ### Atoms
 
 Two roles, deliberately kept syntactically distinct (conflating them was a real wart):
 
-- **Scalar atoms `@foo`** — interned, self-denoting constants (cf. Lisp/Ruby symbols). Type is the singleton `{@foo}`. Used for enums/tags/coproduct discriminants: `region : CustID → {@north + @south + @east + @west}`. A scalar atom in filter position is its own coreflexive.
+- **Scalar atoms `@foo`** — interned, self-denoting constants (cf. Lisp/Ruby symbols). Type is the singleton `{@foo}`. Used for enums/tags/coproduct discriminants: `region : CustID → {@north | @south | @east | @west}`. A scalar atom in filter position is its own coreflexive.
 - **Entity-id bindings** — `let alice = new Customer { … }` binds `alice` to a freshly generated ID. This is a *bound name*, not a self-denoting literal, so it uses ordinary `let`/identifier syntax — visually distinct from `@foo`. First-use in `new E` fixes its sort (`alice : CustID`), so a later misuse at another entity is a **type error**, preserving the ID-sort discipline (§4).
 
 ### Entity definition, creation, and the `by` regrouping operator
 
 ```
-entity Customer { name: Text, region: {@north+@south+@east+@west} }
+entity Customer { name: Text, region: {@north | @south | @east | @west} }
 entity Order    { customer: CustID, placed: Date }   // FK = a field valued in another ID-sort
 entity Line     { order: OrderID, product: ProductID, qty: Int }
 ```
@@ -141,7 +146,7 @@ let _     = new Line { order: o1, product: widget, qty: 3 }   // anonymous: no b
 
 ### Type-directed field resolution (primary style)
 
-The **idiomatic surface** is `let name : A → B = …`, where the declared domain `A` resolves bare `:field` references: the *leading* `:field` of each chain resolves in `A`, and each subsequent `.field` resolves against the running type at that point in the composition (so `:product.name` resolves `:product` in `Line`, then `.name` in `Product`). This is bidirectional type-checking, **not** macro substitution — the elaborator threads types through the chain. `:` therefore means "field resolved by the left-hand type *here*," which can shift mid-expression.
+The **idiomatic surface** is `let name : A → B = …`, where the declared domain `A` resolves bare `.field` references: the *leading* `.field` of each chain resolves in `A`, and each subsequent `.field` resolves against the running type at that point in the composition (so `.product.name` resolves `.product` in `Line`, then `.name` in `Product`). This is bidirectional type-checking, **not** macro substitution — the elaborator threads types through the chain. A leading `.` therefore means "field resolved by the left-hand type *here*," which can shift mid-expression.
 
 `from E:` blocks (set an ambient *entry* entity for several single-entity definitions) are retained as **secondary** sugar only. They read well for one-entity blocks but fight multi-entity expressions (an aggregation that re-keys crosses the block boundary, forcing awkward nesting), so they are the exception, not the backbone. The annotation style is primary because the signature `A→B` is information you want anyway (documentation + type + resolution seed in one).
 
@@ -209,7 +214,7 @@ One combinator `fix : (Rel → Rel) → Rel` with **least-fixed-point** semantic
 
 **Decisions made at implementation time:**
 
-- **Surface form is `let recursive`, not an expression-level `fix`.** The binding name *is* the self-reference (`let recursive path : Node → Node = edge + edge . path`); an expression `fix` would need a binder form the point-free language otherwise lacks. `fix` exists only in the elaborated form: a recursion group is one `TStmt::LetRec`, with recursive occurrences as `RecVar` nodes.
+- **Surface form is `let recursive`, not an expression-level `fix`.** The binding name *is* the self-reference (`let recursive path : Node → Node = edge | edge . path`); an expression `fix` would need a binder form the point-free language otherwise lacks. `fix` exists only in the elaborated form: a recursion group is one `TStmt::LetRec`, with recursive occurrences as `RecVar` nodes.
 - **Consecutive `let recursive` statements form one fixpoint group** (mutual recursion); any other statement ends the group. Each body may reference every member of its group. Semantics is the joint least fixpoint.
 - **Type annotations are mandatory on recursive lets** — the declared type seeds the self-reference before the body is checked.
 - **DBSP lowering** (`Circuit::fixes`): the outer arena stays strictly topological; the cycle lives in a nested inner circuit wrapped Enter/Exit-style. Enter (δ₀) presents each import's full current value at iteration 0; the per-member feedback slot is the z⁻¹ edge, fed `distinct(body) − integrated-so-far` each pass (inner integrals persisting across iterations = semi-naive evaluation); Exit diffs the converged fixpoint against the previous outer step's, so retractions are correct by construction. Cost: O(closure) per outer step touching the region — the recompute tier, honestly. Fully incremental nested deltas (an insert costing only newly derivable facts) are future work.
@@ -243,7 +248,7 @@ Lowers to **DBSP circuits**; the point-free program *is* the circuit (boxes = re
 - **Row polymorphism / structural interfaces** — the principled, type-safe version of the ECS "query everything with fields A,B" idea. v1 must not foreclose it.
 - **Top-N / ranked-filter** — *not* a pure edge concern (it gates downstream data); a first-class non-linear operator, expressible as an aggregation into a "sorted-list-of-length-N" monoid. Parked.
 - **Pure sort / ORDER BY** — genuinely an edge/presentation concern (Z-sets are unordered); not incrementally natural. Lives at serialization.
-- **The `+` naming collision** — Z-set union vs arithmetic addition. Leaning: `+` = Z-set union (structural, fundamental); arithmetic add gets a distinct spelling or resolves via the relational/functional tag. Still undecided. (Note: intersection `&` is now **decided** — see §3.1 table — as elementwise-`min`, non-linear.)
+- ~~**The `+` naming collision**~~ — **decided 2026-09-18 (surface v1):** union is `|`, intersect `&` (binding tighter than `|`, as in logic — union of coreflexives is disjunction), difference is `except`; `+ - * / %` are arithmetic only and `++` is text concat. Coproduct types are `{@a | @b}`.
 - **Delta fan-out cost surfacing** (§10) — how aggressively to expose.
 - **Outer join sugar** — deferred, but its requirement (coproducts in the value algebra) is already satisfied in v1 (§2).
 
@@ -254,7 +259,7 @@ Lowers to **DBSP circuits**; the point-free program *is* the circuit (boxes = re
 Schema, data, and a realistically-stacked query (multi-hop join + arithmetic-in-aggregation + group-by + having + enum filter), in final surface syntax.
 
 ```
-entity Customer { name: Text, region: {@north+@south+@east+@west} }
+entity Customer { name: Text, region: {@north | @south | @east | @west} }
 entity Product  { name: Text, price: Money }
 entity Order    { customer: CustID, placed: Date }
 entity Line     { order: OrderID, product: ProductID, qty: Int }
@@ -272,9 +277,9 @@ let _  = new Line { order: o2, product: widget, qty: 2 }
 let _  = new Line { order: o3, product: gizmo,  qty: 5 }
 
 // "West/East customers who spent over 30, with their total spend (qty × price)."
-let lineprice : Line → Money     = :qty * :product.price
-let custspend : Customer → Money = sum(lineprice by :order.customer)
-let inregion  : Customer         = id where :region in (@west + @east)
+let lineprice : Line → Money     = .qty * .product.price
+let custspend : Customer → Money = sum(lineprice by .order.customer)
+let inregion  : Customer         = id where .region in (@west | @east)
 let result    : Customer → Money = (custspend where > 30)[inregion]
 ```
 
@@ -288,11 +293,11 @@ let result    : Customer → Money = (custspend where > 30)[inregion]
 
 Four lines of view definitions for what is ~25 lines of SQL (two joins, group-by, having, IN-filter). What the example demonstrated, and the findings it produced, are folded into the relevant sections above:
 
-- multi-hop join (`:order.customer`, `:product.price`) needs no rotation gymnastics — each hop's right column is the next hop's key (§3, §5);
+- multi-hop join (`.order.customer`, `.product.price`) needs no rotation gymnastics — each hop's right column is the next hop's key (§3, §5);
 - `by` makes the aggregation regrouping legible (§4);
 - the `where` (value-filter, keep entity) vs `[]` (key-semijoin) distinction is used naturally and correctly — `where > 30` filters on value, `[inregion]` restricts by a key-set (§3.2);
 - `id where …` is the idiom for "subset of an entity," which is why `id`/entity-as-identity (§3.3) is needed;
-- `let` vs `=` keeps `region: @west` (binding) and `:region in (…)`/`> 30` (comparisons) unambiguous (§4).
+- `let` vs `=` keeps `region: @west` (binding) and `.region in (…)`/`> 30` (comparisons) unambiguous (§4).
 
 **Bugs the exercise caught (both instances of the same hazard, now designed out):** reaching for `[]` when the discriminating data is in the *value* column. Under the §3.2 rule this is now a **type error**, not a silent wrong answer — the join columns fail to match. This was the single most valuable result of the whole stress-test sequence.
 

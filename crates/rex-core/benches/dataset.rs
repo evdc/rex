@@ -43,16 +43,16 @@ impl Lcg {
 const REGIONS: [&str; 4] = ["@north", "@south", "@east", "@west"];
 
 const ENTITIES: &str = "\
-entity Customer { name: Text, region: {@north + @south + @east + @west} }
+entity Customer { name: Text, region: {@north | @south | @east | @west} }
 entity Product  { name: Text, price: Money }
 entity Order    { customer: CustomerID, placed: Date }
 entity Line     { order: OrderID, product: ProductID, qty: Int }
 ";
 
 const QUERIES: &str = "\
-let lineprice : Line -> Money     = :qty * :product.price
-let custspend : Customer -> Money = sum(lineprice by :order.customer)
-let inregion  : Customer          = id where :region in (@west + @east)
+let lineprice : Line -> Money     = .qty * .product.price
+let custspend : Customer -> Money = sum(lineprice by .order.customer)
+let inregion  : Customer          = id where .region in (@west | @east)
 let result    : Customer -> Money = inregion . (custspend where > 30)
 ";
 

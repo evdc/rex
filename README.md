@@ -77,7 +77,7 @@ src → lex → parse → check/elaborate → eval
 |---|---|---|
 | **Lex** | `crates/rex-core/src/lexer.rs`, `crates/rex-core/src/token.rs` | ASCII-only, hand-written. Maximal-munch operators; distinguishes decimal `.` from compose `.`; dates, atoms `@foo`, strings with escapes. Recovers and collects diagnostics. |
 | **Parse** | `crates/rex-core/src/parser.rs`, `crates/rex-core/src/ast.rs` | Recursive descent for statements, Pratt (binding-power) for expressions. Produces a surface AST that mirrors what was written — **no desugaring here**. Recovers to the next `let`/`entity` on error. |
-| **Check / elaborate** | `crates/rex-core/src/types/` | The heart. A single bidirectional, type-directed walk validates the program *and* produces the elaborated `TProgram`: field paths resolved to `(sort, field)` hops, identifiers resolved to their kind (view / entity-identity / value), filter built-ins lowered to `Filter` nodes. Threads an ambient domain through composition to resolve `:field`. |
+| **Check / elaborate** | `crates/rex-core/src/types/` | The heart. A single bidirectional, type-directed walk validates the program *and* produces the elaborated `TProgram`: field paths resolved to `(sort, field)` hops, identifiers resolved to their kind (view / entity-identity / value), filter built-ins lowered to `Filter` nodes. Threads an ambient domain through composition to resolve `.field`. |
 | **Eval** | `crates/rex-core/src/eval/` | Batch interpreter over the typed AST. `interp.rs` walks `TProgram`; `algebra.rs` is the relational algebra; `relation.rs` is the Z-set store; `value.rs` is the runtime domain element. |
 | **Support** | `crates/rex-core/src/diagnostic.rs`, `crates/rex-core/src/span.rs`, `crates/rex-core/src/pretty.rs`, `crates/rex-core/src/operator.rs` | Spans + rendered diagnostics; canonical s-expr printer (used for test assertions and `--ast`-style output); the §7 operator-metadata table. |
 | **Incremental engine** | `crates/rex-core/src/dbsp/` | `lower.rs` lowers `TProgram` to a circuit of delta nodes (`node.rs`); `circuit.rs` steps it (incl. fix regions); `engine.rs` is the transactional API (`apply_new`, `update_fields`, `retract_entity`, `dispatch`). |
@@ -109,7 +109,7 @@ Key design choices realized in code:
 - ✅ Full lexer, parser, s-expression pretty-printer.
 - ✅ Entity declarations → minted ID-sorts + keyed field columns.
 - ✅ `new` creation sugar (atomic per-key population; anonymous `let _`).
-- ✅ Bidirectional checker with type-directed `:field` resolution, ambient-domain
+- ✅ Bidirectional checker with type-directed `.field` resolution, ambient-domain
   threading, co-keyed/join-column diagnostics, atom/coproduct subtyping.
 - ✅ Combinators: compose, semijoin/`where`, inverse, fork, union, intersect,
   distinct, `by`, `except`/`antijoin`.
@@ -122,7 +122,7 @@ Key design choices realized in code:
 - ✅ **DBSP backend** (`crates/rex-core/src/dbsp/`): lowering of the typed AST to a circuit of
   delta kernels, incremental view maintenance (inserts/retractions), backfill
   of views added over existing data, property-tested against the batch algebra.
-- ✅ **Recursion (§8)**: `let recursive path : Node -> Node = edge + edge . path`.
+- ✅ **Recursion (§8)**: `let recursive path : Node -> Node = edge | edge . path`.
   **Consecutive `let recursive` statements form one fixpoint group** (mutual
   recursion; any other statement ends the group); annotations are mandatory
   (they seed the self-reference's type). Semantics is the joint least fixpoint
@@ -164,7 +164,7 @@ the entry point for all change. Priority order:
 3. **`state` + `match` (M6.c).** `state` parses but is rejected
    (`types/view.rs:58`). Model state as singleton relations so state changes
    are ordinary deltas (elysium's full-recompute-on-state cliff can't arise).
-4. **Views over derived relations (M6.d).** Binds are `:field`-only; aggregates
+4. **Views over derived relations (M6.d).** Binds are `.field`-only; aggregates
    and joins can't be displayed. Also components with props, `if`/class
    expressions.
 5. **Query sugar (M6.e).** `select {…}` records, `group by`, FK paths as sugar

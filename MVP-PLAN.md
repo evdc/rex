@@ -362,7 +362,7 @@ accepts equal non-atom scalar types, not just atom (co)products. Tests:
 
 ### E1 — Surface: grammar and AST
 
-#### S-10 AST + parser for events, `do`, `state`, `match`, mutations (L, deps S-02)
+#### S-10 AST + parser for events, `do`, `state`, `match`, mutations (L, deps S-02) — **done 2026-09-18** (all four acceptance programs parse; `tests/parser.rs` v1 section; `+ - / %` and `++` also evaluate; deviations: `&` binds tighter than `|`; `by` etc. are reserved words, so chat's `by` fields became `sender`/`user`; the Kanban fixtures/example keep inline-mutation handlers in the new spelling until S-20)
 *Goal:* the three fixture programs parse to an AST; nothing is checked yet.
 *Files:* `crates/rex-core/src/ast.rs`, `parser.rs`, `token.rs`/`lexer.rs`
 (contextual keywords only — keep `on`, `event`, `state`, `match`, `update`,

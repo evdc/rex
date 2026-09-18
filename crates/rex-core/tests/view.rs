@@ -24,28 +24,26 @@ let c3 = new Card { title: "Ship",   pos: "a0", list: l_doing }
 /// The hand-written 6NF views the surface must reproduce.
 const MANUAL: &str = r#"
 let lists      : List -> ListID = id
-let list_pos   : List -> Text = :pos
-let list_title : List -> Text = :title
-let card_list  : Card -> ListID = :list
-let card_pos   : Card -> Text = :pos
-let card_title : Card -> Text = :title
+let list_pos   : List -> Text = .pos
+let list_title : List -> Text = .title
+let card_list  : Card -> ListID = .list
+let card_pos   : Card -> Text = .pos
+let card_title : Card -> Text = .title
 "#;
 
 const VIEW: &str = r#"
 view board =
-  List order by :pos select
-    section.list dropTarget {
+  List as l order by .pos select
+    section(class="list" dropTarget
+      on drop(card = drag(Card), pos = dropPos(c, card)) { update card { list: l, pos: pos } }) {
       header {
-        span { :title }
-        button "+ card" on click(pos: Text = endOf(card)) =>
-          new Card { title: "New card", pos: pos, list: List }
+        span { .title }
+        button(on click(pos = endOf(c)) => new Card { title: "New card", pos: pos, list: l }) "+ card"
       }
-      on drop(card: Card = drag("text/rex-card"), pos: Text = dropPos(card)) =>
-        card:list := List ; card:pos := pos
-      Card where :list = List order by :pos select
-        div.card draggable {
-          input value=:title on change(v: Text = value) => :title := v
-          button "x" on click => delete Card
+      Card as c where .list = l order by .pos select
+        div(class="card" draggable) {
+          input(value=.title on change(v = value) => .title := v)
+          button(on click => delete c) "x"
         }
     }
 "#;
@@ -104,11 +102,11 @@ let l1 = new List { title: "A", pos: "a0" }
 let k1 = new Card { title: "x", pos: "a0", list: l1 }
 let k2 = new Card { title: "y", pos: "a1", list: l1 }
 view board =
-  List as l order by :pos select
-    section.list {
-      header { span { :title } }
-      Card as c where :list = l order by :pos select
-        div.card { input value=:title }
+  List as l order by .pos select
+    section(class="list") {
+      header { span { .title } }
+      Card as c where .list = l order by .pos select
+        div(class="card") { input(value=.title) }
     }
 "#,
     );
@@ -122,11 +120,11 @@ let l1 = new List { title: "A", pos: "a0" }
 let k1 = new Card { title: "x", pos: "a0", CardList: l1 }
 let k2 = new Card { title: "y", pos: "a1", CardList: l1 }
 view board =
-  List as l order by :pos select
-    section.list {
-      header { span { :title } }
-      Card as c where CardList = l order by :pos select
-        div.card { input value=:title }
+  List as l order by .pos select
+    section(class="list") {
+      header { span { .title } }
+      Card as c where CardList = l order by .pos select
+        div(class="card") { input(value=.title) }
     }
 "#,
     );
@@ -175,10 +173,13 @@ fn shape_ir_roles() {
         .iter()
         .find(|h| h.name.contains("@drop"))
         .expect("drop handler");
-    assert_eq!(drop.body.len(), 2, "drop sets list and pos");
-    for m in &drop.body {
-        assert!(matches!(m, MutationIR::Set { entity, .. } if entity == "Card"));
-    }
+    // `update card { list: l, pos: pos }` is ONE set with two field updates.
+    assert_eq!(drop.body.len(), 1, "drop is a single update");
+    let MutationIR::Set { entity, updates, .. } = &drop.body[0] else {
+        panic!("drop body is a Set");
+    };
+    assert_eq!(entity, "Card");
+    assert_eq!(updates.len(), 2, "drop sets list and pos");
 }
 
 #[test]

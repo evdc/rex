@@ -253,9 +253,13 @@ impl<'a> Lexer<'a> {
                 self.pos += 1;
                 TokenKind::Arrow
             }
-            b'|' if self.peek() == Some(b'|') => {
+            b'+' if self.peek() == Some(b'+') => {
                 self.pos += 1;
-                TokenKind::BarBar
+                TokenKind::PlusPlus
+            }
+            b'!' if self.peek() == Some(b'=') => {
+                self.pos += 1;
+                TokenKind::Ne
             }
             b'<' if self.peek() == Some(b'=') => {
                 self.pos += 1;
@@ -275,6 +279,10 @@ impl<'a> Lexer<'a> {
             b':' => TokenKind::Colon,
             b'~' => TokenKind::Tilde,
             b'+' => TokenKind::Plus,
+            b'-' => TokenKind::Minus,
+            b'/' => TokenKind::Slash,
+            b'%' => TokenKind::Percent,
+            b'|' => TokenKind::Bar,
             b'&' => TokenKind::Amp,
             b'*' => TokenKind::Star,
             b'=' if self.peek() == Some(b'>') => {

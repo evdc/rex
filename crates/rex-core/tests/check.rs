@@ -25,7 +25,7 @@ fn assert_error_contains(src: &str, needle: &str) {
 }
 
 const SCHEMA: &str = "\
-entity Customer { name: Text, region: {@north + @south + @east + @west} }
+entity Customer { name: Text, region: {@north | @south | @east | @west} }
 entity Product  { name: Text, price: Money }
 entity Order    { customer: CustomerID, placed: Date }
 entity Line     { order: OrderID, product: ProductID, qty: Int }
@@ -45,36 +45,36 @@ fn spec12_fixture_typechecks_clean() {
 
 #[test]
 fn entity_and_simple_view() {
-    assert_ok(&with_schema("let lineprice : Line -> Money = :qty * :product.price\n"));
+    assert_ok(&with_schema("let lineprice : Line -> Money = .qty * .product.price\n"));
 }
 
 #[test]
 fn multi_hop_field_path() {
-    // :order.customer resolves `order` in Line, then `.customer` in Order.
+    // .order.customer resolves `order` in Line, then `.customer` in Order.
     assert_ok(&with_schema(
-        "let cust : Line -> CustomerID = :order.customer\n",
+        "let cust : Line -> CustomerID = .order.customer\n",
     ));
 }
 
 #[test]
 fn aggregation_by_regrouping() {
     assert_ok(&with_schema(
-        "let lineprice : Line -> Money = :qty * :product.price\n\
-         let custspend : Customer -> Money = sum(lineprice by :order.customer)\n",
+        "let lineprice : Line -> Money = .qty * .product.price\n\
+         let custspend : Customer -> Money = sum(lineprice by .order.customer)\n",
     ));
 }
 
 #[test]
 fn subset_of_entity_via_id_where() {
     assert_ok(&with_schema(
-        "let inregion : Customer = id where :region in (@west + @east)\n",
+        "let inregion : Customer = id where .region in (@west | @east)\n",
     ));
 }
 
 #[test]
 fn fst_snd_project_fork_components() {
     assert_ok(&with_schema(
-        "let pair : Line -> Int * Money = (:qty , :product.price)\n\
+        "let pair : Line -> Int * Money = (.qty , .product.price)\n\
          let qty  : Line -> Int   = fst pair\n\
          let prc  : Line -> Money = snd pair\n",
     ));
@@ -83,7 +83,7 @@ fn fst_snd_project_fork_components() {
 #[test]
 fn aggregating_a_pair_warns_of_the_incrementality_cliff_but_compiles() {
     let src = with_schema(
-        "let pair : Line -> Int * Money = (:qty , :product.price)\n\
+        "let pair : Line -> Int * Money = (.qty , .product.price)\n\
          let n : Line -> Int = count(pair)\n",
     );
     let parsed = rex::parse(&src);
@@ -106,7 +106,7 @@ fn aggregating_a_pair_warns_of_the_incrementality_cliff_but_compiles() {
 #[test]
 fn fst_on_non_pair_is_rejected() {
     assert_error_contains(
-        &with_schema("let bad : Line -> Int = fst :qty\n"),
+        &with_schema("let bad : Line -> Int = fst .qty\n"),
         "needs a pair-valued relation",
     );
 }
@@ -124,7 +124,7 @@ fn new_creation_typechecks() {
 #[test]
 fn unknown_field_is_rejected() {
     assert_error_contains(
-        &with_schema("let bad : Line -> Money = :nonesuch\n"),
+        &with_schema("let bad : Line -> Money = .nonesuch\n"),
         "unknown field `nonesuch`",
     );
 }
@@ -132,7 +132,7 @@ fn unknown_field_is_rejected() {
 #[test]
 fn unknown_type_is_rejected() {
     assert_error_contains(
-        &with_schema("let bad : Nope -> Money = :qty\n"),
+        &with_schema("let bad : Nope -> Money = .qty\n"),
         "unknown type `Nope`",
     );
 }
@@ -172,8 +172,8 @@ fn semijoin_on_value_column_is_a_type_error() {
     // `custspend[custspend . > 30]`: R's right column is Money, but the inner
     // relation's left column is CustomerID -> the join columns don't match.
     let src = with_schema(
-        "let lineprice : Line -> Money = :qty * :product.price\n\
-         let custspend : Customer -> Money = sum(lineprice by :order.customer)\n\
+        "let lineprice : Line -> Money = .qty * .product.price\n\
+         let custspend : Customer -> Money = sum(lineprice by .order.customer)\n\
          let bad : Customer -> Money = custspend[custspend . > 30]\n",
     );
     assert_error_contains(&src, "join column mismatch");
@@ -185,9 +185,9 @@ fn semijoin_on_value_column_is_a_type_error() {
 fn comparison_operands_must_be_cokeyed() {
     // Comparing a Line-keyed column with a Customer-keyed view.
     let src = with_schema(
-        "let lineprice : Line -> Money = :qty * :product.price\n\
-         let custspend : Customer -> Money = sum(lineprice by :order.customer)\n\
-         let bad : Line -> Line = :qty > custspend\n",
+        "let lineprice : Line -> Money = .qty * .product.price\n\
+         let custspend : Customer -> Money = sum(lineprice by .order.customer)\n\
+         let bad : Line -> Line = .qty > custspend\n",
     );
     assert_error_contains(&src, "not co-keyed");
 }
@@ -211,8 +211,8 @@ fn grounded_filter_is_ok() {
     // The same comparison in filter position is grounded by the finite relation
     // it filters, so it must NOT be rejected.
     let src = with_schema(
-        "let lineprice : Line -> Money = :qty * :product.price\n\
-         let custspend : Customer -> Money = sum(lineprice by :order.customer)\n\
+        "let lineprice : Line -> Money = .qty * .product.price\n\
+         let custspend : Customer -> Money = sum(lineprice by .order.customer)\n\
          let big : Customer -> Money = custspend where > 30\n",
     );
     assert_ok(&src);
@@ -223,8 +223,8 @@ fn grounded_filter_is_ok() {
 const GRAPH: &str = "\
 entity Node { name: Text }
 entity Edge { src: NodeID, dst: NodeID }
-let srcof : Edge -> Node = :src
-let dstof : Edge -> Node = :dst
+let srcof : Edge -> Node = .src
+let dstof : Edge -> Node = .dst
 let edge : Node -> Node = dstof by srcof
 ";
 
@@ -235,14 +235,14 @@ fn with_graph(body: &str) -> String {
 #[test]
 fn recursive_self_reference_resolves() {
     assert_ok(&with_graph(
-        "let recursive path : Node -> Node = edge + edge . path\n",
+        "let recursive path : Node -> Node = edge | edge . path\n",
     ));
 }
 
 #[test]
 fn non_recursive_self_reference_still_errors() {
     assert_error_contains(
-        &with_graph("let path : Node -> Node = edge + edge . path\n"),
+        &with_graph("let path : Node -> Node = edge | edge . path\n"),
         "unknown name `path`",
     );
 }
@@ -250,7 +250,7 @@ fn non_recursive_self_reference_still_errors() {
 #[test]
 fn recursive_view_requires_annotation() {
     assert_error_contains(
-        &with_graph("let recursive path = edge + edge . path\n"),
+        &with_graph("let recursive path = edge | edge . path\n"),
         "needs a type annotation",
     );
 }
@@ -277,7 +277,7 @@ fn mutual_recursion_group_checks() {
     // Consecutive recursive lets form one group; `odd` may reference the
     // not-yet-defined `even`.
     assert_ok(&with_graph(
-        "let recursive odd : Node -> Node = edge + edge . even\n\
+        "let recursive odd : Node -> Node = edge | edge . even\n\
          let recursive even : Node -> Node = edge . odd\n",
     ));
 }
@@ -287,7 +287,7 @@ fn non_recursive_statement_breaks_the_group() {
     // `mid` separates the two recursive lets, so `odd` cannot see `even`.
     assert_error_contains(
         &with_graph(
-            "let recursive odd : Node -> Node = edge + edge . even\n\
+            "let recursive odd : Node -> Node = edge | edge . even\n\
              let mid : Node -> Node = edge\n\
              let recursive even : Node -> Node = edge . odd\n",
         ),
@@ -300,7 +300,7 @@ fn non_recursive_statement_breaks_the_group() {
 #[test]
 fn distinct_over_recursive_occurrence_is_rejected() {
     assert_error_contains(
-        &with_graph("let recursive p : Node -> Node = edge + distinct(edge . p)\n"),
+        &with_graph("let recursive p : Node -> Node = edge | distinct(edge . p)\n"),
         "not monotone",
     );
 }
@@ -332,7 +332,7 @@ fn aggregation_over_recursive_occurrence_is_rejected() {
 fn duplicate_names_in_a_group_are_rejected() {
     assert_error_contains(
         &with_graph(
-            "let recursive p : Node -> Node = edge + edge . p\n\
+            "let recursive p : Node -> Node = edge | edge . p\n\
              let recursive p : Node -> Node = edge . p\n",
         ),
         "duplicate recursive binding `p`",
@@ -345,7 +345,7 @@ fn non_monotone_off_the_recursive_path_is_fine() {
     // iteration), and applying `distinct` to the *converged* view in a later
     // statement is the stratum boundary — both legal.
     assert_ok(&with_graph(
-        "let recursive p : Node -> Node = distinct(edge) + edge . p\n\
+        "let recursive p : Node -> Node = distinct(edge) | edge . p\n\
          let q : Node -> Node = distinct(p)\n",
     ));
 }
@@ -354,22 +354,24 @@ fn non_monotone_off_the_recursive_path_is_fine() {
 
 #[test]
 fn where_field_eq_atom_on_a_view_level_is_accepted() {
-    // `:region = @west` used to be rejected ("not co-keyed") because the
+    // `.region = @west` used to be rejected ("not co-keyed") because the
     // atom literal never grounded to the ambient entity domain the way
-    // `:field` does; only `where :region in @west` worked.
+    // `.field` does; only `where .region in @west` worked.
     assert_ok(&with_schema(
-        "view board =\n  Customer where :region = @west select\n    li { :name }\n",
+        "view board =\n  Customer where .region = @west select\n    li { .name }\n",
     ));
 }
 
 #[test]
-fn bare_identifier_in_element_body_is_an_error() {
-    // A bare identifier naming a field of the enclosing entity, with no
-    // attrs/children of its own, is almost always a forgotten `:` — used to
-    // silently compile to a `<name>` tag instead.
+fn bare_identifier_in_element_body_is_a_bind() {
+    // Surface v1: a bare identifier in an element body is a bind expression,
+    // never a tag. `{ name }` resolves `Customer . name` — a field of the
+    // level's entity — so it binds the field; an unknown name is an error
+    // (it used to silently compile to a `<name>` tag).
+    assert_ok(&with_schema("view board =\n  Customer select\n    li { name }\n"));
     assert_error_contains(
-        &with_schema("view board =\n  Customer select\n    li { name }\n"),
-        "unknown element `name`; did you mean `{ :name }`?",
+        &with_schema("view board =\n  Customer select\n    li { nosuch }\n"),
+        "unknown name `nosuch`",
     );
 }
 
@@ -378,7 +380,7 @@ fn bare_identifier_that_is_a_real_tag_is_unaffected() {
     // A genuine element tag (not a field name of the enclosing entity)
     // still compiles as an element.
     assert_ok(&with_schema(
-        "view board =\n  Customer select\n    li { span { :name } }\n",
+        "view board =\n  Customer select\n    li { span { .name } }\n",
     ));
 }
 
@@ -388,14 +390,14 @@ fn in_over_integer_literals_is_accepted() {
     // 2 + 3)` over an `Int` field was rejected even though `collect_lits`
     // gathers the int literals fine.
     assert_ok(&with_schema(
-        "view board =\n  Line where :qty in (1 + 2 + 3) select\n    li { :order }\n",
+        "view board =\n  Line where .qty in (1 | 2 | 3) select\n    li { .order }\n",
     ));
 }
 
 #[test]
 fn in_over_mismatched_scalar_types_is_still_rejected() {
     assert_error_contains(
-        &with_schema("let bad : Line -> Line = id[:qty in (\"x\" + \"y\")]\n"),
+        &with_schema("let bad : Line -> Line = id[.qty in (\"x\" | \"y\")]\n"),
         "is not within the value type",
     );
 }

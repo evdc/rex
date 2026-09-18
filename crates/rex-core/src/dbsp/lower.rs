@@ -211,6 +211,10 @@ fn lower_in(
             co_keyed(circuit, scope, a, b, CoKeyedFn::Mul { money }, values)
         }
         TExprKind::Concat(a, b) => co_keyed(circuit, scope, a, b, CoKeyedFn::Concat, values),
+        TExprKind::Arith(kind, a, b) => {
+            let money = te.ty.to == ValueTy::Money;
+            co_keyed(circuit, scope, a, b, CoKeyedFn::Arith { kind: *kind, money }, values)
+        }
 
         TExprKind::Coreflexive(pred) => {
             // Materializable only over an enumerable (entity) domain; the

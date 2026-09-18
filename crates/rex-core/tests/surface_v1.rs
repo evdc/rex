@@ -20,19 +20,19 @@ fn checks_clean(src: &str) {
 }
 
 #[test]
-#[ignore = "S-10: v1 grammar"]
+
 fn todomvc_parses() { parses_clean(TODOMVC); }
 
 #[test]
-#[ignore = "S-10: v1 grammar"]
+
 fn bench_parses() { parses_clean(BENCH); }
 
 #[test]
-#[ignore = "S-10: v1 grammar"]
+
 fn kanban_v1_parses() { parses_clean(KANBAN_V1); }
 
 #[test]
-#[ignore = "S-10: v1 grammar"]
+
 fn chat_parses() { parses_clean(CHAT); }
 
 #[test]

@@ -92,33 +92,33 @@ fn identifiers_and_keywords() {
 #[test]
 fn operators_maximal_munch() {
     assert_eq!(
-        kinds("-> || <= >= . , : ~ + & * = < > ( ) [ ] { }"),
+        kinds("-> ++ <= >= != . , : ~ + - / % | & * = < > ( ) [ ] { }"),
         vec![
-            Arrow, BarBar, Le, Ge, Dot, Comma, Colon, Tilde, Plus, Amp, Star, Eq, Lt, Gt, LParen,
-            RParen, LBracket, RBracket, LBrace, RBrace,
+            Arrow, PlusPlus, Le, Ge, Ne, Dot, Comma, Colon, Tilde, Plus, Minus, Slash, Percent,
+            Bar, Amp, Star, Eq, Lt, Gt, LParen, RParen, LBracket, RBracket, LBrace, RBrace,
         ]
     );
 }
 
 #[test]
 fn field_path_tokens() {
-    // `:product.price` lexes as Colon Ident Dot Ident; the parser assembles the path.
+    // `.product.price` lexes as Dot Ident Dot Ident; the parser assembles the path.
     assert_eq!(
-        kinds(":product.price"),
-        vec![Colon, Ident("product".into()), Dot, Ident("price".into())]
+        kinds(".product.price"),
+        vec![Dot, Ident("product".into()), Dot, Ident("price".into())]
     );
 }
 
 #[test]
 fn multiply_vs_decimal_dot() {
-    // `:qty * :product.price`
+    // `.qty * .product.price`
     assert_eq!(
-        kinds(":qty * :product.price"),
+        kinds(".qty * .product.price"),
         vec![
-            Colon,
+            Dot,
             Ident("qty".into()),
             Star,
-            Colon,
+            Dot,
             Ident("product".into()),
             Dot,
             Ident("price".into()),

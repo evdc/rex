@@ -266,10 +266,10 @@ fn recursive_view_maintains_under_insert_and_retraction() {
 
 #[test]
 fn mutual_group_maintains_incrementally() {
-    let views = "let srcof : Edge -> Node = :src\n\
-                 let dstof : Edge -> Node = :dst\n\
+    let views = "let srcof : Edge -> Node = .src\n\
+                 let dstof : Edge -> Node = .dst\n\
                  let edge : Node -> Node = dstof by srcof\n\
-                 let recursive odd : Node -> Node = edge + edge . even\n\
+                 let recursive odd : Node -> Node = edge | edge . even\n\
                  let recursive even : Node -> Node = edge . odd\n";
     let base = format!(
         "entity Node {{ name: Text }}\nentity Edge {{ src: NodeID, dst: NodeID }}\n\
@@ -305,8 +305,8 @@ fn import_less_constant_group_still_fires() {
     // A recursion group whose body references no base table or view lowers
     // with an empty import list — no child deltas can ever wake it, so the
     // region must fire once on backfill (like an unfired ConstSingleton).
-    let (engine, _) = apply_all("let recursive t : {@a} = @a + t . t\n");
-    let batch = eval::run(&rex::parse("let recursive t : {@a} = @a + t . t\n").program);
+    let (engine, _) = apply_all("let recursive t : {@a} = @a | t . t\n");
+    let batch = eval::run(&rex::parse("let recursive t : {@a} = @a | t . t\n").program);
     assert_eq!(
         engine.circuit.view("t").expect("t view"),
         batch.view("t").expect("batch t"),

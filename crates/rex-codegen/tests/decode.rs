@@ -3,14 +3,14 @@
 //! used to leave the wire tag (`i:3`, `m:999`, `@west`) in the rendered text.
 
 const SRC: &str = r#"
-entity Todo { title: Text, cnt: Int, price: Money, status: {@open+@closed} }
+entity Todo { title: Text, cnt: Int, price: Money, status: {@open | @closed} }
 view board =
   Todo select
     li {
-      span { :title }
-      span { :cnt }
-      span { :price }
-      span { :status }
+      span { .title }
+      span { .cnt }
+      span { .price }
+      span { .status }
     }
 "#;
 

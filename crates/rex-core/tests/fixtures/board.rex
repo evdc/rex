@@ -14,18 +14,16 @@ let c2 = new Card { title: "Lower",  pos: "a1", list: l_todo }
 let c3 = new Card { title: "Ship",   pos: "a0", list: l_doing }
 
 view board =
-  List order by :pos select
-    section.list dropTarget {
+  List as l order by .pos select
+    section(class="list" dropTarget
+      on drop(card = drag(Card), pos = dropPos(c, card)) { update card { list: l, pos: pos } }) {
       header {
-        span { :title }
-        button "+ card" on click(pos: Text = endOf(card)) =>
-          new Card { title: "New card", pos: pos, list: List }
+        span { .title }
+        button(on click(pos = endOf(c)) => new Card { title: "New card", pos: pos, list: l }) "+ card"
       }
-      on drop(card: Card = drag("text/rex-card"), pos: Text = dropPos(card)) =>
-        card:list := List ; card:pos := pos
-      Card where :list = List order by :pos select
-        div.card draggable {
-          input value=:title on change(v: Text = value) => :title := v
-          button "x" on click => delete Card
+      Card as c where .list = l order by .pos select
+        div(class="card" draggable) {
+          input(value=.title on change(v = value) => .title := v)
+          button(on click => delete c) "x"
         }
     }

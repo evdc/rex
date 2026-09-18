@@ -1,7 +1,7 @@
 //! M2 gate: composite-key nesting (nesting-draft §1) over the live engine.
 //!
 //! Nesting = flat relations keyed by the composite of enclosing grouping keys,
-//! built entirely from existing combinators: `(:list , id)` forks the
+//! built entirely from existing combinators: `(.list , id)` forks the
 //! membership key with the entity id, `~keyed . attr` produces the per-level
 //! indexed relation `(ListID × CardID) -> attr`, and `fst`/`snd` project the
 //! key components back out. The assertions here are the shaper's input
@@ -24,10 +24,10 @@ let l_doing = new List { title: \"Doing\" }
 let c1 = new Card { title: \"Buy milk\", pos: \"a0\", list: l_todo }
 let c2 = new Card { title: \"Ship it\",  pos: \"a1\", list: l_todo }
 
-let card_list  : Card -> ListID = :list
-let card_title : Card -> Text   = :title
-let card_pos   : Card -> Text   = :pos
-let keyed      : Card -> ListID * CardID = (:list , id)
+let card_list  : Card -> ListID = .list
+let card_title : Card -> Text   = .title
+let card_pos   : Card -> Text   = .pos
+let keyed      : Card -> ListID * CardID = (.list , id)
 let titled     = ~keyed . card_title
 let key_list   : Card -> ListID = fst keyed
 ";
@@ -238,10 +238,10 @@ let l_todo  = new List { title: \"Todo\" }
 let l_doing = new List { title: \"Doing\" }
 let c1 = new Card { title: \"Buy oat milk\", pos: \"a0\", list: l_doing }
 
-let card_list  : Card -> ListID = :list
-let card_title : Card -> Text   = :title
-let card_pos   : Card -> Text   = :pos
-let keyed      : Card -> ListID * CardID = (:list , id)
+let card_list  : Card -> ListID = .list
+let card_title : Card -> Text   = .title
+let card_pos   : Card -> Text   = .pos
+let keyed      : Card -> ListID * CardID = (.list , id)
 let titled     = ~keyed . card_title
 let key_list   : Card -> ListID = fst keyed
 ";

@@ -151,8 +151,10 @@ pub enum CoKeyedFn {
     Fork,
     /// `L * R`; `money` tags the result `Money` vs `Int` (from the node's type).
     Mul { money: bool },
-    /// `L || R`: text concatenation.
+    /// `L ++ R`: text concatenation.
     Concat,
+    /// `L + R` etc. (SYNTAX v1 §4).
+    Arith { kind: crate::types::typed::ArithKind, money: bool },
     /// `L OP R`: coreflexive on the shared key when the comparison holds.
     Compare(CmpOp),
 }
@@ -167,6 +169,9 @@ impl CoKeyedFn {
             }
             CoKeyedFn::Mul { money } => out.add(k.clone(), mul_values(b, c, *money), w),
             CoKeyedFn::Concat => out.add(k.clone(), concat_values(b, c), w),
+            CoKeyedFn::Arith { kind, money } => {
+                out.add(k.clone(), crate::eval::interp::arith_values(*kind, b, c, *money), w)
+            }
             CoKeyedFn::Compare(op) => {
                 if compare_values(*op, b, c) {
                     out.add(k.clone(), k.clone(), w);

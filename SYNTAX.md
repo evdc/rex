@@ -132,7 +132,8 @@ New in v1:
   (`E except (E where P)`); a `Bool`-valued path in filter position
   (`where .completed`) means `where .completed = True`.
 - `if c then a else b` as an expression = `(c . a) | (not c . b)`.
-- Operators: `|` union, `&` intersect, `except` difference; `+ - * / %`
+- Operators: `|` union, `&` intersect (binding tighter than `|`, as in
+  logic), `except` difference; `+ - * / %`
   arithmetic on co-keyed value columns; `++` text concat; comparisons
   `= != < <= > >=`; `in`. (`R - S` on relations is a type error: use `except`.)
 
@@ -181,7 +182,8 @@ child    := element | "text" | <bind> | R as x … select … | if (c) { … } |
 bind     := .path | x.path | name | ( expr )
 ```
 
-- `class`, `id`, `type`, … are ordinary attributes; bare `modifier`s
+- `class`, `id`, `type`, `aria-hidden`, … are ordinary attributes (keyword
+  and hyphenated names are fine in attribute position); bare `modifier`s
   (`draggable`, `dropTarget`, `autofocus`) are presentation hooks lowered
   to `rex-dom` helpers or plain attributes.
 - A **bind** is anything co-keyed with the level: a path (`.text`,
@@ -190,7 +192,12 @@ bind     := .path | x.path | name | ( expr )
   **presence**: `class.selected=(filter = All)`, `checked=(active = 0)`,
   `class.done=.completed`. Value binds decode by type (`Int` renders `3`,
   not `i:3`) **(v1)**. A bare name that is not a declared relation is an error.
-- Text and binds mix freely as children: `td { .by.name ":" }`.
+- Text and binds mix freely as children: `td { .sender.name ":" }`; a string
+  followed by `++` starts a concat bind (`"Current user: " ++ current.name`).
+- An element with neither properties nor children needs parens (`hr()`),
+  since a bare name is always a bind.
+- `by`, `in`, `id`, `not`, `type`, … are keywords and cannot be field names
+  (`sender`, not `by`).
 
 ### Components **(v1)**
 

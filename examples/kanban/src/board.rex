@@ -14,23 +14,21 @@ let c1 = new Card { title: "Design the schema", pos: "a0", list: l_todo }
 let c2 = new Card { title: "Lower to circuits", pos: "a1", list: l_todo }
 let c3 = new Card { title: "Ship the shaper",   pos: "a0", list: l_doing }
 
-// `List as l` binds each list row to `l`; the nested `Card where :list = l`
-// reads "the cards whose :list field points at this list row". Handlers name
+// `List as l` binds each list row to `l`; the nested `Card where .list = l`
+// reads "the cards whose .list field points at this list row". Handlers name
 // their DOM event (`on click`, `on drop`, `on change`) and may reference only
 // their own level's binder (self) plus their declared params.
 view board =
-  List as l order by :pos select
-    section.list dropTarget {
+  List as l order by .pos select
+    section(class="list" dropTarget
+      on drop(card = drag(Card), pos = dropPos(c, card)) { update card { list: l, pos: pos } }) {
       header {
-        span { :title }
-        button "+ card" on click(pos: Text = endOf(card)) =>
-          new Card { title: "New card", pos: pos, list: l }
+        span { .title }
+        button(on click(pos = endOf(c)) => new Card { title: "New card", pos: pos, list: l }) "+ card"
       }
-      on drop(card: Card = drag("card"), pos: Text = dropPos(card)) =>
-        card:list := l ; card:pos := pos
-      Card as c where :list = l order by :pos select
-        div.card draggable {
-          input value=:title on change(v: Text = value) => :title := v
-          button "×" on click => delete c
+      Card as c where .list = l order by .pos select
+        div(class="card" draggable) {
+          input(value=.title on change(v = value) => .title := v)
+          button(on click => delete c) "×"
         }
     }

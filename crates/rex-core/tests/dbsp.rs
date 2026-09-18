@@ -745,7 +745,7 @@ fn cancelling_weights_prune_from_integral() {
 // --- recursion (§8): the fix region vs. a batch Kleene oracle ---------------
 
 /// Batch transitive-closure oracle: Kleene iteration of
-/// `path = distinct(edge + edge . path)` — the same equation the fix region
+/// `path = distinct(edge | edge . path)` — the same equation the fix region
 /// solves, computed entirely with the batch algebra.
 fn batch_closure(edge: &BTreeRelation) -> BTreeRelation {
     let mut path = BTreeRelation::new();
@@ -767,10 +767,10 @@ fn closure_engine() -> rex::dbsp::Engine {
     let src = "\
 entity Node { name: Text }
 entity Edge { src: NodeID, dst: NodeID }
-let srcof : Edge -> Node = :src
-let dstof : Edge -> Node = :dst
+let srcof : Edge -> Node = .src
+let dstof : Edge -> Node = .dst
 let edge : Node -> Node = dstof by srcof
-let recursive path : Node -> Node = edge + edge . path
+let recursive path : Node -> Node = edge | edge . path
 ";
     let parsed = rex::parse(src);
     assert!(parsed.diagnostics.is_empty());

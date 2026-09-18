@@ -30,7 +30,7 @@ fn view_body<'a>(prog: &'a rex::types::typed::TProgram, name: &str) -> &'a TExpr
 }
 
 const SCHEMA: &str = "\
-entity Customer { name: Text, region: {@north + @south + @east + @west} }
+entity Customer { name: Text, region: {@north | @south | @east | @west} }
 entity Product  { name: Text, price: Money }
 entity Order    { customer: CustomerID, placed: Date }
 entity Line     { order: OrderID, product: ProductID, qty: Int }
@@ -38,7 +38,7 @@ entity Line     { order: OrderID, product: ProductID, qty: Int }
 
 #[test]
 fn ill_typed_program_yields_no_elaboration() {
-    let parsed = parse(&format!("{SCHEMA}let bad : Line -> Money = :nonesuch\n"));
+    let parsed = parse(&format!("{SCHEMA}let bad : Line -> Money = .nonesuch\n"));
     let checked = check::check(&parsed.program);
     assert!(!checked.diagnostics.is_empty());
     assert!(checked.elaborated.is_none());
@@ -47,7 +47,7 @@ fn ill_typed_program_yields_no_elaboration() {
 #[test]
 fn field_path_resolves_to_hops_with_sorts() {
     let prog = elaborate(&format!(
-        "{SCHEMA}let cust : Line -> CustomerID = :order.customer\n"
+        "{SCHEMA}let cust : Line -> CustomerID = .order.customer\n"
     ));
     let body = view_body(&prog, "cust");
     let TExprKind::Field(hops) = &body.kind else {
@@ -68,8 +68,8 @@ fn field_path_resolves_to_hops_with_sorts() {
 fn where_comparison_folds_into_a_filter() {
     let prog = elaborate(&format!(
         "{SCHEMA}\
-         let lineprice : Line -> Money = :qty * :product.price\n\
-         let custspend : Customer -> Money = sum(lineprice by :order.customer)\n\
+         let lineprice : Line -> Money = .qty * .product.price\n\
+         let custspend : Customer -> Money = sum(lineprice by .order.customer)\n\
          let big : Customer -> Money = custspend where > 30\n"
     ));
     let body = view_body(&prog, "big");
@@ -85,10 +85,10 @@ fn key_semijoin_stays_a_semijoin() {
     // Restricting by a computed customer-set is a real semijoin, not a filter.
     let prog = elaborate(&format!(
         "{SCHEMA}\
-         let inregion : Customer = id where :region in (@west + @east)\n\
-         let named : Customer -> Text = inregion . :name\n"
+         let inregion : Customer = id where .region in (@west | @east)\n\
+         let named : Customer -> Text = inregion . .name\n"
     ));
-    // `inregion`'s body: `id where (:region in ...)` — the `in` is a coreflexive
+    // `inregion`'s body: `id where (.region in ...)` — the `in` is a coreflexive
     // relation, so `where` is a Semijoin over it (not a value Filter).
     let body = view_body(&prog, "inregion");
     assert!(
@@ -102,8 +102,8 @@ fn key_semijoin_stays_a_semijoin() {
 fn aggregation_and_by_are_resolved() {
     let prog = elaborate(&format!(
         "{SCHEMA}\
-         let lineprice : Line -> Money = :qty * :product.price\n\
-         let custspend : Customer -> Money = sum(lineprice by :order.customer)\n"
+         let lineprice : Line -> Money = .qty * .product.price\n\
+         let custspend : Customer -> Money = sum(lineprice by .order.customer)\n"
     ));
     let body = view_body(&prog, "custspend");
     let TExprKind::Agg(kind, arg) = &body.kind else {
@@ -120,10 +120,10 @@ fn recursion_group_elaborates_to_letrec_with_recvar() {
     let prog = elaborate(
         "entity Node { name: Text }\n\
          entity Edge { src: NodeID, dst: NodeID }\n\
-         let srcof : Edge -> Node = :src\n\
-         let dstof : Edge -> Node = :dst\n\
+         let srcof : Edge -> Node = .src\n\
+         let dstof : Edge -> Node = .dst\n\
          let edge : Node -> Node = dstof by srcof\n\
-         let recursive path : Node -> Node = edge + edge . path\n",
+         let recursive path : Node -> Node = edge | edge . path\n",
     );
     let bindings = prog
         .stmts
@@ -136,7 +136,7 @@ fn recursion_group_elaborates_to_letrec_with_recvar() {
     assert_eq!(bindings.len(), 1);
     let (name, body) = &bindings[0];
     assert_eq!(name, "path");
-    // edge + edge . path  ==>  Union(View(edge), Compose(View(edge), RecVar(path)))
+    // edge | edge . path  ==>  Union(View(edge), Compose(View(edge), RecVar(path)))
     let TExprKind::Union(l, r) = &body.kind else {
         panic!("expected Union, got {:?}", body.kind)
     };
@@ -153,10 +153,10 @@ fn mutual_group_is_one_letrec_in_binding_order() {
     let prog = elaborate(
         "entity Node { name: Text }\n\
          entity Edge { src: NodeID, dst: NodeID }\n\
-         let srcof : Edge -> Node = :src\n\
-         let dstof : Edge -> Node = :dst\n\
+         let srcof : Edge -> Node = .src\n\
+         let dstof : Edge -> Node = .dst\n\
          let edge : Node -> Node = dstof by srcof\n\
-         let recursive odd : Node -> Node = edge + edge . even\n\
+         let recursive odd : Node -> Node = edge | edge . even\n\
          let recursive even : Node -> Node = edge . odd\n",
     );
     let groups: Vec<_> = prog

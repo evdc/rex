@@ -182,8 +182,8 @@ fn graph_src(edges: &[(&str, &str)], views: &str) -> String {
         s.push_str(&format!("let _ = new Edge {{ src: {x}, dst: {y} }}\n"));
     }
     s.push_str(
-        "let srcof : Edge -> Node = :src\n\
-         let dstof : Edge -> Node = :dst\n\
+        "let srcof : Edge -> Node = .src\n\
+         let dstof : Edge -> Node = .dst\n\
          let edge : Node -> Node = dstof by srcof\n",
     );
     s.push_str(views);
@@ -220,7 +220,7 @@ fn run_src(src: &str) -> rex::eval::EvalResult {
 fn transitive_closure_of_a_chain() {
     let src = graph_src(
         &[("a", "b"), ("b", "c"), ("c", "d")],
-        "let recursive path : Node -> Node = edge + edge . path\n",
+        "let recursive path : Node -> Node = edge | edge . path\n",
     );
     assert_eq!(
         node_pairs(&run_src(&src), "path"),
@@ -234,7 +234,7 @@ fn closure_terminates_on_a_cycle() {
     // forced distinct at the knot is what stops the iteration.
     let src = graph_src(
         &[("a", "b"), ("b", "c"), ("c", "a")],
-        "let recursive path : Node -> Node = edge + edge . path\n",
+        "let recursive path : Node -> Node = edge | edge . path\n",
     );
     let all: Vec<(u64, u64)> =
         (0..3).flat_map(|l| (0..3).map(move |r| (l, r))).collect();
@@ -246,7 +246,7 @@ fn mutual_recursion_odd_even_paths() {
     // odd = paths of odd length, even = paths of even (>= 2) length.
     let src = graph_src(
         &[("a", "b"), ("b", "c"), ("c", "d")],
-        "let recursive odd : Node -> Node = edge + edge . even\n\
+        "let recursive odd : Node -> Node = edge | edge . even\n\
          let recursive even : Node -> Node = edge . odd\n",
     );
     let result = run_src(&src);
@@ -268,6 +268,6 @@ fn recursion_fixture_runs_end_to_end() {
 
 #[test]
 fn empty_edge_relation_yields_empty_closure() {
-    let src = graph_src(&[], "let recursive path : Node -> Node = edge + edge . path\n");
+    let src = graph_src(&[], "let recursive path : Node -> Node = edge | edge . path\n");
     assert_eq!(node_pairs(&run_src(&src), "path"), vec![]);
 }

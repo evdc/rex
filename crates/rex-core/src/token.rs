@@ -44,6 +44,15 @@ pub enum TokenKind {
     KwView,
     KwState,
     KwRel,
+    KwEvent,
+    KwOn,
+    KwType,
+    KwImport,
+    KwMatch,
+    KwIf,
+    KwThen,
+    KwElse,
+    KwNot,
 
     // Operators & punctuation
     Arrow,    // ->
@@ -54,11 +63,16 @@ pub enum TokenKind {
     Comma,   // ,
     Colon,   // :
     Tilde,   // ~
-    Plus,    // +
+    Plus,    // +   (arithmetic)
+    Minus,   // -   (arithmetic)
+    Slash,   // /
+    Percent, // %
+    PlusPlus, // ++ (text concat)
+    Bar,     // |   (union)
     Amp,     // &
     Star,    // *
-    BarBar,  // ||
     Eq,      // =
+    Ne,      // !=
     Lt,      // <
     Gt,      // >
     Le,      // <=
@@ -94,6 +108,50 @@ impl TokenKind {
             "view" => TokenKind::KwView,
             "state" => TokenKind::KwState,
             "rel" => TokenKind::KwRel,
+            "event" => TokenKind::KwEvent,
+            "on" => TokenKind::KwOn,
+            "type" => TokenKind::KwType,
+            "import" => TokenKind::KwImport,
+            "match" => TokenKind::KwMatch,
+            "if" => TokenKind::KwIf,
+            "then" => TokenKind::KwThen,
+            "else" => TokenKind::KwElse,
+            "not" => TokenKind::KwNot,
+            _ => return None,
+        })
+    }
+
+    /// The source word of a keyword token (`KwId` -> `id`), so positions that
+    /// take arbitrary names (HTML attribute names) can accept keywords.
+    pub fn keyword_word(&self) -> Option<&'static str> {
+        use TokenKind::*;
+        Some(match self {
+            KwEntity => "entity",
+            KwLet => "let",
+            KwRecursive => "recursive",
+            KwNew => "new",
+            KwWhere => "where",
+            KwBy => "by",
+            KwDistinct => "distinct",
+            KwFst => "fst",
+            KwSnd => "snd",
+            KwId => "id",
+            KwIn => "in",
+            KwExcept => "except",
+            KwAntijoin => "antijoin",
+            KwFrom => "from",
+            KwView => "view",
+            KwState => "state",
+            KwRel => "rel",
+            KwEvent => "event",
+            KwOn => "on",
+            KwType => "type",
+            KwImport => "import",
+            KwMatch => "match",
+            KwIf => "if",
+            KwThen => "then",
+            KwElse => "else",
+            KwNot => "not",
             _ => return None,
         })
     }
@@ -125,6 +183,15 @@ impl TokenKind {
             KwView => "`view`".into(),
             KwState => "`state`".into(),
             KwRel => "`rel`".into(),
+            KwEvent => "`event`".into(),
+            KwOn => "`on`".into(),
+            KwType => "`type`".into(),
+            KwImport => "`import`".into(),
+            KwMatch => "`match`".into(),
+            KwIf => "`if`".into(),
+            KwThen => "`then`".into(),
+            KwElse => "`else`".into(),
+            KwNot => "`not`".into(),
             Arrow => "`->`".into(),
             FatArrow => "`=>`".into(),
             ColonEq => "`:=`".into(),
@@ -134,10 +201,15 @@ impl TokenKind {
             Colon => "`:`".into(),
             Tilde => "`~`".into(),
             Plus => "`+`".into(),
+            Minus => "`-`".into(),
+            Slash => "`/`".into(),
+            Percent => "`%`".into(),
+            PlusPlus => "`++`".into(),
+            Bar => "`|`".into(),
             Amp => "`&`".into(),
             Star => "`*`".into(),
-            BarBar => "`||`".into(),
             Eq => "`=`".into(),
+            Ne => "`!=`".into(),
             Lt => "`<`".into(),
             Gt => "`>`".into(),
             Le => "`<=`".into(),
