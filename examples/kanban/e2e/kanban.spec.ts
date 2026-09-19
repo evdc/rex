@@ -111,6 +111,51 @@ test("add card to a list that already has cards", async ({ page }) => {
   expect(errors).toEqual([]);
 });
 
+// S-22 acceptance: a drag storm that grows an order key past the rebalance
+// limit triggers `maybeRebalance`'s ONE `@rebalance` event (not N torn field
+// writes), and it shows up in the engine's log.
+test("drag storm into the same gap triggers a rebalance that appears in the log", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(String(e)));
+
+  // Repeated insertion into the same gap (rebalance.test.ts's pathology):
+  // pin the list's first card as a fixed lower bound, add a second fixed
+  // card as an upper bound, then alternately drag two "roaming" cards to the
+  // slot between them. Each round's target bounds shrink to (anchor's key,
+  // the other roaming card's just-set key), so the inserted key grows ~1
+  // char/round until it crosses REBALANCE_LIMIT (40).
+  await page.evaluate(() => {
+    const list = [...document.querySelectorAll("section.list")].find((l) =>
+      l.querySelector("header span")?.textContent?.includes("Todo"),
+    )!;
+    // list.querySelectorAll("div.card")[0] is the fixed lower-bound anchor,
+    // never dragged.
+    const a = list.querySelectorAll("div.card")[1]!;
+    // A third card (dropped at the end) is the roaming pair's other member.
+    (list.querySelector("header button") as HTMLElement).click();
+    const cards = [...list.querySelectorAll("div.card")];
+    const b = cards[cards.length - 1]!;
+
+    const dragJustAbove = (moving: Element, other: Element) => {
+      const dt = new DataTransfer();
+      moving.dispatchEvent(new DragEvent("dragstart", { bubbles: true, dataTransfer: dt }));
+      const rect = other.getBoundingClientRect();
+      list.dispatchEvent(
+        new DragEvent("drop", { bubbles: true, dataTransfer: dt, clientY: rect.top + 1 }),
+      );
+    };
+    for (let i = 0; i < 300; i++) {
+      dragJustAbove(i % 2 === 0 ? b : a, i % 2 === 0 ? a : b);
+    }
+  });
+
+  expect(errors).toEqual([]);
+  await expect(page.locator('section.list:has(header span:text("Todo")) div.card')).toHaveCount(3);
+
+  const log = await page.evaluate(() => (window as any).__rexApp.log_since(0n));
+  expect(log).toContain('"name":"@rebalance"');
+});
+
 test("drop into a list that already has cards", async ({ page }) => {
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(String(e)));

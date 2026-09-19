@@ -10,6 +10,7 @@ import PROGRAM from "./board.rex?raw";
 
 await init();
 const app = new RexApp(PROGRAM);
+(window as unknown as { __rexApp: RexApp }).__rexApp = app;
 const driver = new BrowserDriver();
 const container = document.getElementById("app")!;
 const apply = (json: string) => shaper.applyStep(parseStepJson(json));

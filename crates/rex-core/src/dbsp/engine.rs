@@ -5,7 +5,7 @@
 //! shape with negated weights.
 
 use super::circuit::{Circuit, StepResult, Transaction};
-use super::log::{ArgValue, Event, GENESIS, GENESIS_SORT};
+use super::log::{ArgValue, Event, GENESIS, GENESIS_SORT, REBALANCE, REBALANCE_FIELD, REBALANCE_ROWS};
 use super::lower::lower;
 use super::node::InputKey;
 use crate::eval::intern::intern;
@@ -27,6 +27,13 @@ pub struct Engine {
     /// synthetic [`GENESIS`] event, so [`replay`](crate::events::replay)
     /// never needs an out-of-band snapshot to make sense of the log.
     log: Vec<Event>,
+    /// The seq the *next* logged event gets. Equal to `log.len()` for an
+    /// engine that has only ever logged through this instance; diverges from
+    /// it after [`restore`](Self::restore) or a replay (S-22), because
+    /// neither re-appends to `log` (the host already owns the full log —
+    /// `crate::events::replay`'s doc comment) but both must still leave a
+    /// later `apply_event` numbering its seq as if they had.
+    next_seq: u64,
 }
 
 /// One operation in a handler dispatch (see [`Engine::dispatch`]).
@@ -130,11 +137,11 @@ impl Engine {
         (ids, res)
     }
 
-    /// Append one entry to the log with the next sequence number (the log's
-    /// current length — replay from empty naturally reproduces the same
-    /// seqs). Does not itself run anything; callers push the effect first.
+    /// Append one entry to the log with the next sequence number. Does not
+    /// itself run anything; callers push the effect first.
     fn log_event(&mut self, name: impl Into<String>, args: Vec<(String, ArgValue)>) -> u64 {
-        let seq = self.log.len() as u64;
+        let seq = self.next_seq;
+        self.next_seq += 1;
         self.log.push(Event { seq, name: name.into(), args, cause: None, intent: None });
         seq
     }
@@ -143,6 +150,34 @@ impl Engine {
     /// [`replay`](crate::events::replay) consumes.
     pub fn log(&self) -> &[Event] {
         &self.log
+    }
+
+    /// Every logged event with `seq >= seq` (S-22): what a persistence
+    /// adapter fetches to append to its own store, or a host re-queries after
+    /// a dropped connection. `log` only holds events logged through *this*
+    /// engine instance (never the pre-restore history — see [`restore`]),
+    /// so this is a session-local tail, not the full log.
+    pub fn log_since(&self, seq: u64) -> impl Iterator<Item = &Event> {
+        self.log.iter().filter(move |e| e.seq >= seq)
+    }
+
+    /// The seq the next logged event will get — what [`base_snapshot`]
+    /// records as its cursor, so a later [`restore`] can resume numbering
+    /// without colliding with history the snapshot already covers.
+    ///
+    /// [`base_snapshot`]: Self::base_snapshot
+    /// [`restore`]: Self::restore
+    pub fn cursor(&self) -> u64 {
+        self.next_seq
+    }
+
+    /// Fast-forward the seq counter past `seq` without appending to `log`
+    /// (S-22): [`crate::events::replay`] calls this per replayed event so a
+    /// later real dispatch's seq continues where the (externally-held) log
+    /// left off, even though replay deliberately doesn't re-log — see
+    /// `replay`'s doc comment.
+    pub(crate) fn advance_cursor(&mut self, seq: u64) {
+        self.next_seq = self.next_seq.max(seq + 1);
     }
 
     /// Retract an entity: negate exactly the base rows currently held for
@@ -329,4 +364,89 @@ impl Engine {
         }
         self.circuit.backfill(mark)
     }
+
+    /// Re-space one manual-order level's keys as ONE atomic transaction
+    /// (S-22 subtask 4, MVP-PLAN §2.9/§2.10): `rows` is `[(id, new key)]`,
+    /// the amortized maintenance sweep `maybeRebalance` computes client-side.
+    /// Logged as the system [`REBALANCE`] event, so it appears in the log and
+    /// replays deterministically like any declared event, and the N field
+    /// writes it used to be (`js/rex-dom/src/interact.ts`, pre-S-22) become
+    /// one — never a torn intermediate a concurrent reader could observe.
+    pub fn apply_rebalance(&mut self, field: &str, rows: &[(Value, Value)]) -> StepResult {
+        let ops = Self::rebalance_ops(field, rows);
+        let args = vec![
+            (REBALANCE_FIELD.to_string(), ArgValue::Value(Value::text(field))),
+            (
+                REBALANCE_ROWS.to_string(),
+                ArgValue::Rel(rows.iter().map(|(l, r)| (l.clone(), r.clone(), 1)).collect()),
+            ),
+        ];
+        self.apply_event(REBALANCE, &ops, args).1
+    }
+
+    /// The `Set` ops a rebalance of `rows` under `field` expands to — shared
+    /// by [`apply_rebalance`](Self::apply_rebalance) (which also logs) and
+    /// [`crate::events::replay`] (which must not re-log a replayed event).
+    pub(crate) fn rebalance_ops(field: &str, rows: &[(Value, Value)]) -> Vec<DispatchOp> {
+        rows.iter()
+            .map(|(id, v)| DispatchOp::Set { id: id.clone(), updates: vec![(field.to_string(), v.clone())] })
+            .collect()
+    }
+
+    /// The engine's input-table contents plus id-minting and log-cursor state
+    /// (S-22): what a persistence adapter snapshots so a reload can skip
+    /// replaying the whole log from empty (MVP-PLAN §2.2 — "views are
+    /// backfilled on load"). Pairs with [`restore`](Self::restore).
+    pub fn base_snapshot(&self) -> BaseSnapshot {
+        let inputs = self
+            .circuit
+            .input_keys()
+            .map(|key| {
+                let rows = self
+                    .circuit
+                    .input_integral(key)
+                    .expect("a key from input_keys() has an integral")
+                    .triples()
+                    .map(|(l, r, w)| (l.clone(), r.clone(), w))
+                    .collect();
+                (*key, rows)
+            })
+            .collect();
+        let next_id = self.next_id.iter().map(|(s, n)| (*s, *n)).collect();
+        BaseSnapshot { cursor: self.next_seq, next_id, inputs }
+    }
+
+    /// Load a [`base_snapshot`](Self::base_snapshot) into a freshly booted
+    /// engine (views registered via `add_view`/`add_view_group`, no `new`
+    /// statements run — the host skips those on a restoring boot so seed
+    /// data isn't minted twice, MVP-PLAN §2.7/S-80). One transaction carries
+    /// every base row at once; since this is the circuit's first real step,
+    /// running it at floor 0 derives every view's integral in one pass — the
+    /// same backfill-on-load semantics `add_view` gives a `let` added after
+    /// data already exists, just for the whole graph at once.
+    pub fn restore(&mut self, snap: &BaseSnapshot) {
+        let mut tx = Transaction::new();
+        for (key, rows) in &snap.inputs {
+            for (l, r, w) in rows {
+                tx.push(*key, l.clone(), r.clone(), *w);
+            }
+        }
+        self.circuit.step_silent(&tx);
+        for (sort, n) in &snap.next_id {
+            self.next_id.insert(*sort, *n);
+        }
+        self.next_seq = snap.cursor;
+    }
+}
+
+/// One base table's rows, as `(left, right, weight)` triples.
+type BaseRows = Vec<(Value, Value, i64)>;
+
+/// See [`Engine::base_snapshot`] / [`Engine::restore`].
+pub struct BaseSnapshot {
+    /// The seq the log had reached when this was taken; [`Engine::restore`]
+    /// resumes numbering from here.
+    pub cursor: u64,
+    pub next_id: Vec<(SortId, u64)>,
+    pub inputs: Vec<(InputKey, BaseRows)>,
 }

@@ -21,5 +21,5 @@ export {
   dropPos,
   maybeRebalance,
   DRAG_MIME,
-  type FieldWriter,
+  type Rebalancer,
 } from "./interact.js";

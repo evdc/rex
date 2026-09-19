@@ -7,7 +7,10 @@
 //! and only the outer event is what the host (and, from S-21, the log) sees.
 //! The desugarer has already rejected `do` cycles, so expansion terminates.
 
-use crate::dbsp::{ArgValue, DispatchOp, Engine, Event, StepResult, GENESIS, GENESIS_SORT};
+use crate::dbsp::{
+    ArgValue, DispatchOp, Engine, Event, StepResult, GENESIS, GENESIS_SORT, REBALANCE, REBALANCE_FIELD,
+    REBALANCE_ROWS,
+};
 use crate::eval::interp::lit_value;
 use crate::eval::{encode_value, Value};
 use crate::types::shape_ir::{EventDef, MutationIR, ParamTy, ValRef};
@@ -64,6 +67,8 @@ pub fn replay(
     for event in log {
         if event.name == GENESIS {
             replay_genesis(engine, event, silent)?;
+        } else if event.name == REBALANCE {
+            replay_rebalance(engine, event, silent)?;
         } else {
             let ops = ops_for_event(env, events, event)?;
             if silent {
@@ -72,6 +77,7 @@ pub fn replay(
                 engine.dispatch(&ops);
             }
         }
+        engine.advance_cursor(event.seq);
     }
     Ok(())
 }
@@ -97,6 +103,40 @@ fn replay_genesis(engine: &mut Engine, event: &Event, silent: bool) -> Result<()
         engine.apply_new_silent(sort, &fields);
     } else {
         engine.apply_new(sort, &fields);
+    }
+    Ok(())
+}
+
+/// Replay a logged [`REBALANCE`] system event: rebuild the same `Set` ops
+/// [`Engine::apply_rebalance`] built (never re-logged — same "the caller
+/// already has the log" rule as [`replay_genesis`]).
+fn replay_rebalance(engine: &mut Engine, event: &Event, silent: bool) -> Result<(), String> {
+    let mut field = None;
+    let mut rows = None;
+    for (name, arg) in &event.args {
+        match name.as_str() {
+            REBALANCE_FIELD => {
+                let ArgValue::Value(Value::Text(s)) = arg else {
+                    return Err("rebalance event: malformed field arg".to_string());
+                };
+                field = Some(s.as_str().to_string());
+            }
+            REBALANCE_ROWS => {
+                let ArgValue::Rel(rel) = arg else {
+                    return Err("rebalance event: malformed rows arg".to_string());
+                };
+                rows = Some(rel.iter().map(|(l, r, _)| (l.clone(), r.clone())).collect::<Vec<_>>());
+            }
+            other => return Err(format!("rebalance event: unknown arg `{other}`")),
+        }
+    }
+    let field = field.ok_or_else(|| "rebalance event missing field".to_string())?;
+    let rows = rows.ok_or_else(|| "rebalance event missing rows".to_string())?;
+    let ops = Engine::rebalance_ops(&field, &rows);
+    if silent {
+        engine.dispatch_silent(&ops);
+    } else {
+        engine.dispatch(&ops);
     }
     Ok(())
 }

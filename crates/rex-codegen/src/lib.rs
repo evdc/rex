@@ -81,6 +81,10 @@ impl Emit {
         self.line("");
         self.line("await init();");
         self.line("const app = new RexApp(PROGRAM);");
+        // A test hook, not a runtime dependency: Playwright inspects the log
+        // through this (e.g. asserting a rebalance sweep landed there,
+        // S-22) rather than poking at wasm internals.
+        self.line("(window as unknown as { __rexApp: RexApp }).__rexApp = app;");
         self.line("const driver = new BrowserDriver();");
         self.line("const container = document.getElementById(\"app\")!;");
         self.line("const apply = (json: string) => shaper.applyStep(parseStepJson(json));");

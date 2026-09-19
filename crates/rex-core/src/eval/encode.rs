@@ -22,7 +22,7 @@
 
 use super::relation::BinaryRelation;
 use super::value::Value;
-use crate::dbsp::{ArgValue, Event, StepResult};
+use crate::dbsp::{ArgValue, BaseSnapshot, Event, InputKey, StepResult};
 use std::fmt::Write;
 
 /// Canonically encode one value.
@@ -237,6 +237,56 @@ pub fn event_to_json(e: &Event) -> String {
     }
     out.push('}');
     out
+}
+
+/// Canonical JSON encoding of one [`Engine::base_snapshot`](crate::dbsp::Engine::base_snapshot)
+/// (S-22): `{"cursor":5,"nextId":[[0,3],[1,7]],"inputs":[{"key":"id:0",
+/// "rows":[...]},{"key":"f:0:title","rows":[...]}]}`. An input key encodes as
+/// `id:<sort>` (the per-sort identity) or `f:<sort>:<field>` (one field
+/// relation) — the wire format a persistence adapter's `saveSnapshot` writes
+/// and a `restore` call (S-22) decodes back.
+pub fn base_snapshot_to_json(snap: &BaseSnapshot) -> String {
+    let mut out = String::new();
+    out.push_str("{\"cursor\":");
+    let _ = write!(out, "{}", snap.cursor);
+    out.push_str(",\"nextId\":[");
+    for (i, (sort, n)) in snap.next_id.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, "[{},{}]", sort.0, n);
+    }
+    out.push_str("],\"inputs\":[");
+    for (i, (key, rows)) in snap.inputs.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"key\":");
+        json_string(&mut out, &input_key_to_string(key));
+        out.push_str(",\"rows\":[");
+        for (ri, (l, r, w)) in rows.iter().enumerate() {
+            if ri > 0 {
+                out.push(',');
+            }
+            out.push('[');
+            json_string(&mut out, &encode_value(l));
+            out.push(',');
+            json_string(&mut out, &encode_value(r));
+            let _ = write!(out, ",{w}]");
+        }
+        out.push_str("]}");
+    }
+    out.push_str("]}");
+    out
+}
+
+/// The `base_snapshot_to_json` key spelling for one input key — also parsed
+/// back by the wasm bridge's `restore`.
+fn input_key_to_string(key: &InputKey) -> String {
+    match key {
+        InputKey::Identity(sort) => format!("id:{}", sort.0),
+        InputKey::Field(sort, sym) => format!("f:{}:{}", sort.0, sym.as_str()),
+    }
 }
 
 /// One relation's rows as a JSON array `[["<key>","<value>",<weight>],...]` —

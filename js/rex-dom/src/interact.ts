@@ -13,9 +13,11 @@ import type { Shaper } from "./shaper.js";
 import { decodeText } from "./encode.js";
 import { keyBetween, rebalancePlan } from "./rebalance.js";
 
-/** The slice of the wasm `RexApp` the rebalance helper needs. */
-export interface FieldWriter {
-  update_field(id: string, field: string, value: string): string;
+/** The slice of the wasm `RexApp` the rebalance helper needs (S-22): a
+ *  single logged `@rebalance` event covering every re-spaced row, not N
+ *  independent field writes. */
+export interface Rebalancer {
+  rebalance(field: string, rowsJson: string): string;
 }
 
 /** The MIME type Rex drag/drop carries a row key under. One universal type
@@ -85,10 +87,11 @@ export function dropPos<El>(
 
 /** Re-space a level's order keys under `parentKey` when same-gap churn has
  *  grown one past the rebalance limit. A rare amortized maintenance sweep —
- *  deliberately runtime library, not a language construct. Applies each
- *  re-spacing through `app.update_field` + `apply`. */
+ *  deliberately runtime library, not a language construct. Dispatches ONE
+ *  `@rebalance` event covering every re-spaced row (S-22): a drag storm that
+ *  triggers a sweep is one entry in the log, not N torn field writes. */
 export function maybeRebalance<El>(
-  app: FieldWriter,
+  app: Rebalancer,
   apply: (deltaJson: string) => void,
   shaper: Shaper<El>,
   childLevel: string,
@@ -101,7 +104,6 @@ export function maybeRebalance<El>(
     .map(([k, c]) => [decodeText(k), c] as const);
   const plan = rebalancePlan(ordered);
   if (!plan) return;
-  for (const [child, fresh] of plan) {
-    apply(app.update_field(child, field, encode(fresh)));
-  }
+  const rows = Array.from(plan, ([child, fresh]) => [child, encode(fresh)]);
+  apply(app.rebalance(field, JSON.stringify(rows)));
 }
