@@ -404,13 +404,20 @@ pub fn mul_values(a: &Value, b: &Value, money: bool) -> Value {
 
 /// `a ++ b` text concatenation. Shared with the incremental backend's co-keyed
 /// kernel.
-/// `a + b`, `a - b`, `a / b`, `a % b` over Int/Money cents. Division by
-/// zero yields 0 (a relation has no place for a runtime error; the checker
-/// may later reject non-grounded divisors).
+/// `a + b`, `a - b`, `a / b`, `a % b`. `money` (set when either operand is
+/// `Money`, per the checker's Money-if-either rule) picks the scale: cents
+/// when the result is `Money` (so a bare `Int` operand promotes to whole
+/// units), raw magnitude when it's `Int` — an unconditional `as_cents()`
+/// would silently scale a pure `Int + Int` by 100. Division by zero yields 0
+/// (a relation has no place for a runtime error; the checker may later
+/// reject non-grounded divisors).
 pub fn arith_values(kind: crate::types::typed::ArithKind, a: &Value, b: &Value, money: bool) -> Value {
     use crate::types::typed::ArithKind::*;
-    let x = a.as_cents().or_else(|| a.as_i64()).unwrap_or(0);
-    let y = b.as_cents().or_else(|| b.as_i64()).unwrap_or(0);
+    let (x, y) = if money {
+        (a.as_cents().unwrap_or(0), b.as_cents().unwrap_or(0))
+    } else {
+        (a.as_i64().unwrap_or(0), b.as_i64().unwrap_or(0))
+    };
     let n = match kind {
         Add => x + y,
         Sub => x - y,

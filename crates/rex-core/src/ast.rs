@@ -22,7 +22,10 @@ pub enum Stmt {
     /// A UI view: a nested relational expression with element constructors.
     /// Desugars to auto-derived membership/order/attribute `let`s plus a
     /// ShapeIR the compiler emits JS from (§M5, nesting-draft §9).
-    View(ViewDecl),
+    /// Boxed: `ViewDecl` is by far the largest variant (nested element
+    /// trees), so inlining it would widen every `Stmt` (clippy
+    /// `large_enum_variant`).
+    View(Box<ViewDecl>),
     /// A singleton piece of application state (e.g. a filter selection).
     /// Desugars to a hidden `AppState` entity with one seeded row.
     State(StateDecl),

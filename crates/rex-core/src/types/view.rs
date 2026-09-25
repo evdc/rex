@@ -17,7 +17,7 @@
 //! mutation bodies (the EventIR).
 
 use super::shape_ir::*;
-use super::typed::Lit;
+use super::typed::{ArithKind, Lit};
 use crate::ast::*;
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
@@ -60,6 +60,8 @@ pub fn desugar(program: &Program) -> Desugared {
         attr_seq: 0,
         entity_fields,
         event_spans: Default::default(),
+        hidden_lets: Vec::new(),
+        hidden_seq: 0,
     };
     // Pass 0: `event` declarations, then their `on` handlers (order-free, so a
     // view or a handler may `do` an event declared later in the file).
@@ -127,6 +129,10 @@ pub fn desugar(program: &Program) -> Desugared {
             other => d.stmts.push(other.clone()),
         }
     }
+    // Hidden bulk-target keyset views (S-41) go last: every entity they
+    // could read is already in `d.stmts` by now, regardless of whether the
+    // `on` handler that produced them appeared before or after it in source.
+    d.stmts.append(&mut d.hidden_lets);
     Desugared {
         program: Program { stmts: d.stmts },
         shapes: d.shapes,
@@ -147,10 +153,161 @@ struct Desugar {
     entity_fields: std::collections::HashMap<String, std::collections::HashMap<String, Type>>,
     /// Event name -> (decl span, `on` span if any); for diagnostics.
     event_spans: std::collections::HashMap<String, (Span, Option<Span>)>,
+    /// Hidden keyset `let`s synthesized for an arg-free `where`-targeted bulk
+    /// mutation (S-41). Appended to `stmts` only after every real statement
+    /// has been processed (see `desugar`), so a hidden view — built in Pass 0
+    /// while `on` handlers are checked — never lands before the entity it
+    /// reads, regardless of source order.
+    hidden_lets: Vec<Stmt>,
+    /// Sequence for hidden keyset view names (`on#E#k`).
+    hidden_seq: usize,
 }
+
 
 /// A name a handler body may reference, with what it denotes.
 type Scope = Vec<(String, ParamTy)>;
+
+/// A mutation-value expression's type (MVP-PLAN S-40): coarser than the
+/// checker's `ValueTy` (no `SortId`s exist yet — view desugaring runs before
+/// the checker mints sorts) but enough to validate arithmetic/comparison
+/// operands, field targets, and (for `not`) the atom pair to flip between.
+#[derive(Clone, Debug, PartialEq)]
+enum ValTy {
+    Int,
+    Money,
+    Text,
+    Date,
+    /// An entity id, by entity name.
+    Id(String),
+    /// An atom (co)product; every alternative, in declared order. Empty for
+    /// an opaque atom type (`Bool`, pending its own sugar, MVP-PLAN §2.9) —
+    /// `not` on one of those is rejected rather than guessed at.
+    Atoms(Vec<String>),
+}
+
+impl ValTy {
+    fn is_numeric(&self) -> bool {
+        matches!(self, ValTy::Int | ValTy::Money)
+    }
+
+    fn encoding(&self) -> Encoding {
+        match self {
+            ValTy::Int => Encoding::Int,
+            ValTy::Money => Encoding::Money,
+            ValTy::Text | ValTy::Date => Encoding::Text,
+            ValTy::Id(_) => Encoding::Id,
+            ValTy::Atoms(_) => Encoding::Atom,
+        }
+    }
+}
+
+fn show_valty(t: &ValTy) -> String {
+    match t {
+        ValTy::Int => "Int".to_string(),
+        ValTy::Money => "Money".to_string(),
+        ValTy::Text => "Text".to_string(),
+        ValTy::Date => "Date".to_string(),
+        ValTy::Id(e) => e.clone(),
+        ValTy::Atoms(atoms) if atoms.is_empty() => "an atom".to_string(),
+        ValTy::Atoms(atoms) => {
+            format!("{{{}}}", atoms.iter().map(|a| format!("@{a}")).collect::<Vec<_>>().join(" | "))
+        }
+    }
+}
+
+/// A scope param's (wire-level) `ParamTy` widened to a `ValTy`. Lossy for an
+/// atom-typed param (the wire format doesn't carry the alternative names),
+/// which only matters if `not` is applied directly to a bare param rather
+/// than a field access — rare, and rejected cleanly (`Atoms(vec![])`) rather
+/// than silently wrong.
+fn scope_val_ty(pty: &ParamTy) -> ValTy {
+    match pty {
+        ParamTy::Id(e) => ValTy::Id(e.clone()),
+        ParamTy::Scalar(Encoding::Int) => ValTy::Int,
+        ParamTy::Scalar(Encoding::Money) => ValTy::Money,
+        ParamTy::Scalar(Encoding::Text) => ValTy::Text,
+        ParamTy::Scalar(Encoding::Atom) => ValTy::Atoms(Vec::new()),
+        ParamTy::Scalar(Encoding::Id) | ParamTy::Rel(..) => ValTy::Atoms(Vec::new()),
+    }
+}
+
+/// Whether `e` references any name in `scope` (an event param) — decides
+/// whether a bulk mutation's `where` predicate (S-41) can be precomputed as
+/// a static keyset view or must be scanned per dispatch instead.
+/// Conservative: a shape this walk doesn't recognize counts as dependent,
+/// never as arg-free — the worst outcome is an avoidable scan, never a wrong
+/// materialized view.
+fn expr_refs_scope(e: &Expr, scope: &Scope) -> bool {
+    match &e.kind {
+        ExprKind::Ident(name) => scope.iter().any(|(n, _)| n == name),
+        ExprKind::FieldPath(_)
+        | ExprKind::Atom(_)
+        | ExprKind::Int(_)
+        | ExprKind::Decimal(_)
+        | ExprKind::Str(_)
+        | ExprKind::Date { .. }
+        | ExprKind::Id => false,
+        ExprKind::Not(a) => expr_refs_scope(a, scope),
+        ExprKind::Add(a, b)
+        | ExprKind::Sub(a, b)
+        | ExprKind::Mul(a, b)
+        | ExprKind::Div(a, b)
+        | ExprKind::Mod(a, b)
+        | ExprKind::Concat(a, b)
+        | ExprKind::Compose(a, b) => expr_refs_scope(a, scope) || expr_refs_scope(b, scope),
+        ExprKind::Compare { lhs, rhs, .. } | ExprKind::In { lhs, rhs } => {
+            lhs.as_deref().is_some_and(|l| expr_refs_scope(l, scope)) || expr_refs_scope(rhs, scope)
+        }
+        _ => true,
+    }
+}
+
+/// Rewrite every `.a.b.c` (an implicit-subject field path) in `e` to
+/// `row.a.b.c`: turns "the row under test" from an ambient default into an
+/// explicit param `val_expr` already knows how to check field hops on — the
+/// row a bulk mutation's per-dispatch scan (S-41) evaluates the predicate
+/// against. Leaves everything outside `val_expr`'s own grammar (literals,
+/// `Ident`, `Compose`, `Not`, arithmetic, `Compare`) untouched; anything else
+/// is rejected by `val_expr` itself, so there's nothing to rewrite in it.
+fn rewrite_row_refs(e: &Expr, row: &str) -> Expr {
+    let kind = match &e.kind {
+        ExprKind::FieldPath(parts) => {
+            let mut acc = ident(row, e.span);
+            for p in parts {
+                acc = compose(acc, ident(p, e.span), e.span);
+            }
+            return acc;
+        }
+        ExprKind::Not(a) => ExprKind::Not(Box::new(rewrite_row_refs(a, row))),
+        ExprKind::Add(a, b) => ExprKind::Add(Box::new(rewrite_row_refs(a, row)), Box::new(rewrite_row_refs(b, row))),
+        ExprKind::Sub(a, b) => ExprKind::Sub(Box::new(rewrite_row_refs(a, row)), Box::new(rewrite_row_refs(b, row))),
+        ExprKind::Div(a, b) => ExprKind::Div(Box::new(rewrite_row_refs(a, row)), Box::new(rewrite_row_refs(b, row))),
+        ExprKind::Mod(a, b) => ExprKind::Mod(Box::new(rewrite_row_refs(a, row)), Box::new(rewrite_row_refs(b, row))),
+        ExprKind::Compose(a, b) => {
+            ExprKind::Compose(Box::new(rewrite_row_refs(a, row)), Box::new(rewrite_row_refs(b, row)))
+        }
+        ExprKind::Compare { op, lhs, rhs } => ExprKind::Compare {
+            op: *op,
+            lhs: lhs.as_deref().map(|l| Box::new(rewrite_row_refs(l, row))),
+            rhs: Box::new(rewrite_row_refs(rhs, row)),
+        },
+        _ => e.kind.clone(),
+    };
+    Expr { kind, span: e.span }
+}
+
+/// Whether a value of type `got` may be written where `want` is declared:
+/// exact match, `Int` widening to `Money`, or an atom subset.
+fn valty_assignable(want: &ValTy, got: &ValTy) -> bool {
+    if want == got {
+        return true;
+    }
+    match (want, got) {
+        (ValTy::Money, ValTy::Int) => true,
+        (ValTy::Atoms(w), ValTy::Atoms(g)) => !g.is_empty() && g.iter().all(|a| w.contains(a)),
+        _ => false,
+    }
+}
 
 impl Desugar {
     fn error(&mut self, span: Span, msg: impl Into<String>) {
@@ -210,7 +367,7 @@ impl Desugar {
             .collect();
         let mut body = Vec::new();
         for m in &o.body {
-            match self.mutation(m, &scope, None) {
+            match self.mutation(m, &scope, None, &o.event) {
                 Some(ir) => body.push(ir),
                 None => return,
             }
@@ -285,7 +442,7 @@ impl Desugar {
     /// Lower one handler-body statement against `scope`. `implicit` is the
     /// binder a bare `.f := v` targets (a DOM handler's own row); `None` in
     /// an `on` body, where every target must be named.
-    fn mutation(&mut self, m: &HStmt, scope: &Scope, implicit: Option<&str>) -> Option<MutationIR> {
+    fn mutation(&mut self, m: &HStmt, scope: &Scope, implicit: Option<&str>, event: &str) -> Option<MutationIR> {
         let span = m.span();
         match m {
             HStmt::Assign { binder, field, value, .. } => {
@@ -294,63 +451,68 @@ impl Desugar {
                     return None;
                 };
                 let entity = self.target_entity(&target_name, scope, span)?;
-                let val = self.val(value, scope)?;
-                self.check_field_value(&entity, field, &val, scope, value.span)?;
+                let (val, ty) = self.val(value, scope)?;
+                self.check_field_value(&entity, field, &ty, value.span)?;
                 Some(MutationIR::Set {
-                    target: Ref(target_name),
+                    target: Target::One(Ref(target_name)),
                     entity,
                     updates: vec![(field.clone(), val)],
                 })
             }
             HStmt::Update { target, sets, .. } => {
-                let ExprKind::Ident(target_name) = &target.kind else {
-                    self.error(target.span, "`update` of a `where`-targeted keyset is not supported yet (MVP-PLAN S-41)");
-                    return None;
-                };
-                let entity = self.target_entity(target_name, scope, span)?;
+                let (bulk_target, entity) = self.mutation_target(target, scope, event)?;
                 let mut updates = Vec::new();
                 for f in sets {
-                    let v = self.val(&f.value, scope)?;
-                    self.check_field_value(&entity, &f.name, &v, scope, f.value.span)?;
+                    let (v, ty) = self.val(&f.value, scope)?;
+                    self.check_field_value(&entity, &f.name, &ty, f.value.span)?;
                     updates.push((f.name.clone(), v));
                 }
-                Some(MutationIR::Set { target: Ref(target_name.clone()), entity, updates })
+                Some(MutationIR::Set { target: bulk_target, entity, updates })
             }
             HStmt::Delete { target, .. } => {
-                let ExprKind::Ident(target_name) = &target.kind else {
-                    self.error(target.span, "`delete` of a `where`-targeted keyset is not supported yet (MVP-PLAN S-41)");
-                    return None;
-                };
-                self.target_entity(target_name, scope, span)?;
-                Some(MutationIR::Delete { target: Ref(target_name.clone()) })
+                // `delete Entity` (no predicate at all): retract the whole
+                // identity relation in one transaction (S-41 subtask 3) —
+                // distinct from a `where`-targeted bulk delete below.
+                if let ExprKind::Ident(name) = &target.kind
+                    && scope.iter().all(|(n, _)| n != name)
+                {
+                    if !self.entity_fields.contains_key(name) {
+                        self.error(target.span, format!("unknown parameter or entity `{name}` in mutation"));
+                        return None;
+                    }
+                    return Some(MutationIR::Delete { target: Target::All { entity: name.clone() } });
+                }
+                let (bulk_target, _entity) = self.mutation_target(target, scope, event)?;
+                Some(MutationIR::Delete { target: bulk_target })
             }
             HStmt::New { bind, entity, from, fields, .. } => {
                 if bind.is_some() {
                     self.error(span, "`let x = new …` in a handler is not supported yet (MVP-PLAN S-40)");
                     return None;
                 }
-                if from.is_some() {
-                    self.error(span, "`new … from` is not supported yet (MVP-PLAN S-42)");
-                    return None;
-                }
                 if !self.entity_fields.contains_key(entity) {
                     self.error(span, format!("unknown entity `{entity}`"));
                     return None;
                 }
-                let mut fs = Vec::new();
-                for f in fields {
-                    let v = self.val(&f.value, scope)?;
-                    self.check_field_value(entity, &f.name, &v, scope, f.value.span)?;
-                    fs.push((f.name.clone(), v));
+                match from {
+                    None => {
+                        let mut fs = Vec::new();
+                        for f in fields {
+                            let (v, ty) = self.val(&f.value, scope)?;
+                            self.check_field_value(entity, &f.name, &ty, f.value.span)?;
+                            fs.push((f.name.clone(), v));
+                        }
+                        Some(MutationIR::Insert { entity: entity.clone(), fields: fs })
+                    }
+                    Some(from) => self.new_from(entity, from, fields, scope, span),
                 }
-                Some(MutationIR::Insert { entity: entity.clone(), fields: fs })
             }
             HStmt::Do { event, args, .. } => {
                 let params = self.event_params(event, args.len(), span)?;
                 let mut vals = Vec::new();
                 for (a, p) in args.iter().zip(&params) {
-                    let v = self.val(a, scope)?;
-                    self.check_arg(&v, &p.ty, scope, a.span, event, &p.name)?;
+                    let (v, ty) = self.val(a, scope)?;
+                    self.check_arg(&ty, &p.ty, a.span, event, &p.name)?;
                     vals.push(v);
                 }
                 Some(MutationIR::Do { event: event.clone(), args: vals })
@@ -364,6 +526,106 @@ impl Desugar {
                 None
             }
         }
+    }
+
+    /// Check an `update`/`delete` target: a bound param (a single row) or
+    /// `Entity where P` (a bulk keyset, S-41). Returns the checked
+    /// [`Target`] together with the entity it ranges over.
+    fn mutation_target(&mut self, target: &Expr, scope: &Scope, event: &str) -> Option<(Target, String)> {
+        match &target.kind {
+            ExprKind::Ident(name) => {
+                let entity = self.target_entity(name, scope, target.span)?;
+                Some((Target::One(Ref(name.clone())), entity))
+            }
+            ExprKind::Where(base, pred) => {
+                let ExprKind::Ident(entity) = &base.kind else {
+                    self.error(base.span, "a bulk mutation target must be `Entity where predicate`");
+                    return None;
+                };
+                if !self.entity_fields.contains_key(entity) {
+                    self.error(base.span, format!("unknown entity `{entity}`"));
+                    return None;
+                }
+                if expr_refs_scope(pred, scope) {
+                    // Arg-dependent: can't precompute, so it's a per-dispatch
+                    // scan over the whole entity (subtask 2) — the predicate
+                    // is checked as a point-evaluation `ValExpr`, with a
+                    // `.field` path rewritten to read the row under test.
+                    let mut pscope = scope.clone();
+                    pscope.push((ROW_SELF.to_string(), ParamTy::Id(entity.clone())));
+                    let rewritten = rewrite_row_refs(pred, ROW_SELF);
+                    let (ve, ty) = self.val_expr(&rewritten, &pscope)?;
+                    if ty != ValTy::Atoms(vec!["true".to_string(), "false".to_string()]) {
+                        self.error(pred.span, "a bulk mutation's `where` predicate must be a comparison");
+                        return None;
+                    }
+                    Some((Target::Scan { entity: entity.clone(), pred: ve }, entity.clone()))
+                } else {
+                    // Arg-free: desugar to a hidden keyset `let` (subtask 1),
+                    // typed and materialized by the ordinary checker/engine —
+                    // dispatch just reads its rows, never scans.
+                    self.hidden_seq += 1;
+                    let view = format!("on#{event}#{}", self.hidden_seq);
+                    self.hidden_lets.push(Stmt::Let(LetDecl {
+                        name: Some(view.clone()),
+                        ty: None,
+                        body: target.clone(),
+                        recursive: false,
+                        span: target.span,
+                    }));
+                    Some((Target::View { view, entity: entity.clone() }, entity.clone()))
+                }
+            }
+            _ => {
+                self.error(target.span, "a mutation target must be a parameter or `Entity where predicate`");
+                None
+            }
+        }
+    }
+
+    /// Check `new Entity from source as (key, value) { … }` (S-42): `source`
+    /// must be a relation-typed event param; each field initializer may
+    /// reference the per-row `key`/`value` binder directly, or be an
+    /// ordinary checked mutation value shared by every minted row. One
+    /// transaction mints a row per source row, in key order —
+    /// `events.rs`'s `MutationIR::InsertFrom` expansion.
+    fn new_from(&mut self, entity: &str, from: &FromClause, fields: &[FieldInit], scope: &Scope, span: Span) -> Option<MutationIR> {
+        let ExprKind::Ident(param) = &from.source.kind else {
+            self.error(from.source.span, "`new … from` needs a relation-typed event parameter");
+            return None;
+        };
+        let Some((_, pty)) = scope.iter().find(|(n, _)| n == param) else {
+            self.error(from.source.span, format!("unknown parameter `{param}`"));
+            return None;
+        };
+        let ParamTy::Rel(key_ty, val_ty) = pty.clone() else {
+            self.error(from.source.span, format!("`{param}` is not a relation-typed parameter"));
+            return None;
+        };
+        let key_vt = self.named_val_ty(&key_ty, span)?;
+        let val_vt = self.named_val_ty(&val_ty, span)?;
+        let mut fs = Vec::new();
+        for f in fields {
+            let (field_val, ty) = match &f.value.kind {
+                ExprKind::Ident(n) if *n == from.key => (FromField::Key, key_vt.clone()),
+                ExprKind::Ident(n) if *n == from.value => (FromField::Value, val_vt.clone()),
+                _ => {
+                    let (v, ty) = self.val(&f.value, scope)?;
+                    (FromField::Val(v), ty)
+                }
+            };
+            self.check_field_value(entity, &f.name, &ty, f.value.span)?;
+            fs.push((f.name.clone(), field_val));
+        }
+        Some(MutationIR::InsertFrom { entity: entity.to_string(), param: param.clone(), fields: fs })
+    }
+
+    /// A `ParamTy::Rel` side's name (an entity or a scalar type name)
+    /// resolved to a mutation-value `ValTy`, reusing `resolve_val_ty`'s name
+    /// resolution against a synthetic `Type` — there's no source `Type` here,
+    /// the param was already checked once when the event was declared.
+    fn named_val_ty(&mut self, name: &str, span: Span) -> Option<ValTy> {
+        self.resolve_val_ty(&Type { kind: TypeKind::Named(name.to_string()), span })
     }
 
     /// The declared params of `event`, checking the call's arity.
@@ -382,23 +644,14 @@ impl Desugar {
         Some(def.params.clone())
     }
 
-    /// The wire type of a mutation value: a literal's own, or a parameter's.
-    fn val_ty(v: &ValRef, scope: &Scope) -> Option<ParamTy> {
-        match v {
-            ValRef::Arg(n) => scope.iter().find(|(s, _)| s == n).map(|(_, t)| t.clone()),
-            ValRef::Lit(l) => Some(ParamTy::Scalar(match l {
-                Lit::Int(_) => Encoding::Int,
-                Lit::Decimal(_) => Encoding::Money,
-                Lit::Str(_) => Encoding::Text,
-                Lit::Atom(_) => Encoding::Atom,
-                Lit::Date { .. } => Encoding::Text,
-            })),
-        }
-    }
-
     /// Check one `do` argument against the callee's declared param type.
-    fn check_arg(&mut self, v: &ValRef, want: &ParamTy, scope: &Scope, span: Span, event: &str, pname: &str) -> Option<()> {
-        if Self::val_ty(v, scope).as_ref() != Some(want) {
+    fn check_arg(&mut self, got: &ValTy, want: &ParamTy, span: Span, event: &str, pname: &str) -> Option<()> {
+        let ok = match (want, got) {
+            (ParamTy::Id(e), ValTy::Id(g)) => e == g,
+            (ParamTy::Scalar(enc), got) => *enc == got.encoding(),
+            _ => false,
+        };
+        if !ok {
             self.error(span, format!("`do {event}`: argument for `{pname}` has the wrong type"));
             return None;
         }
@@ -407,13 +660,13 @@ impl Desugar {
 
     /// Check a field initializer/update against the entity's declared field
     /// type (the checker never sees handler bodies, so this is their typing).
-    fn check_field_value(&mut self, entity: &str, field: &str, v: &ValRef, scope: &Scope, span: Span) -> Option<()> {
+    fn check_field_value(&mut self, entity: &str, field: &str, got: &ValTy, span: Span) -> Option<()> {
         let Some(ty) = self.entity_fields.get(entity).and_then(|f| f.get(field)).cloned() else {
             self.error(span, format!("no field `{field}` on `{entity}`"));
             return None;
         };
-        let want = self.param_ty(&ty)?;
-        if Self::val_ty(v, scope).as_ref() != Some(&want) {
+        let want = self.resolve_val_ty(&ty)?;
+        if !valty_assignable(&want, got) {
             self.error(span, format!("field `{field}` of `{entity}` expects `{}`", show_type(&ty)));
             return None;
         }
@@ -435,30 +688,179 @@ impl Desugar {
         }
     }
 
-    fn val(&mut self, e: &Expr, scope: &Scope) -> Option<ValRef> {
-        match &e.kind {
-            ExprKind::Str(s) => Some(ValRef::Lit(Lit::Str(s.clone()))),
-            ExprKind::Int(n) => Some(ValRef::Lit(Lit::Int(*n))),
-            ExprKind::Decimal(s) => Some(ValRef::Lit(Lit::Decimal(s.clone()))),
-            ExprKind::Atom(a) => Some(ValRef::Lit(Lit::Atom(a.clone()))),
-            ExprKind::Date { year, month, day } => Some(ValRef::Lit(Lit::Date {
-                year: *year,
-                month: *month,
-                day: *day,
-            })),
-            ExprKind::Ident(name) => {
-                if scope.iter().any(|(n, _)| n == name) {
-                    Some(ValRef::Arg(name.clone()))
-                } else {
-                    self.error(e.span, format!("unknown parameter `{name}` in mutation value"));
+    /// The wire type (§ old `param_ty`) resolved to a mutation-value `ValTy`:
+    /// entity ids by name (no `SortId`s exist yet — desugaring runs before
+    /// the checker mints sorts) and atom (co)products with every alternative
+    /// named, so `not` (S-40) knows the other one.
+    fn resolve_val_ty(&mut self, ty: &Type) -> Option<ValTy> {
+        match &ty.kind {
+            TypeKind::Named(n) => match n.as_str() {
+                "Int" => Some(ValTy::Int),
+                "Money" => Some(ValTy::Money),
+                "Text" => Some(ValTy::Text),
+                "Date" => Some(ValTy::Date),
+                // `Bool` sugar (MVP-PLAN §2.9/decision 3) isn't implemented
+                // yet, so it's an opaque atom: `not` on one is rejected
+                // rather than guessing which atom means "true".
+                "Bool" => Some(ValTy::Atoms(Vec::new())),
+                _ if self.entity_fields.contains_key(n) => Some(ValTy::Id(n.clone())),
+                _ if n.strip_suffix("ID").is_some_and(|e| self.entity_fields.contains_key(e)) => {
+                    Some(ValTy::Id(n.strip_suffix("ID").unwrap().to_string()))
+                }
+                _ => {
+                    self.error(ty.span, format!("unknown type `{n}`"));
                     None
                 }
+            },
+            TypeKind::AtomSingleton(a) => Some(ValTy::Atoms(vec![a.clone()])),
+            TypeKind::Coproduct(elems) => {
+                let mut atoms = Vec::new();
+                for e in elems {
+                    match &e.kind {
+                        TypeKind::AtomSingleton(a) => atoms.push(a.clone()),
+                        _ => {
+                            self.error(e.span, "a coproduct's members must all be atoms");
+                            return None;
+                        }
+                    }
+                }
+                Some(ValTy::Atoms(atoms))
             }
-            _ => {
-                self.error(e.span, "mutation values may be literals or parameters only (expressions arrive in MVP-PLAN S-40)");
+            TypeKind::Arrow(..) => {
+                self.error(ty.span, "expected a value type here, found a relation type `->`");
+                None
+            }
+            TypeKind::Product(..) => {
+                self.error(ty.span, "product types are not supported in a mutation value yet");
                 None
             }
         }
+    }
+
+    /// Check a mutation value: a literal or a bare parameter keeps the
+    /// simple `ValRef` shape; anything else is a checked expression
+    /// (`ValRef::Expr`, S-40).
+    fn val(&mut self, e: &Expr, scope: &Scope) -> Option<(ValRef, ValTy)> {
+        match &e.kind {
+            ExprKind::Str(s) => Some((ValRef::Lit(Lit::Str(s.clone())), ValTy::Text)),
+            ExprKind::Int(n) => Some((ValRef::Lit(Lit::Int(*n)), ValTy::Int)),
+            ExprKind::Decimal(s) => Some((ValRef::Lit(Lit::Decimal(s.clone())), ValTy::Money)),
+            ExprKind::Atom(a) => Some((ValRef::Lit(Lit::Atom(a.clone())), ValTy::Atoms(vec![a.clone()]))),
+            ExprKind::Date { year, month, day } => Some((
+                ValRef::Lit(Lit::Date { year: *year, month: *month, day: *day }),
+                ValTy::Date,
+            )),
+            ExprKind::Ident(name) => match scope.iter().find(|(n, _)| n == name) {
+                Some((_, pty)) => Some((ValRef::Arg(name.clone()), scope_val_ty(pty))),
+                None => {
+                    self.error(e.span, format!("unknown parameter `{name}` in mutation value"));
+                    None
+                }
+            },
+            _ => {
+                let (ve, ty) = self.val_expr(e, scope)?;
+                Some((ValRef::Expr(ve), ty))
+            }
+        }
+    }
+
+    /// A compound mutation-value expression (MVP-PLAN S-40, §2.10: "Rex
+    /// expressions evaluated at a key"). Every leaf is a literal or a
+    /// handler param, so this is a point-evaluation sublanguage: evaluating
+    /// one always yields exactly one value, never a relation — it does not
+    /// reuse `check_rel`, which types the general relational language
+    /// (ambient domains ranging over whole entities).
+    fn val_expr(&mut self, e: &Expr, scope: &Scope) -> Option<(ValExpr, ValTy)> {
+        match &e.kind {
+            ExprKind::Str(s) => Some((ValExpr::Lit(Lit::Str(s.clone())), ValTy::Text)),
+            ExprKind::Int(n) => Some((ValExpr::Lit(Lit::Int(*n)), ValTy::Int)),
+            ExprKind::Decimal(s) => Some((ValExpr::Lit(Lit::Decimal(s.clone())), ValTy::Money)),
+            ExprKind::Atom(a) => Some((ValExpr::Lit(Lit::Atom(a.clone())), ValTy::Atoms(vec![a.clone()]))),
+            ExprKind::Date { year, month, day } => Some((
+                ValExpr::Lit(Lit::Date { year: *year, month: *month, day: *day }),
+                ValTy::Date,
+            )),
+            ExprKind::Ident(name) => match scope.iter().find(|(n, _)| n == name) {
+                Some((_, pty)) => Some((ValExpr::Param(name.clone()), scope_val_ty(pty))),
+                None => {
+                    self.error(e.span, format!("unknown parameter `{name}`"));
+                    None
+                }
+            },
+            ExprKind::Compose(a, b) => {
+                let (va, ta) = self.val_expr(a, scope)?;
+                let ExprKind::Ident(field) = &b.kind else {
+                    self.error(b.span, "expected a field name after `.`");
+                    return None;
+                };
+                let ValTy::Id(entity) = &ta else {
+                    self.error(a.span, format!("`.{field}` needs an entity value on its left, found `{}`", show_valty(&ta)));
+                    return None;
+                };
+                let Some(fty) = self.entity_fields.get(entity).and_then(|f| f.get(field)).cloned() else {
+                    self.error(b.span, format!("no field `{field}` on `{entity}`"));
+                    return None;
+                };
+                let vt = self.resolve_val_ty(&fty)?;
+                Some((ValExpr::Field(Box::new(va), field.clone()), vt))
+            }
+            ExprKind::Not(inner) => {
+                let (vi, ti) = self.val_expr(inner, scope)?;
+                let ValTy::Atoms(atoms) = &ti else {
+                    self.error(inner.span, format!("`not` needs a two-valued (boolean-like) operand, found `{}`", show_valty(&ti)));
+                    return None;
+                };
+                if atoms.len() != 2 {
+                    self.error(inner.span, format!("`not` needs exactly two alternatives, found {}", atoms.len()));
+                    return None;
+                }
+                let pair = [atoms[0].clone(), atoms[1].clone()];
+                Some((ValExpr::Not(Box::new(vi), pair), ti))
+            }
+            ExprKind::Add(a, b) => self.val_arith(a, b, scope, ArithKind::Add, false),
+            ExprKind::Sub(a, b) => self.val_arith(a, b, scope, ArithKind::Sub, false),
+            ExprKind::Div(a, b) => self.val_arith(a, b, scope, ArithKind::Div, true),
+            ExprKind::Mod(a, b) => self.val_arith(a, b, scope, ArithKind::Mod, true),
+            ExprKind::Compare { op, lhs: Some(lhs), rhs } => {
+                let (va, ta) = self.val_expr(lhs, scope)?;
+                let (vb, tb) = self.val_expr(rhs, scope)?;
+                if !(ta.is_numeric() && tb.is_numeric()) && ta != tb {
+                    self.error(e.span, format!("cannot compare `{}` with `{}`", show_valty(&ta), show_valty(&tb)));
+                    return None;
+                }
+                Some((
+                    ValExpr::Compare(*op, Box::new(va), Box::new(vb)),
+                    ValTy::Atoms(vec!["true".to_string(), "false".to_string()]),
+                ))
+            }
+            _ => {
+                self.error(e.span, "this expression is not supported in a mutation value yet (MVP-PLAN S-40/S-52)");
+                None
+            }
+        }
+    }
+
+    fn val_arith(
+        &mut self,
+        a: &Expr,
+        b: &Expr,
+        scope: &Scope,
+        kind: ArithKind,
+        int_only: bool,
+    ) -> Option<(ValExpr, ValTy)> {
+        let (va, ta) = self.val_expr(a, scope)?;
+        let (vb, tb) = self.val_expr(b, scope)?;
+        if !ta.is_numeric() || !tb.is_numeric() {
+            self.error(a.span, format!("arithmetic needs numeric operands, got `{}` and `{}`", show_valty(&ta), show_valty(&tb)));
+            return None;
+        }
+        if int_only && (ta != ValTy::Int || tb != ValTy::Int) {
+            self.error(a.span, "`/`/`%` need `Int` operands");
+            return None;
+        }
+        let money = ta == ValTy::Money || tb == ValTy::Money;
+        let result = if money { ValTy::Money } else { ValTy::Int };
+        Some((ValExpr::Arith(kind, Box::new(va), Box::new(vb), money), result))
     }
 
     fn view(&mut self, v: &ViewDecl) {

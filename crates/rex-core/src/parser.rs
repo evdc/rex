@@ -211,7 +211,7 @@ impl Parser {
         match self.peek() {
             TokenKind::KwEntity => self.parse_entity().map(Stmt::Entity),
             TokenKind::KwLet => self.parse_let().map(Stmt::Let),
-            TokenKind::KwView => self.parse_view().map(Stmt::View),
+            TokenKind::KwView => self.parse_view().map(|v| Stmt::View(Box::new(v))),
             TokenKind::KwState => self.parse_state().map(Stmt::State),
             TokenKind::KwRel => self.parse_rel().map(Stmt::Rel),
             TokenKind::KwEvent => self.parse_event().map(Stmt::Event),

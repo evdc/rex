@@ -495,48 +495,104 @@ same gap) triggers a rebalance that appears in the log.
 
 ### E3 — Handler expressiveness
 
-#### S-40 Mutation values as expressions over the pre-event snapshot (L, deps S-21)
-*Goal:* `t:completed := not t:completed`, `:n := :n * 2`, `set filter = f`.
-*Files:* `types/check.rs`, `types/shape_ir.rs` (`ValRef::Expr(TExpr)`),
-`dbsp/engine.rs`, `eval/interp.rs` (evaluation against integrals).
-*Subtasks:*
-1. Check a mutation value as a Rex expression whose ambient domain is the
-   target's sort; result must be functional (`Target -> FieldTy`).
-2. `Interp` gains a constructor over `&Circuit` input integrals (read-only
-   view of base tables) — the point-evaluation path of §2.3.
-3. `push_set` resolves `ValRef::Expr` by evaluating at the target key before
-   building the transaction (all reads pre-step).
-4. `not`, arithmetic on co-keyed value columns, `if … then … else` as
-   expressions; settle the `+` collision per §2.9 and document in SPEC §11.
-*Acceptance:* `tests/dispatch.rs`: toggle, increment, conditional; oracle
-test that interp-at-key equals batch eval of the same expression.
+#### S-40 Mutation values as expressions over the pre-event snapshot (L, deps S-21) — **done 2026-09-18** (`types/shape_ir.rs`'s `ValExpr`, `types/view.rs`'s `val`/`val_expr`/`val_arith`/`resolve_val_ty`, `events.rs`'s `eval_val_expr`; `tests/dispatch.rs`'s S-40 section; also fixed a latent `arith_values` bug — see deviations)
+*Goal:* `t.completed := not t.completed`, `t.n := t.n + 1`.
+*Deviations from the literal subtasks:* view desugaring (which checks `on`
+bodies) runs *before* the checker mints entity sorts, so it has no `Env`/
+`SortId`s to check mutation values as real `TExpr` via `check_rel` without a
+much larger reordering of `check()`. And even with that reordering,
+`check_rel`'s ambient-domain model is built to type whole relations
+(literals ground to `dom -> lit` over every id of an entity, per §4) — wrong
+shape for a value that must point-evaluate to exactly one row per dispatch.
+So mutation values got their own small sublanguage instead (§2.10's "Rex
+expressions evaluated at a key" taken literally): `types/shape_ir.rs`'s
+`ValExpr` (`Lit`/`Param`/`Field`/`Not`/`Arith`/`Compare`), checked in
+`types/view.rs` against the same `entity_fields: HashMap<Entity, HashMap<Field,
+Type>>` map view desugaring already collects (a parallel `ValTy`, not the
+checker's `ValueTy` — no `SortId`s needed), and evaluated in `events.rs`'s
+`eval_val_expr` by reading `Engine`'s live `Circuit` input integrals directly
+(`InputKey::Field` + one indexed `.row(id)` lookup) rather than materializing
+a `BTreeRelation` through `eval::interp::eval_expr_with`/a `Store` impl over
+`&Circuit` — a real point read, not "evaluate the whole field relation and
+take one row". `not` bakes its two-atom pair into the IR at check time
+(`Not(Box<ValExpr>, [String; 2])`) since the evaluator has no type
+environment to consult. `if … then … else` stays unimplemented (`check.rs`
+already attributed it to S-52, not S-40, before this story started) and
+`set filter = f` stays unimplemented (`state`, S-51). Added `Compare` (not
+in the subtask list) so "conditional" has a real acceptance case: `t.big :=
+t.n > limit` decodes to the atom `@true`/`@false`.
+*Bug fixed on the way:* `eval::interp::arith_values` unconditionally read
+operands through `as_cents()` (`Int` ×100), so a pure `Int + Int` (the
+`money` flag false) silently returned a result scaled by 100 — never
+exercised by an existing test since no prior test dispatched arithmetic on
+two `Int`s. Now branches on `money` to pick `as_cents()` vs `as_i64()`.
+*Acceptance:* `tests/dispatch.rs`: `toggle_flips_a_two_atom_field`,
+`increment_adds_to_the_fields_current_value`,
+`conditional_set_from_a_comparison`,
+`increment_matches_an_independent_batch_oracle` (computes the expected value
+via a *fresh* `eval::interp::run` of the source plus the shared
+`arith_values` kernel, independent of the live engine, then checks the
+engine's dispatch produced exactly that).
 
-#### S-41 `where`-targeted bulk update/delete as hidden views (M, deps S-40)
-*Files:* `types/view.rs`, `dbsp/engine.rs`.
-*Subtasks:*
-1. Desugar `Todo where P update {…}` to a hidden `let on#E#k = Todo where P`
-   when `P` is arg-free; dispatch reads the materialized keyset from
-   `circuit.view(name)`.
-2. Arg-dependent `P` (e.g. `where :pos = n`): evaluate via the S-40
-   interpreter path; emit a checker *note* "target evaluated per event
-   (O(N))" so the cost is visible (SPEC §10 spirit).
-3. `Row delete` (no predicate) = retract the whole identity relation in one
-   transaction.
-*Acceptance:* benchmark's `Update` (every 10th row) and `Clear` handlers run
-as one step each; a test asserts the hidden view exists and no scan happens
-for the arg-free case (count interpreter evaluations).
+#### S-41 `where`-targeted bulk update/delete as hidden views (M, deps S-40) — **done 2026-09-21** (`types/shape_ir.rs`'s `Target`, `types/view.rs`'s `Desugar::mutation_target`/`expr_refs_scope`/`rewrite_row_refs`, `events.rs`'s `resolve_target`; `tests/dispatch.rs`'s S-41 section)
+*Goal:* `update Todo where P { … }`, `delete Todo where P`, `delete Todo`.
+*Deviations from the literal subtasks:* the surface is `update`/`delete
+Entity where P` (the existing `HStmt::Update`/`HStmt::Delete` target
+position), not a new `Todo where P update {…}` postfix form — no parser
+work was needed, `target: Expr` already accepts `ExprKind::Where`.
+Arg-freeness is checked syntactically (`expr_refs_scope`: does `P` mention
+any event param?) rather than by running the S-40 interpreter and observing
+whether it needed an arg — cheaper, and conservative in the safe direction
+(a shape the walk doesn't recognize counts as arg-dependent, so the worst
+case is an avoidable scan, never a wrongly-cached view). The arg-dependent
+scan predicate is checked as an ordinary `ValExpr` (not a fresh mechanism):
+a `.field` path is rewritten (`rewrite_row_refs`) to reference a synthetic
+scope param (`shape_ir::ROW_SELF`), so `val_expr`'s existing `Field` case
+handles it unchanged, and `events.rs::resolve_target`'s scan binds
+`ROW_SELF` to each candidate row in turn using the same `eval_val_expr` S-40
+already has. No checker *note* diagnostic was added for the O(N) scan cost
+(SPEC §10 spirit) — nothing currently renders a note-severity diagnostic
+anywhere in the checker, so this would have been the first, out of scope
+for a story about dispatch semantics. The hidden view name is
+`on#{event}#{seq}` with `seq` a single counter across the whole program
+(not per-event as the literal template suggests) — simpler, still unique,
+still legible. Hidden views are collected during Pass 0 (`on` handlers are
+checked before entities are re-emitted) but spliced into the program after
+every other statement, so a hidden view — which reads an entity — never
+lands before that entity regardless of source order.
+*Acceptance:* `tests/dispatch.rs`: `delete_with_no_predicate_retracts_every_row`
+(subtask 3), `where_delete_arg_free_uses_a_materialized_hidden_view` (asserts
+the hidden view exists and already holds exactly the matching keys *before*
+any dispatch — the proof that dispatch reads a materialized keyset rather
+than scanning), `where_update_arg_dependent_scans_by_predicate` (subtask 2).
 
-#### S-42 `insert … from` with relation-valued params (M, deps S-40)
-*Files:* parser (done in S-10), `types/check.rs`, `dbsp/engine.rs`, wasm.
-*Subtasks:*
-1. Check `insert Row from rows { label: :value, pos: :key }` where `rows : Int -> Text`
-   is an event param; the per-row ambient domain is the param's left sort.
-2. Engine: one transaction minting N ids; order of minting = key order.
-3. `do Run(rows: makeRows(1000))` — client-side extractor producing
-   `[[k,v,1]…]`; add `Extractor::Js(name)` for benchmark's `utils.js`
-   (`import js` equivalent) — the only escape hatch, and it lives in the
-   DOM layer by construction.
-*Acceptance:* benchmark `Run(10000)` is one step; replay reproduces labels.
+#### S-42 `insert … from` with relation-valued params (M, deps S-40) — **done 2026-09-21** (`types/shape_ir.rs`'s `FromField`/`MutationIR::InsertFrom`, `types/view.rs`'s `Desugar::new_from`/`named_val_ty`, `events.rs`'s `RelArgs`/`InsertFrom` expansion/`check_param` split, `rex-wasm/src/lib.rs`'s `dispatch`; `tests/dispatch.rs`'s S-42 section)
+*Goal:* mint one entity per row of a relation-typed event param, in one transaction.
+*Deviations from the literal subtasks:* the surface is the existing `new
+Entity from source as (k, v) { … }` (parsed since S-10 as `HStmt::New`'s
+`FromClause`), not a new `insert … from` keyword — `insert` doesn't exist as
+surface syntax anywhere in the implemented grammar, and `new … from` is
+exactly this shape already. `rows : Int -> Text`'s two sides don't need to
+be entities: `Desugar::named_val_ty` resolves either side (an entity or a
+scalar type name) to a mutation-value `ValTy` by reusing `resolve_val_ty`
+against a synthesized `Type`, so `pos: k` / `label: v` type-check against
+the target entity's declared fields exactly like any other mutation value.
+`dispatch_event`'s public API changed from `&HashMap<String, Value>` to
+`&HashMap<String, ArgValue>` (`ArgValue` already existed, added for S-21's
+log with S-42 in mind) so a relation-typed arg can cross the boundary
+alongside scalars; `check_param` split into a `ParamTy`/`ArgValue` shape
+match plus the original scalar checks, unchanged. `ops_for_event` (the
+replay path) gained real `ArgValue::Rel` handling as a side effect — it
+previously errored "not supported yet" on any relation-valued logged arg,
+which was a latent replay gap for `@rebalance` events sharing the same
+`ArgValue::Rel` shape. Subtask 3 (`Extractor::Js`, a client-side
+`makeRows`/benchmark harness) is out of scope for this pass: it's DOM/JS
+work with no benchmark harness present in this repo, not a `rex-core`
+dispatch concern; the wasm bridge's `dispatch` was extended to decode a
+JSON array arg into `ArgValue::Rel` (previously it errored on any array),
+so the engine side is fully wired for whatever produces the rows.
+*Acceptance:* `tests/dispatch.rs`: `new_from_mints_one_row_per_source_row_in_one_transaction`,
+`new_from_mints_in_key_order` (subtask 2).
 
 ### E4 — `Unit`, `state`, `match`
 

@@ -194,19 +194,28 @@ impl ParamTy {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum MutationIR {
-    /// Set fields of the entity a reference names (a param).
+    /// Set fields of every row `target` names.
     Set {
-        target: Ref,
+        target: Target,
         /// Entity name of the target (for field validation at dispatch).
         entity: String,
         updates: Vec<(String, ValRef)>,
     },
-    /// Retract the entity a reference names.
-    Delete { target: Ref },
+    /// Retract every row `target` names.
+    Delete { target: Target },
     /// Create an entity.
     Insert {
         entity: String,
         fields: Vec<(String, ValRef)>,
+    },
+    /// `new Entity from rows as (k, v) { … }` (S-42): one entity per row of
+    /// a relation-typed event param, minted in one transaction, in the
+    /// param's key order.
+    InsertFrom {
+        entity: String,
+        /// The relation-typed event param supplying rows.
+        param: String,
+        fields: Vec<(String, FromField)>,
     },
     /// Synchronous `do E(args)`: the callee's mutations join this
     /// transaction (same pre-event snapshot); only the outer event is logged.
@@ -214,13 +223,73 @@ pub enum MutationIR {
     Do { event: String, args: Vec<ValRef> },
 }
 
+/// One field initializer of an [`MutationIR::InsertFrom`] row: either the
+/// per-row key/value binder itself, or an ordinary checked mutation value
+/// (a literal or another event param) shared across every minted row.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FromField {
+    Key,
+    Value,
+    Val(ValRef),
+}
+
 /// A reference to a row key: an event param by name.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ref(pub String);
 
-/// A value in a mutation: a literal, or a reference to a param.
+/// The synthetic scope/arg name a `where`-targeted bulk mutation's predicate
+/// uses for "the row currently under test" (S-41): `types/view.rs`'s
+/// `Desugar::mutation_target` rewrites a `.field` path to reference it before
+/// checking the predicate as an ordinary `ValExpr::Field` hop, and
+/// `events.rs`'s per-dispatch scan binds it to each candidate row's id in
+/// turn. Not a legal Rex identifier, so it never collides with a real param.
+pub const ROW_SELF: &str = "#row";
+
+/// Which rows a `Set`/`Delete` acts on (MVP-PLAN S-41).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Target {
+    /// A single row named by a bound event param.
+    One(Ref),
+    /// Every row of `entity`'s whole identity relation — a predicate-free
+    /// `delete Entity` (subtask 3): retract the lot in one transaction.
+    All { entity: String },
+    /// Every row of a hidden materialized keyset view (an arg-free `where`):
+    /// the predicate doesn't read an event arg, so it's desugared to an
+    /// ordinary `let` (`types/view.rs`'s `Desugar::mutation`) and read from
+    /// `Circuit::view` at dispatch time — no per-dispatch scan.
+    View { view: String, entity: String },
+    /// Every row of `entity` whose predicate holds, evaluated at dispatch
+    /// time: the arg-dependent case, O(N) over the entity since the
+    /// predicate can't be precomputed (visible cost, MVP-PLAN §2.10/SPEC §10).
+    Scan { entity: String, pred: ValExpr },
+}
+
+/// A value in a mutation: a literal, a reference to a param, or a checked
+/// expression over the handler's params and their fields (S-40).
 #[derive(Clone, Debug, PartialEq)]
 pub enum ValRef {
     Lit(super::typed::Lit),
     Arg(String),
+    Expr(ValExpr),
+}
+
+/// A mutation-value expression (MVP-PLAN S-40, §2.10: "Rex expressions
+/// evaluated at a key" — a point-evaluation sublanguage over the handler's
+/// bound params, not the general relational language `check_rel` types:
+/// every leaf is a literal or a param, so evaluating one always yields
+/// exactly one value, never a whole relation).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ValExpr {
+    Lit(super::typed::Lit),
+    /// A handler param.
+    Param(String),
+    /// One field hop off another value (`t.completed`, `card.list.title`).
+    Field(Box<ValExpr>, String),
+    /// `not e`: flip a two-atom value to its other alternative (baked in at
+    /// check time, since evaluation has no type environment to consult).
+    Not(Box<ValExpr>, [String; 2]),
+    /// `+ - / %` on numeric operands; `true` when the result is `Money`.
+    Arith(super::typed::ArithKind, Box<ValExpr>, Box<ValExpr>, bool),
+    /// `a OP b`, decoded to the atom `@true`/`@false`.
+    Compare(crate::ast::CmpOp, Box<ValExpr>, Box<ValExpr>),
 }

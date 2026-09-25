@@ -84,12 +84,12 @@ impl RexApp {
     }
 
     /// Dispatch a named event as ONE atomic transaction (S-20). `args_json`
-    /// is a flat object of canonically-encoded values keyed by the event's
-    /// declared parameter names (`{"card":"…","list":"…","pos":"t:a5"}`).
+    /// is a flat object keyed by the event's declared parameter names, each
+    /// value either a canonically-encoded scalar (`"t:a5"`) or — for a
+    /// relation-typed param (S-42) — an array of `[k, v, w]` rows, the same
+    /// shape the shaper already speaks for a view delta.
     /// Returns `{"ids":[…],"deltas":{"views":{…}}}` — `ids` are the keys
-    /// minted by any `new` mutations, in order. A relation-valued arg (an
-    /// array of `[k,v,w]` rows, S-42) parses but isn't wired to the engine
-    /// yet, so it errors clearly rather than as a generic JSON type mismatch.
+    /// minted by any `new` mutations, in order.
     pub fn dispatch(&mut self, name: &str, args_json: &str) -> Result<String, JsValue> {
         let raw: HashMap<String, serde_json::Value> = serde_json::from_str(args_json)
             .map_err(|e| JsValue::from_str(&format!("bad event args: {e}")))?;
@@ -97,12 +97,19 @@ impl RexApp {
         for (k, v) in raw {
             match v {
                 serde_json::Value::String(s) => {
-                    args.insert(k, decode(&s)?);
+                    args.insert(k, rex::dbsp::ArgValue::Value(decode(&s)?));
                 }
-                serde_json::Value::Array(_) => {
-                    return Err(JsValue::from_str(&format!(
-                        "event `{name}`: relation-typed argument `{k}` is not supported yet (MVP-PLAN S-42)"
-                    )));
+                serde_json::Value::Array(rows) => {
+                    let mut rel = Vec::new();
+                    for row in rows {
+                        let bad = || JsValue::from_str(&format!("bad relation row for arg `{k}`"));
+                        let row = row.as_array().ok_or_else(bad)?;
+                        let l = decode(row.first().and_then(|x| x.as_str()).ok_or_else(bad)?)?;
+                        let r = decode(row.get(1).and_then(|x| x.as_str()).ok_or_else(bad)?)?;
+                        let w = row.get(2).and_then(|x| x.as_i64()).unwrap_or(1);
+                        rel.push((l, r, w));
+                    }
+                    args.insert(k, rex::dbsp::ArgValue::Rel(rel));
                 }
                 _ => return Err(JsValue::from_str(&format!("bad value for arg `{k}`"))),
             }
