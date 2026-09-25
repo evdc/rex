@@ -289,8 +289,12 @@ first input of the row the preceding `do` created at level `c`;
 ## 9. Open questions
 
 1. **Empty groups**: `count(Card by .list)` has no row for an empty list, so
-   the Kanban count text vanishes. `by unit` yields `0` (S-50); per-key
-   defaults need an `else`-style form (`drafts.md`) — not in v1.
+   the Kanban count text vanishes. **Settled for `by unit` (S-50, landed):**
+   grouping by `unit` is a *total* group — its key exists by construction —
+   so it yields the monoid identity, `0`, rather than no row. `Count`/`Sum`
+   have identities; `min`/`max`/`avg` do not and stay absent. Per-key
+   defaults for an ordinary group key still need an `else`-style form
+   (`drafts.md`) — not in v1.
 2. **Many-to-many sugar**: `rel Liked(Message, User)` as a link entity with
    `new Liked(m, u)` / `delete Liked(m, u)`, vs. writing the entity out as
    `chat/app.rex` does now.

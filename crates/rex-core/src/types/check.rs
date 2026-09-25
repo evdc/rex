@@ -111,6 +111,27 @@ impl Checker {
     }
 
     fn run(&mut self, program: &Program) -> Vec<TStmt> {
+        // Pass 0: declare `type`s, so entity fields and `let` annotations can
+        // name them and a bare constructor can resolve to its atom (S-50).
+        for stmt in &program.stmts {
+            if let Stmt::Type(t) = stmt {
+                if self.env.is_type_name(&t.name) {
+                    self.diagnostics.push(Diagnostic::error(
+                        t.span,
+                        format!("type `{}` is already defined", t.name),
+                    ));
+                } else if let Some((ctor, owner)) = self.env.declare_type(&t.name, &t.ctors) {
+                    self.diagnostics.push(Diagnostic::error(
+                        t.span,
+                        format!(
+                            "constructor `{ctor}` is already declared by type `{owner}`; \
+                             a constructor names the atom `@{ctor}`, so it can belong to \
+                             only one type"
+                        ),
+                    ));
+                }
+            }
+        }
         // Pass 1: mint a sort for every entity.
         for stmt in &program.stmts {
             if let Stmt::Entity(e) = stmt {
@@ -188,6 +209,17 @@ impl Checker {
                 "Money" => Ok(ValueTy::Money),
                 "Text" => Ok(ValueTy::Text),
                 "Date" => Ok(ValueTy::Date),
+                // A declared `type` is a coproduct of its constructors' atoms
+                // (S-50). One constructor would be a bare `Atom`, but the
+                // coproduct of one is canonically that atom anyway.
+                _ if self.env.is_type_name(name) => Ok(ValueTy::Coproduct(
+                    self.env
+                        .type_ctors(name)
+                        .expect("checked above")
+                        .iter()
+                        .map(|c| ValueTy::Atom(c.clone()))
+                        .collect(),
+                )),
                 _ => match self.env.resolve_sort(name) {
                     Some(sort) => Ok(ValueTy::Id(sort)),
                     None => self.error(ty.span, format!("unknown type `{name}`")),
@@ -421,6 +453,17 @@ impl Checker {
             // point of `Unit`, grounded by the ambient domain exactly like the
             // literal constants below. It is a built-in name rather than a
             // keyword, so it only wins when nothing else has bound it.
+            // A declared constructor is an atom literal spelled without the
+            // `@` (S-50): `All` is `@All`. Like `unit`, it only wins when
+            // nothing else has bound the name.
+            ExprKind::Ident(name)
+                if self.env.ctor_owner(name).is_some()
+                    && self.env.binding(name).is_none()
+                    && self.env.entity_sort(name).is_none() =>
+            {
+                self.atom_rel(name, dom, span)
+            }
+
             ExprKind::Ident(name) if name == UNIT && self.env.binding(name).is_none() => {
                 let Some(d) = dom else {
                     return self.error(span, "`unit` needs a known domain (add a type annotation)");
@@ -442,18 +485,7 @@ impl Checker {
             // entity-keyed ambient domain co-keys with `:f`. Outside an
             // entity domain (e.g. a top-level `{@a}`-typed `let`, or an `in`
             // set's element type) it stays its own standalone coreflexive.
-            ExprKind::Atom(a) => match &dom {
-                Some(ValueTy::Id(sort)) => Ok(TExpr::new(
-                    TExprKind::Const { lit: Lit::Atom(a.clone()), dom: *sort },
-                    RelTy::new(ValueTy::Id(*sort), ValueTy::Atom(a.clone())),
-                    span,
-                )),
-                _ => Ok(TExpr::new(
-                    TExprKind::Atom(a.clone()),
-                    RelTy::coreflexive(ValueTy::Atom(a.clone())),
-                    span,
-                )),
-            },
+            ExprKind::Atom(a) => self.atom_rel(a, dom, span),
 
             ExprKind::Int(_) => self.constant(expr, dom, ValueTy::Int),
             ExprKind::Decimal(_) => self.constant(expr, dom, ValueTy::Money),
@@ -566,6 +598,23 @@ impl Checker {
             ExprKind::New { .. } => {
                 self.error(span, "`new` may only appear as the body of a `let`")
             }
+        }
+    }
+
+    /// Ground an atom (written `@a`, or as a declared constructor) in the
+    /// ambient domain. See the `ExprKind::Atom` call site for why.
+    fn atom_rel(&mut self, a: &str, dom: Option<ValueTy>, span: Span) -> TResult<TExpr> {
+        match &dom {
+            Some(ValueTy::Id(sort)) => Ok(TExpr::new(
+                TExprKind::Const { lit: Lit::Atom(a.to_string()), dom: *sort },
+                RelTy::new(ValueTy::Id(*sort), ValueTy::Atom(a.to_string())),
+                span,
+            )),
+            _ => Ok(TExpr::new(
+                TExprKind::Atom(a.to_string()),
+                RelTy::coreflexive(ValueTy::Atom(a.to_string())),
+                span,
+            )),
         }
     }
 

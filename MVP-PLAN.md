@@ -596,7 +596,47 @@ so the engine side is fully wired for whatever produces the rows.
 
 ### E4 — `Unit`, `state`, `match`
 
-#### S-50 `Unit` sort and `unit` constant (M, deps S-10) ∥ with E2
+#### S-50 `Unit` sort, `unit` constant, and `type` declarations (M, deps S-10) ∥ with E2 — **done 2026-09-25** (`types/typed.rs`'s `Lit::Unit`/`Total`/`UNIT`, `types/check.rs`'s pass 0 + `atom_rel`, `types/env.rs`'s `declare_type`/`ctor_owner`, `dbsp/node.rs`'s `Node::Aggregate { total, seeded }`, `dbsp/circuit.rs`'s third wake exception, `eval/interp.rs`'s `agg_identity`; `crates/rex-core/tests/unit_sort.rs`, 16 tests)
+*Scope note:* `type` declarations were folded into this story rather than
+left loose — `types/view.rs` already rejected them with *this story's* name
+on the message, and `Unit`-rooted TodoMVC needs `Filter`/`Bool` to exist.
+*Landed as:* `ValueTy::Unit`/`Value::Unit` already existed in the value
+algebra (encoded `u`), and `ground.rs` already treated `Unit` as groundable,
+so the story was smaller than written on the `Unit` side and larger on the
+`type` side.
+- `unit : X -> Unit` checks as a grounded constant relation (`Lit::Unit`),
+  the same machinery as a literal constant, and lowers to
+  `MapConst(identity(dom), Unit)` — no new circuit node. It is a built-in
+  *name*, not a reserved word, so a program binding `unit` shadows it.
+- `count(X by unit)` tags its aggregate `Total::Unit`, since `X by unit`
+  regroups everything under the one `Unit` point and the group key is
+  therefore present whether or not `X` has rows. **This decides the README's
+  open "empty group produces no row" question in the `by unit` direction:** a
+  total group emits its monoid *identity*. `Count`/`Sum` have one;
+  `Min`/`Max` do not and `Avg` is not a monoid, so those still emit nothing.
+  Both evaluators implement it (`tests/dbsp.rs` holds them to each other),
+  the key survives its image emptying so the identity comes *back*, and
+  `Circuit::run`'s dirty-cone skip gained a third fire-from-no-children
+  exception beside `ConstSingleton`/`FixOutput` — with no rows there is no
+  delta to wake the node with.
+- `type Filter = All | Active | Completed` resolves to `{@All | @Active |
+  @Completed}`: **a constructor names its atom verbatim** (§5 decision 3,
+  amended). A bare constructor is an atom literal in expression position,
+  mutation values, and `do` arguments; a binding or param of the same name
+  shadows it; a constructor may belong to only one type. `Bool` is
+  predeclared, which also retires `resolve_val_ty`'s opaque-`Bool`
+  placeholder, so `not t.completed` now knows which two atoms to flip.
+- `Scope` gained the param's resolved mutation-value type: `EventDef` keeps
+  only the wire `ParamTy`, and `Scalar(Encoding::Atom)` cannot say *which*
+  atoms a declared type admits — without it `on SetFilter(f) => t.shown := f`
+  failed against a `Filter` field.
+*Known gaps left for their own stories (surfaced by re-running the ignored
+acceptance programs):* `update Todo { … }` with no `where` reports "unknown
+parameter `Todo` in mutation" — a bulk-update-without-predicate gap in S-41,
+which only did the `delete` case; and relational `not` in a view expression
+(`Todo where not .completed`) is still S-52's `except (where P)`.
+
+*Original story text:*
 *Files:* `types/ty.rs`, `types/env.rs`, `check.rs`, `eval/interp.rs`,
 `dbsp/lower.rs`, `SPEC.md` §3.
 *Subtasks:*
@@ -836,8 +876,14 @@ critical path is ~15 days if tracks are truly parallel.
      intent retraction. Elysium's target-less `then` ("next tick") is not
      needed: handlers already read a consistent snapshot. **MVP implements
      synchronous `do` only** and reserves `cause`/`intent` log fields (S-21).
-3. **`Bool`** is sugar for `{@true | @false}`; `not P` on a filter is
-   `except (where P)`; `checked` extractors and `class.x=` binds use it.
+3. **`Bool`** is sugar for `{@True | @False}` — i.e. the predeclared
+   `type Bool = True | False`; `not P` on a filter is `except (where P)`;
+   `checked` extractors and `class.x=` binds use it. *(Spelling settled in
+   S-50: a constructor names its atom **verbatim**, so `All` is `@All`. This
+   line originally read `{@true | @false}`, written before S-02 introduced
+   constructor syntax; SYNTAX.md §9 already had the verbatim form. Verbatim
+   keeps the mapping reversible and stops a constructor and a hand-written
+   atom literal from silently colliding.)*
 4. **Operators:** `|` union, `&` intersect, `except` difference (raw
    subtraction stays core-only per SPEC §6, so `-` has no relational
    meaning at the surface and `R - S` is a type error suggesting `except`);

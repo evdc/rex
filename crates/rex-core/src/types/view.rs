@@ -53,12 +53,32 @@ pub fn desugar(program: &Program) -> Desugared {
             );
         }
     }
+    // `type Name = A | B` -> its constructors' atoms, written verbatim
+    // (S-50). Collected before pass 0 because `on` handlers are checked
+    // there and a mutation value may name a constructor (`t.done := True`).
+    // `Bool` is predeclared, matching `Env::new`.
+    let mut type_ctors: std::collections::HashMap<String, Vec<String>> = Default::default();
+    type_ctors.insert("Bool".into(), vec!["True".into(), "False".into()]);
+    let mut ctor_type: std::collections::HashMap<String, String> = Default::default();
+    ctor_type.insert("True".into(), "Bool".into());
+    ctor_type.insert("False".into(), "Bool".into());
+    for stmt in &program.stmts {
+        if let Stmt::Type(t) = stmt {
+            for c in &t.ctors {
+                ctor_type.insert(c.clone(), t.name.clone());
+            }
+            type_ctors.insert(t.name.clone(), t.ctors.clone());
+        }
+    }
     let mut d = Desugar {
         stmts: Vec::new(),
         shapes: ShapeProgram::default(),
         diagnostics: Vec::new(),
         attr_seq: 0,
         entity_fields,
+        type_ctors,
+        ctor_type,
+        event_param_types: Default::default(),
         event_spans: Default::default(),
         hidden_lets: Vec::new(),
         hidden_seq: 0,
@@ -99,10 +119,9 @@ pub fn desugar(program: &Program) -> Desugared {
             )),
             // Consumed in pass 0.
             Stmt::Event(_) | Stmt::On(_) => {}
-            Stmt::Type(t) => d.diagnostics.push(Diagnostic::error(
-                t.span,
-                "`type` is not supported yet (MVP-PLAN S-50)".to_string(),
-            )),
+            // Kept for the checker, which turns it into a coproduct of atoms
+            // and registers its constructors (S-50).
+            Stmt::Type(t) => d.stmts.push(Stmt::Type(t.clone())),
             Stmt::Import(i) => d.diagnostics.push(Diagnostic::error(
                 i.span,
                 "`import js` is not supported yet (MVP-PLAN S-42)".to_string(),
@@ -151,6 +170,15 @@ struct Desugar {
     /// field but was meant as a bind (`{ cnt }` instead of `{ :cnt }`), and
     /// (b) pick the wire `Encoding` for a `:field` bind.
     entity_fields: std::collections::HashMap<String, std::collections::HashMap<String, Type>>,
+    /// `type Name` -> its constructors, and the reverse map. Mirrors `Env`'s
+    /// tables; desugaring runs before the checker builds those (S-50).
+    type_ctors: TypeTable,
+    ctor_type: std::collections::HashMap<String, String>,
+    /// Event name -> its params' declared surface types, in order. `EventDef`
+    /// keeps only the wire `ParamTy`, which cannot say *which* atoms a
+    /// declared `type` admits; a handler body needs that to check an
+    /// assignment (S-50).
+    event_param_types: std::collections::HashMap<String, Vec<Type>>,
     /// Event name -> (decl span, `on` span if any); for diagnostics.
     event_spans: std::collections::HashMap<String, (Span, Option<Span>)>,
     /// Hidden keyset `let`s synthesized for an arg-free `where`-targeted bulk
@@ -164,8 +192,16 @@ struct Desugar {
 }
 
 
+/// `type Name` -> its constructors (S-50).
+type TypeTable = std::collections::HashMap<String, Vec<String>>;
+
 /// A name a handler body may reference, with what it denotes.
-type Scope = Vec<(String, ParamTy)>;
+/// A handler param: its name, the wire type it crosses the event boundary
+/// as, and the mutation-value type it has *inside* the handler. The last is
+/// not derivable from the second: `ParamTy::Scalar(Encoding::Atom)` says "an
+/// atom" but not *which* atoms, and a declared `type` (S-50) needs its
+/// constructor list to check against a field of that type.
+type Scope = Vec<(String, ParamTy, ValTy)>;
 
 /// A mutation-value expression's type (MVP-PLAN S-40): coarser than the
 /// checker's `ValueTy` (no `SortId`s exist yet — view desugaring runs before
@@ -239,7 +275,7 @@ fn scope_val_ty(pty: &ParamTy) -> ValTy {
 /// materialized view.
 fn expr_refs_scope(e: &Expr, scope: &Scope) -> bool {
     match &e.kind {
-        ExprKind::Ident(name) => scope.iter().any(|(n, _)| n == name),
+        ExprKind::Ident(name) => scope.iter().any(|(n, _, _)| n == name),
         ExprKind::FieldPath(_)
         | ExprKind::Atom(_)
         | ExprKind::Int(_)
@@ -331,6 +367,7 @@ impl Desugar {
                 Some(ty) => params.push(EventParam { name: p.name.clone(), ty }),
                 None => return,
             }
+            self.event_param_types.entry(e.name.clone()).or_default().push(p.ty.clone());
         }
         self.event_spans.insert(e.name.clone(), (e.span, None));
         self.shapes.events.push(EventDef { name: e.name.clone(), params, body: Vec::new() });
@@ -359,12 +396,22 @@ impl Desugar {
             );
             return;
         }
-        let scope: Scope = o
-            .params
-            .iter()
-            .zip(&decl_params)
-            .map(|(n, p)| (n.clone(), p.ty.clone()))
-            .collect();
+        let decl_types = self.event_param_types.get(&o.event).cloned().unwrap_or_default();
+        let mut scope: Scope = Vec::new();
+        for (i, (n, p)) in o.params.iter().zip(&decl_params).enumerate() {
+            // A relation-typed param has no mutation-value type (it is
+            // expanded row-by-row by `new … from`, S-42), so only a scalar or
+            // id param's declared type is resolved — and `param_ty` already
+            // accepted it, so this cannot fail.
+            let vty = match (&p.ty, decl_types.get(i)) {
+                (ParamTy::Rel(..), _) | (_, None) => scope_val_ty(&p.ty),
+                (_, Some(t)) => {
+                    let t = t.clone();
+                    self.resolve_val_ty(&t).unwrap_or_else(|| scope_val_ty(&p.ty))
+                }
+            };
+            scope.push((n.clone(), p.ty.clone(), vty));
+        }
         let mut body = Vec::new();
         for m in &o.body {
             match self.mutation(m, &scope, None, &o.event) {
@@ -413,7 +460,12 @@ impl Desugar {
     fn param_ty(&mut self, ty: &Type) -> Option<ParamTy> {
         match &ty.kind {
             TypeKind::Named(n) => match n.as_str() {
-                "Int" | "Money" | "Text" | "Date" | "Bool" => Some(ParamTy::Scalar(encoding_of_type(ty))),
+                "Int" | "Money" | "Text" | "Date" => {
+                    Some(ParamTy::Scalar(encoding_of_type(ty, &self.type_ctors)))
+                }
+                // A declared `type` (including `Bool`) crosses the boundary as
+                // an atom (S-50).
+                _ if self.type_ctors.contains_key(n) => Some(ParamTy::Scalar(Encoding::Atom)),
                 _ if self.entity_fields.contains_key(n) => Some(ParamTy::Id(n.clone())),
                 // The sort-name spelling `ListID` names the same entity.
                 _ if n.strip_suffix("ID").is_some_and(|e| self.entity_fields.contains_key(e)) => {
@@ -474,7 +526,7 @@ impl Desugar {
                 // identity relation in one transaction (S-41 subtask 3) —
                 // distinct from a `where`-targeted bulk delete below.
                 if let ExprKind::Ident(name) = &target.kind
-                    && scope.iter().all(|(n, _)| n != name)
+                    && scope.iter().all(|(n, _, _)| n != name)
                 {
                     if !self.entity_fields.contains_key(name) {
                         self.error(target.span, format!("unknown parameter or entity `{name}` in mutation"));
@@ -552,7 +604,11 @@ impl Desugar {
                     // is checked as a point-evaluation `ValExpr`, with a
                     // `.field` path rewritten to read the row under test.
                     let mut pscope = scope.clone();
-                    pscope.push((ROW_SELF.to_string(), ParamTy::Id(entity.clone())));
+                    pscope.push((
+                        ROW_SELF.to_string(),
+                        ParamTy::Id(entity.clone()),
+                        ValTy::Id(entity.clone()),
+                    ));
                     let rewritten = rewrite_row_refs(pred, ROW_SELF);
                     let (ve, ty) = self.val_expr(&rewritten, &pscope)?;
                     if ty != ValTy::Atoms(vec!["true".to_string(), "false".to_string()]) {
@@ -594,7 +650,7 @@ impl Desugar {
             self.error(from.source.span, "`new … from` needs a relation-typed event parameter");
             return None;
         };
-        let Some((_, pty)) = scope.iter().find(|(n, _)| n == param) else {
+        let Some((_, pty, _)) = scope.iter().find(|(n, _, _)| n == param) else {
             self.error(from.source.span, format!("unknown parameter `{param}`"));
             return None;
         };
@@ -675,8 +731,8 @@ impl Desugar {
 
     /// The entity of a mutation target named in `scope`.
     fn target_entity(&mut self, name: &str, scope: &Scope, span: Span) -> Option<String> {
-        match scope.iter().find(|(n, _)| n == name) {
-            Some((_, ParamTy::Id(e))) => Some(e.clone()),
+        match scope.iter().find(|(n, _, _)| n == name) {
+            Some((_, ParamTy::Id(e), _)) => Some(e.clone()),
             Some(_) => {
                 self.error(span, format!("`{name}` is not an entity id and cannot be a mutation target"));
                 None
@@ -699,10 +755,12 @@ impl Desugar {
                 "Money" => Some(ValTy::Money),
                 "Text" => Some(ValTy::Text),
                 "Date" => Some(ValTy::Date),
-                // `Bool` sugar (MVP-PLAN §2.9/decision 3) isn't implemented
-                // yet, so it's an opaque atom: `not` on one is rejected
-                // rather than guessing which atom means "true".
-                "Bool" => Some(ValTy::Atoms(Vec::new())),
+                // A declared `type` (including the predeclared `Bool`) is the
+                // coproduct of its constructors' atoms, so `not` on one knows
+                // which two atoms to flip between (S-50).
+                _ if self.type_ctors.contains_key(n) => {
+                    Some(ValTy::Atoms(self.type_ctors[n].clone()))
+                }
                 _ if self.entity_fields.contains_key(n) => Some(ValTy::Id(n.clone())),
                 _ if n.strip_suffix("ID").is_some_and(|e| self.entity_fields.contains_key(e)) => {
                     Some(ValTy::Id(n.strip_suffix("ID").unwrap().to_string()))
@@ -750,8 +808,14 @@ impl Desugar {
                 ValRef::Lit(Lit::Date { year: *year, month: *month, day: *day }),
                 ValTy::Date,
             )),
-            ExprKind::Ident(name) => match scope.iter().find(|(n, _)| n == name) {
-                Some((_, pty)) => Some((ValRef::Arg(name.clone()), scope_val_ty(pty))),
+            ExprKind::Ident(name) => match scope.iter().find(|(n, _, _)| n == name) {
+                Some((_, _, vty)) => Some((ValRef::Arg(name.clone()), vty.clone())),
+                // A constructor is an atom literal spelled without the `@`
+                // (S-50); a param of the same name shadows it.
+                None if self.ctor_type.contains_key(name) => Some((
+                    ValRef::Lit(Lit::Atom(name.clone())),
+                    ValTy::Atoms(vec![name.clone()]),
+                )),
                 None => {
                     self.error(e.span, format!("unknown parameter `{name}` in mutation value"));
                     None
@@ -780,8 +844,14 @@ impl Desugar {
                 ValExpr::Lit(Lit::Date { year: *year, month: *month, day: *day }),
                 ValTy::Date,
             )),
-            ExprKind::Ident(name) => match scope.iter().find(|(n, _)| n == name) {
-                Some((_, pty)) => Some((ValExpr::Param(name.clone()), scope_val_ty(pty))),
+            ExprKind::Ident(name) => match scope.iter().find(|(n, _, _)| n == name) {
+                Some((_, _, vty)) => Some((ValExpr::Param(name.clone()), vty.clone())),
+                // A constructor is an atom literal spelled without the `@`
+                // (S-50); a param of the same name shadows it, as above.
+                None if self.ctor_type.contains_key(name) => Some((
+                    ValExpr::Lit(Lit::Atom(name.clone())),
+                    ValTy::Atoms(vec![name.clone()]),
+                )),
                 None => {
                     self.error(e.span, format!("unknown parameter `{name}`"));
                     None
@@ -1161,12 +1231,12 @@ impl LevelWalk<'_> {
                 return Encoding::Text;
             };
             ty = Some(t);
-            match entity_of_type(t) {
+            match entity_of_type(t, &self.d.type_ctors) {
                 Some(next) => entity = next,
                 None => break,
             }
         }
-        ty.map(encoding_of_type).unwrap_or(Encoding::Text)
+        ty.map(|t| encoding_of_type(t, &self.d.type_ctors)).unwrap_or(Encoding::Text)
     }
 
     /// Lower a DOM handler into an [`EventBinding`]: extract params, then
@@ -1216,6 +1286,12 @@ impl LevelWalk<'_> {
                         let (val, got) = match &a.kind {
                             ExprKind::Ident(n) => match scope.iter().find(|(s, _, _)| s == n) {
                                 Some((_, t, r)) => (r.clone(), t.clone()),
+                                // A constructor is an atom literal spelled
+                                // without the `@` (S-50).
+                                None if self.d.ctor_type.contains_key(n) => (
+                                    ArgRef::Lit(Lit::Atom(n.clone())),
+                                    ParamTy::Scalar(Encoding::Atom),
+                                ),
                                 None => {
                                     self.d.error(a.span, format!("unknown name `{n}`: not a binder in scope or a handler param"));
                                     return None;
@@ -1357,13 +1433,15 @@ fn show_type(ty: &Type) -> String {
     }
 }
 
-fn encoding_of_type(ty: &Type) -> Encoding {
+/// `types` is the declared-`type` table (S-50); a name in it is a coproduct
+/// of atoms, not an entity, so it encodes as an atom.
+fn encoding_of_type(ty: &Type, types: &TypeTable) -> Encoding {
     match &ty.kind {
         TypeKind::Named(n) => match n.as_str() {
             "Int" => Encoding::Int,
             "Money" => Encoding::Money,
             "Text" => Encoding::Text,
-            "Bool" => Encoding::Atom,
+            _ if types.contains_key(n) => Encoding::Atom,
             _ => Encoding::Id, // an entity type
         },
         TypeKind::AtomSingleton(_) | TypeKind::Coproduct(_) => Encoding::Atom,
@@ -1371,9 +1449,12 @@ fn encoding_of_type(ty: &Type) -> Encoding {
     }
 }
 
-fn entity_of_type(ty: &Type) -> Option<String> {
+fn entity_of_type(ty: &Type, types: &TypeTable) -> Option<String> {
     match &ty.kind {
-        TypeKind::Named(n) if !matches!(n.as_str(), "Int" | "Money" | "Text" | "Date" | "Unit" | "Bool") => {
+        TypeKind::Named(n)
+            if !matches!(n.as_str(), "Int" | "Money" | "Text" | "Date" | "Unit")
+                && !types.contains_key(n) =>
+        {
             Some(n.clone())
         }
         _ => None,

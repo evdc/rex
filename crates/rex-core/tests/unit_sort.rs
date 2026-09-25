@@ -208,3 +208,118 @@ let echo : Todo -> Text = unit
 "#;
     assert!(errors(src).is_empty(), "{:?}", errors(src));
 }
+
+// --- S-50 (2/2): `type` declarations ---------------------------------------
+//
+// A constructor names its atom verbatim: `type Filter = All | ...` makes `All`
+// mean `@All`. Nothing is lowercased, so a constructor and a hand-written atom
+// literal never silently become the same thing, and the mapping is reversible.
+
+#[test]
+fn a_type_declares_a_coproduct_of_its_constructors() {
+    let src = r#"
+type Filter = All | Active | Completed
+entity Todo { text: Text, shown: Filter }
+let shown : Todo -> Filter = .shown
+"#;
+    assert!(errors(src).is_empty(), "{:?}", errors(src));
+}
+
+#[test]
+fn a_constructor_is_its_atom_written_without_the_at_sign() {
+    // `@All` and `All` are the same value, so the two spellings are
+    // interchangeable and a filter written either way type-checks.
+    let src = r#"
+type Filter = All | Active | Completed
+entity Todo { text: Text, shown: Filter }
+let bare : Todo -> Filter = (Todo where .shown = All) . .shown
+let at   : Todo -> Filter = (Todo where .shown = @All) . .shown
+"#;
+    assert!(errors(src).is_empty(), "{:?}", errors(src));
+}
+
+#[test]
+fn bool_is_predeclared() {
+    // MVP-PLAN §5 decision 3, with this story's verbatim spelling: `Bool` is
+    // sugar for `True | False`, i.e. `{@True | @False}`.
+    let src = r#"
+entity Todo { text: Text, completed: Bool }
+let done : Todo -> Bool = .completed
+let finished : Todo = Todo where .completed = True
+"#;
+    assert!(errors(src).is_empty(), "{:?}", errors(src));
+}
+
+#[test]
+fn not_flips_a_declared_two_constructor_type() {
+    // The payoff for `Bool` no longer being an opaque atom: `not` knows which
+    // two atoms to flip between, so TodoMVC's toggle checks.
+    let src = r#"
+entity Todo { text: Text, completed: Bool }
+event ToggleTodo(t: Todo)
+on ToggleTodo(t) => t.completed := not t.completed
+"#;
+    assert!(errors(src).is_empty(), "{:?}", errors(src));
+}
+
+#[test]
+fn a_constructor_belongs_to_only_one_type() {
+    // Two types sharing a constructor would make a bare `Done` ambiguous,
+    // since the atom it names carries no type tag.
+    let src = r#"
+type Status = Open | Done
+type Task = Todo | Done
+"#;
+    let errs = errors(src);
+    assert!(
+        errs.iter().any(|e| e.contains("constructor `Done` is already declared")),
+        "expected a clash error, got {errs:?}"
+    );
+}
+
+#[test]
+fn redeclaring_a_type_is_an_error() {
+    let errs = errors("type Filter = All | Active\ntype Filter = One | Two\n");
+    assert!(
+        errs.iter().any(|e| e.contains("type `Filter` is already defined")),
+        "got {errs:?}"
+    );
+}
+
+#[test]
+fn a_constructor_is_shadowed_by_a_binding_of_the_same_name() {
+    // Same rule as `unit`: the built-in meaning only applies to a free name.
+    let src = r#"
+type Filter = All | Active
+entity Todo { text: Text }
+let All : Todo -> Text = .text
+let echo : Todo -> Text = All
+"#;
+    assert!(errors(src).is_empty(), "{:?}", errors(src));
+}
+
+#[test]
+fn a_declared_type_works_as_an_event_parameter() {
+    // The event boundary has to know a declared type too, or `type` is only
+    // half implemented: `SetFilter` carries an atom across it.
+    let src = r#"
+type Filter = All | Active | Completed
+entity Todo { text: Text, shown: Filter }
+event SetFilter(t: Todo, f: Filter)
+on SetFilter(t, f) => t.shown := f
+"#;
+    assert!(errors(src).is_empty(), "{:?}", errors(src));
+}
+
+#[test]
+fn a_field_of_declared_type_is_not_mistaken_for_an_entity() {
+    // `shown: Filter` used to look like a foreign key to an entity called
+    // `Filter`, which would walk a field path into nothing.
+    let src = r#"
+type Filter = All | Active
+entity Todo { text: Text, shown: Filter }
+event Show(t: Todo)
+on Show(t) => t.shown := All
+"#;
+    assert!(errors(src).is_empty(), "{:?}", errors(src));
+}

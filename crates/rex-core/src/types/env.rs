@@ -26,11 +26,54 @@ pub struct Env {
     field_order: HashMap<usize, Vec<String>>,
     /// `let` name -> binding.
     bindings: HashMap<String, Binding>,
+    /// `type Name = A | B` -> its constructors, in declaration order (S-50).
+    type_ctors: HashMap<String, Vec<String>>,
+    /// Constructor name -> the type that declared it. A constructor is an
+    /// ordinary atom whose name is the constructor's, written verbatim, so
+    /// `type Filter = All | ...` makes `All` mean `@All`. This table is what
+    /// lets a bare `All` in expression position resolve.
+    ctor_type: HashMap<String, String>,
 }
 
 impl Env {
     pub fn new() -> Env {
-        Env::default()
+        let mut env = Env::default();
+        // `Bool` is sugar for a two-constructor type (MVP-PLAN §5 decision 3),
+        // predeclared so `not` and `class.x=` have a type to work against.
+        env.declare_type("Bool", &["True".to_string(), "False".to_string()]);
+        env
+    }
+
+    /// Declare `type name = ctors...`. Returns the constructor that clashes
+    /// with an already-declared one, if any (the caller reports it: a shared
+    /// constructor would make a bare `All` ambiguous).
+    pub fn declare_type(&mut self, name: &str, ctors: &[String]) -> Option<(String, String)> {
+        for c in ctors {
+            if let Some(owner) = self.ctor_type.get(c)
+                && owner != name
+            {
+                return Some((c.clone(), owner.clone()));
+            }
+        }
+        for c in ctors {
+            self.ctor_type.insert(c.clone(), name.to_string());
+        }
+        self.type_ctors.insert(name.to_string(), ctors.to_vec());
+        None
+    }
+
+    /// The constructors of a declared `type`, if `name` is one.
+    pub fn type_ctors(&self, name: &str) -> Option<&[String]> {
+        self.type_ctors.get(name).map(|v| v.as_slice())
+    }
+
+    /// The type that declared constructor `ctor`, if any.
+    pub fn ctor_owner(&self, ctor: &str) -> Option<&str> {
+        self.ctor_type.get(ctor).map(|s| s.as_str())
+    }
+
+    pub fn is_type_name(&self, name: &str) -> bool {
+        self.type_ctors.contains_key(name)
     }
 
     /// Mint a fresh ID-sort for `entity`. Its sort is named `<Entity>ID`.
