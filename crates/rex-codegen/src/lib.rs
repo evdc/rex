@@ -349,6 +349,7 @@ fn arg_ref(a: &ArgRef) -> String {
 fn js_lit(l: &rex::types::typed::Lit) -> String {
     use rex::types::typed::Lit;
     match l {
+        Lit::Unit => js_str("u"),
         Lit::Str(s) => format!("encodeText({})", js_str(s)),
         Lit::Atom(a) => format!("encodeAtom({})", js_str(a)),
         Lit::Int(n) => js_str(&format!("i:{n}")),

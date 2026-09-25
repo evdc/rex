@@ -13,6 +13,7 @@
 use super::node::{Ctx, InputKey, Node, NodeId};
 use crate::eval::relation::{BTreeRelation, BinaryRelation};
 use crate::eval::value::Value;
+use crate::types::typed::Total;
 use std::collections::HashMap;
 
 /// One atomic batch of base-table changes. A single `new E { .. }` is one
@@ -346,12 +347,16 @@ impl Circuit {
             let (prev, rest) = deltas.split_at_mut(i);
             let ctx = Ctx { deltas: prev, integrals: &self.integrals, floor };
             // Dirty-cone skip: a node whose children all sit still this step
-            // emits nothing and changes no state. Two fire-from-no-children
-            // exceptions: an unfired ConstSingleton, and a FixOutput whose
-            // region has never evaluated (an import-less, constant-only group
-            // has no child deltas to ever wake it).
+            // emits nothing and changes no state. Three fire-from-no-children
+            // exceptions: an unfired ConstSingleton; a FixOutput whose region
+            // has never evaluated (an import-less, constant-only group has no
+            // child deltas to ever wake it); and an unseeded *total* aggregate
+            // (S-50), whose group key exists by construction and so must emit
+            // its identity — `count(Todo by unit)` is `0` with no todos, and
+            // with no todos there is no delta to wake it with.
             let quiescent = match &self.nodes[i] {
                 Node::ConstSingleton { fired: false, .. } => false,
+                Node::Aggregate { total: Total::Unit, seeded: false, .. } => false,
                 Node::FixOutput { region, .. } if !self.fixes[*region].fired => false,
                 node => node.children().iter().all(|c| ctx.delta(*c).is_empty()),
             };

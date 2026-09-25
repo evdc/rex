@@ -13,7 +13,7 @@ use rex::eval::algebra::Agg;
 use rex::eval::relation::{BTreeRelation, BinaryRelation};
 use rex::eval::{Value, algebra, intern};
 use rex::types::ty::SortId;
-use rex::types::typed::{AggKind, Lit, Pred};
+use rex::types::typed::{AggKind, Lit, Pred, Total};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
@@ -30,7 +30,7 @@ fn antijoin_node(l: NodeId, r: NodeId) -> Node {
 }
 
 fn agg_node(kind: AggKind) -> impl Fn(NodeId) -> Node {
-    move |input| Node::Aggregate { input, kind, money: false, st: BTreeMap::new() }
+    move |input| Node::Aggregate { input, kind, money: false, total: Total::No, seeded: false, st: BTreeMap::new() }
 }
 
 /// Batch antijoin oracle, mirroring interp.rs: `A − A[B]`.
@@ -292,6 +292,8 @@ proptest! {
             input,
             kind: AggKind::Sum,
             money: false,
+            total: Total::No,
+            seeded: false,
             st: BTreeMap::new(),
         });
         let out = circuit.add_node(Node::Filter(agg, pred));
@@ -633,7 +635,7 @@ fn distinct_weight_transitions() {
 fn agg_circuit(kind: AggKind) -> (Circuit, NodeId) {
     let mut circuit = Circuit::new();
     let input = circuit.input(key_a());
-    let out = circuit.add_node(Node::Aggregate { input, kind, money: false, st: BTreeMap::new() });
+    let out = circuit.add_node(Node::Aggregate { input, kind, money: false, total: Total::No, seeded: false, st: BTreeMap::new() });
     circuit.set_output("out", out);
     (circuit, out)
 }
@@ -704,6 +706,8 @@ fn sum_crossing_downstream_threshold_both_directions() {
         input,
         kind: AggKind::Sum,
         money: false,
+        total: Total::No,
+        seeded: false,
         st: BTreeMap::new(),
     });
     let out = circuit.add_node(Node::Filter(agg, Pred::Cmp(CmpOp::Gt, Lit::Int(2))));

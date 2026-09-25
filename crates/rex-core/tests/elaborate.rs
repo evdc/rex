@@ -106,7 +106,7 @@ fn aggregation_and_by_are_resolved() {
          let custspend : Customer -> Money = sum(lineprice by .order.customer)\n"
     ));
     let body = view_body(&prog, "custspend");
-    let TExprKind::Agg(kind, arg) = &body.kind else {
+    let TExprKind::Agg(kind, arg, _) = &body.kind else {
         panic!("expected an aggregation, got {:?}", body.kind);
     };
     assert_eq!(*kind, AggKind::Sum);

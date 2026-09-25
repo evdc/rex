@@ -16,7 +16,7 @@ use crate::eval::interp::{compare_values, concat_values, mul_values, predicate};
 use crate::eval::relation::{BTreeRelation, BinaryRelation};
 use crate::eval::value::Value;
 use crate::types::ty::SortId;
-use crate::types::typed::{AggKind, Pred};
+use crate::types::typed::{AggKind, Pred, Total};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Index of a node in the circuit's arena. The arena is topologically ordered:
@@ -115,6 +115,13 @@ pub enum Node {
         kind: AggKind,
         /// Tag numeric results `Money` vs `Int` (from the argument's type).
         money: bool,
+        /// Whether the group-key domain is statically non-empty (S-50). A
+        /// total group emits its monoid identity for an empty image, so the
+        /// key has to be visited on the first step even though no delta ever
+        /// mentions it — `seeded` tracks that one-off, the way
+        /// [`Node::ConstSingleton`]'s `fired` does.
+        total: Total,
+        seeded: bool,
         st: BTreeMap<Value, KeyAgg>,
     },
     /// Placeholder inside a fix region's *inner* circuit, seeded by the region
@@ -213,7 +220,10 @@ impl Node {
             Node::Compose { linv, .. }
             | Node::Semijoin { linv, .. }
             | Node::Antijoin { linv, .. } => *linv = BTreeRelation::new(),
-            Node::Aggregate { st, .. } => st.clear(),
+            Node::Aggregate { st, seeded, .. } => {
+                st.clear();
+                *seeded = false;
+            }
             _ => {}
         }
     }
@@ -382,11 +392,24 @@ impl Node {
                 }
                 out
             }
-            Node::Aggregate { input, kind, money, st } => {
+            Node::Aggregate { input, kind, money, total, seeded, st } => {
                 let delta = ctx.delta(*input);
                 let upd = Updated { old: ctx.integral(*input), delta };
                 let mut out = BTreeRelation::new();
-                for (k, drow) in delta.rows() {
+                // A total group's key belongs to the output whether or not any
+                // delta mentions it (S-50), so visit it once at the first step
+                // in addition to the keys the delta carries. `Value::Unit`
+                // sorts first, so this stays in key order.
+                let empty: BTreeMap<Value, i64> = BTreeMap::new();
+                let total_key = match total {
+                    Total::Unit if !*seeded && delta.row_map(&Value::Unit).is_none() => {
+                        Some(Value::Unit)
+                    }
+                    _ => None,
+                };
+                *seeded = true;
+                let keys = total_key.iter().map(|k| (k, &empty)).chain(delta.rows());
+                for (k, drow) in keys {
                     let prev = st.get(k).cloned().unwrap_or_default();
                     // Group tier: fold the delta into the running (sum, count).
                     let mut sum = prev.sum;
@@ -398,7 +421,7 @@ impl Node {
                     // Presence must match batch exactly: a key is emitted iff
                     // its merged image has any nonzero-weight entry (mixed-sign
                     // groups can be present with count == 0).
-                    let present = upd.has_left(k);
+                    let present = upd.has_left(k) || (*total == Total::Unit && *k == Value::Unit);
                     let new_out = if !present {
                         None
                     } else {

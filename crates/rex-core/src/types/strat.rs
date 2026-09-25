@@ -70,7 +70,7 @@ fn walk(e: &TExpr, out: &mut Vec<Diagnostic>) -> bool {
         RecVar(_) => true,
         Identity(_) | View(_) | ValueRef(_) | Field(_) | Const { .. } | Atom(_)
         | Coreflexive(_) => false,
-        Filter(a, _) | Distinct(a) | Inverse(a) | Proj(_, a) | Agg(_, a) | InRel(a, _) => {
+        Filter(a, _) | Distinct(a) | Inverse(a) | Proj(_, a) | Agg(_, a, _) | InRel(a, _) => {
             walk(a, out)
         }
         Compose(a, b)

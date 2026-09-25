@@ -78,7 +78,7 @@ fn walk(e: &TExpr, env: &Env, out: &mut Vec<Diagnostic>) -> bool {
         }
 
         // Unary: grounded iff the operand is.
-        Filter(a, _) | Distinct(a) | Inverse(a) | Proj(_, a) | Agg(_, a) | InRel(a, _) => {
+        Filter(a, _) | Distinct(a) | Inverse(a) | Proj(_, a) | Agg(_, a, _) | InRel(a, _) => {
             walk(a, env, out)
         }
 

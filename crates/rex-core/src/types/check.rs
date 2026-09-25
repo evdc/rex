@@ -417,6 +417,22 @@ impl Checker {
                 Ok(TExpr::new(TExprKind::Identity(sort), RelTy::coreflexive(d), span))
             }
 
+            // `unit : X -> Unit` (S-50): the constant relation onto the one
+            // point of `Unit`, grounded by the ambient domain exactly like the
+            // literal constants below. It is a built-in name rather than a
+            // keyword, so it only wins when nothing else has bound it.
+            ExprKind::Ident(name) if name == UNIT && self.env.binding(name).is_none() => {
+                let Some(d) = dom else {
+                    return self.error(span, "`unit` needs a known domain (add a type annotation)");
+                };
+                let sort = self.as_sort(span, &d, "`unit`")?;
+                Ok(TExpr::new(
+                    TExprKind::Const { lit: Lit::Unit, dom: sort },
+                    RelTy::new(d, ValueTy::Unit),
+                    span,
+                ))
+            }
+
             ExprKind::Ident(name) => self.check_ident(name, span),
 
             ExprKind::FieldPath(parts) => self.check_field_path(parts, span, dom),
@@ -889,7 +905,16 @@ impl Checker {
             }
         };
         let ty = RelTy::new(image.ty.from.clone(), to);
-        Ok(TExpr::new(TExprKind::Agg(agg, Box::new(image)), ty, span))
+        // `X by unit` regroups everything under the single `Unit` point, so
+        // the group key is there whether or not `X` has rows: the aggregate
+        // is over a total domain and must emit its identity when empty.
+        let total = match &image.kind {
+            TExprKind::By(_, g) if matches!(&g.kind, TExprKind::Const { lit: Lit::Unit, .. }) => {
+                Total::Unit
+            }
+            _ => Total::No,
+        };
+        Ok(TExpr::new(TExprKind::Agg(agg, Box::new(image), total), ty, span))
     }
 
     // --- type relations ---------------------------------------------------
@@ -1080,6 +1105,7 @@ fn lit_of(expr: &Expr) -> Option<Lit> {
 
 fn lit_ty(lit: &Lit) -> ValueTy {
     match lit {
+        Lit::Unit => ValueTy::Unit,
         Lit::Int(_) => ValueTy::Int,
         Lit::Decimal(_) => ValueTy::Money,
         Lit::Str(_) => ValueTy::Text,

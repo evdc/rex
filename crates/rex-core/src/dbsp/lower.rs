@@ -234,13 +234,15 @@ fn lower_in(
             let set: BTreeSet<Value> = lits.iter().map(lit_value).collect();
             circuit.add_node(Node::InRel(l, set))
         }
-        TExprKind::Agg(kind, arg) => {
+        TExprKind::Agg(kind, arg, total) => {
             let money = arg.ty.to == ValueTy::Money;
             let input = lower_in(circuit, scope, arg, values);
             circuit.add_node(Node::Aggregate {
                 input,
                 kind: *kind,
                 money,
+                total: *total,
+                seeded: false,
                 st: Default::default(),
             })
         }

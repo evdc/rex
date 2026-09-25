@@ -326,9 +326,21 @@ pub fn eval_expr_with(store: &dyn Store, te: &TExpr) -> BTreeRelation {
             }
             out
         }
-        TExprKind::Agg(kind, arg) => {
+        TExprKind::Agg(kind, arg, total) => {
             let money = arg.ty.to == ValueTy::Money;
-            algebra::aggregate(&eval(arg), agg_of(*kind), money)
+            let mut out = algebra::aggregate(&eval(arg), agg_of(*kind), money);
+            // A total group key is present even with an empty image, so the
+            // aggregate yields its monoid identity rather than no row at all
+            // (S-50). `Min`/`Max`/`Avg` have no identity and stay absent —
+            // the incremental backend's `Node::Aggregate` matches this arm
+            // exactly, and `tests/dbsp.rs` holds the two to each other.
+            if *total == Total::Unit
+                && out.row_ref(&Value::Unit).next().is_none()
+                && let Some(id) = agg_identity(*kind, money)
+            {
+                out.add(Value::Unit, id, 1);
+            }
+            out
         }
     }
 }
@@ -349,6 +361,16 @@ fn singleton(v: Value) -> BTreeRelation {
     r
 }
 
+/// The monoid identity a *total* group emits for an empty image (S-50), or
+/// `None` for the aggregates that have none.
+pub fn agg_identity(kind: AggKind, money: bool) -> Option<Value> {
+    match kind {
+        AggKind::Count => Some(Value::Int(0)),
+        AggKind::Sum => Some(if money { Value::Money(0) } else { Value::Int(0) }),
+        AggKind::Avg | AggKind::Min | AggKind::Max => None,
+    }
+}
+
 fn agg_of(kind: AggKind) -> Agg {
     match kind {
         AggKind::Sum => Agg::Sum,
@@ -363,6 +385,7 @@ fn agg_of(kind: AggKind) -> Agg {
 /// incremental backend's lowering and filter kernels.
 pub fn lit_value(lit: &Lit) -> Value {
     match lit {
+        Lit::Unit => Value::Unit,
         Lit::Int(n) => Value::Int(*n),
         Lit::Decimal(s) => Value::money_from_decimal(s),
         Lit::Str(s) => Value::text(s),

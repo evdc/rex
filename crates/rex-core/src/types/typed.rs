@@ -15,11 +15,28 @@ use crate::span::Span;
 /// evaluator's `Value`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Lit {
+    /// The one point of the `Unit` sort, written `unit` at the surface (S-50).
+    Unit,
     Int(i64),
     Decimal(String),
     Str(String),
     Date { year: i32, month: u32, day: u32 },
     Atom(String),
+}
+
+/// The surface spelling of the constant relation onto `Unit` (S-50): a
+/// built-in name, not a reserved word, so a user binding of the same name
+/// shadows it.
+pub const UNIT: &str = "unit";
+
+/// Whether an aggregate's group-key domain is statically non-empty; see
+/// [`TExprKind::Agg`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Total {
+    /// Keys appear only as the image produces them.
+    No,
+    /// The `Unit` point is always a key.
+    Unit,
 }
 
 /// A grounded coreflexive built-in used in filter position.
@@ -103,7 +120,14 @@ pub enum TExprKind {
     BinCompare(CmpOp, Box<TExpr>, Box<TExpr>),
     /// `lhs in {set}`, a coreflexive on `lhs`'s key.
     InRel(Box<TExpr>, Vec<Lit>),
-    Agg(AggKind, Box<TExpr>),
+    /// `count(X by g)`. `total` marks a group-key domain that is non-empty by
+    /// construction — in v1 that is exactly `by unit`, whose key set is the
+    /// single `Unit` point. A total group emits its monoid *identity* for an
+    /// empty image (`count(Todo by unit)` is `0`, not "no row"), which is what
+    /// makes a global counter a real relation rather than a missing one.
+    /// `Min`/`Max` have no identity and `Avg` is not a monoid, so they still
+    /// emit nothing when empty (the batch kernel's behaviour, unchanged).
+    Agg(AggKind, Box<TExpr>, Total),
 }
 
 /// A field value in a `new`: either a literal or a reference to a bound id.
