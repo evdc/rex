@@ -15,7 +15,10 @@ use crate::eval::interp::{arith_values, compare_values, lit_value};
 use crate::eval::intern::intern;
 use crate::eval::relation::BinaryRelation;
 use crate::eval::{encode_value, Value};
-use crate::types::shape_ir::{EventDef, FromField, MutationIR, ParamTy, Target, ValExpr, ValRef, ROW_SELF};
+use crate::types::shape_ir::{
+    EventDef, FromField, MutationIR, ParamTy, Target, ValExpr, ValRef, ROW_SELF, STATE_ENTITY,
+};
+use crate::types::typed::{FALSE, TRUE};
 use crate::types::{Env, SortId, ValueTy};
 use std::collections::HashMap;
 
@@ -206,7 +209,7 @@ fn expand(
                 .get(n)
                 .cloned()
                 .ok_or_else(|| format!("event `{}`: unbound parameter `{n}`", def.name)),
-            ValRef::Expr(ve) => eval_val_expr(circuit, args, ve),
+            ValRef::Expr(ve) => eval_val_expr(env, circuit, args, ve),
         }
     };
     for m in &def.body {
@@ -281,7 +284,12 @@ fn expand(
 /// built. Deliberately not the general relational evaluator
 /// (`eval::interp::eval_expr_with`): that materializes whole relations,
 /// while a mutation value only ever needs one row.
-fn eval_val_expr(circuit: &Circuit, args: &HashMap<String, Value>, e: &ValExpr) -> Result<Value, String> {
+fn eval_val_expr(
+    env: &Env,
+    circuit: &Circuit,
+    args: &HashMap<String, Value>,
+    e: &ValExpr,
+) -> Result<Value, String> {
     match e {
         ValExpr::Lit(lit) => Ok(lit_value(lit)),
         ValExpr::Param(name) => args
@@ -289,7 +297,7 @@ fn eval_val_expr(circuit: &Circuit, args: &HashMap<String, Value>, e: &ValExpr) 
             .cloned()
             .ok_or_else(|| format!("unbound parameter `{name}`")),
         ValExpr::Field(base, field) => {
-            let id = eval_val_expr(circuit, args, base)?;
+            let id = eval_val_expr(env, circuit, args, base)?;
             let Value::Id(sort, _) = &id else {
                 return Err(format!("`.{field}`: not an entity id"));
             };
@@ -301,7 +309,7 @@ fn eval_val_expr(circuit: &Circuit, args: &HashMap<String, Value>, e: &ValExpr) 
                 .ok_or_else(|| format!("no live `{field}` value for this row"))
         }
         ValExpr::Not(inner, [a, b]) => {
-            let v = eval_val_expr(circuit, args, inner)?;
+            let v = eval_val_expr(env, circuit, args, inner)?;
             let Value::Atom(cur) = &v else {
                 return Err("`not` operand is not an atom".to_string());
             };
@@ -314,15 +322,26 @@ fn eval_val_expr(circuit: &Circuit, args: &HashMap<String, Value>, e: &ValExpr) 
                 Err(format!("`not`: value `{cur}` is not one of its declared alternatives"))
             }
         }
+        // The one `State#` row's field (S-51). Read like any other field,
+        // against the pre-event snapshot; a defaultless state that has never
+        // been `set` has no row, and saying so beats inventing a null.
+        ValExpr::State(name) => {
+            let sort = entity_sort(env, STATE_ENTITY)?;
+            let key = InputKey::Field(sort, intern(name));
+            circuit
+                .input_integral(&key)
+                .and_then(|rel| rel.triples().find(|(_, _, w)| *w > 0).map(|(_, v, _)| v.clone()))
+                .ok_or_else(|| format!("state `{name}` has no value yet"))
+        }
         ValExpr::Arith(kind, a, b, money) => {
-            let va = eval_val_expr(circuit, args, a)?;
-            let vb = eval_val_expr(circuit, args, b)?;
+            let va = eval_val_expr(env, circuit, args, a)?;
+            let vb = eval_val_expr(env, circuit, args, b)?;
             Ok(arith_values(*kind, &va, &vb, *money))
         }
         ValExpr::Compare(op, a, b) => {
-            let va = eval_val_expr(circuit, args, a)?;
-            let vb = eval_val_expr(circuit, args, b)?;
-            Ok(Value::atom(if compare_values(*op, &va, &vb) { "true" } else { "false" }))
+            let va = eval_val_expr(env, circuit, args, a)?;
+            let vb = eval_val_expr(env, circuit, args, b)?;
+            Ok(Value::atom(if compare_values(*op, &va, &vb) { TRUE } else { FALSE }))
         }
     }
 }
@@ -363,7 +382,7 @@ fn resolve_target(env: &Env, circuit: &Circuit, args: &HashMap<String, Value>, t
             for id in rel.triples().filter(|(_, _, w)| *w > 0).map(|(l, _, _)| l.clone()) {
                 let mut row_args = args.clone();
                 row_args.insert(ROW_SELF.to_string(), id.clone());
-                if eval_val_expr(circuit, &row_args, pred)? == Value::atom("true") {
+                if eval_val_expr(env, circuit, &row_args, pred)? == Value::atom(TRUE) {
                     hit.push(id);
                 }
             }

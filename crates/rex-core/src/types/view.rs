@@ -17,7 +17,7 @@
 //! mutation bodies (the EventIR).
 
 use super::shape_ir::*;
-use super::typed::{ArithKind, Lit};
+use super::typed::{ArithKind, Lit, FALSE, TRUE};
 use crate::ast::*;
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
@@ -53,15 +53,32 @@ pub fn desugar(program: &Program) -> Desugared {
             );
         }
     }
+    // Every `state s : T [= d]` is a field of the one hidden `State#` row
+    // (S-51). Registered in `entity_fields` like any other entity's, so a
+    // `set` in a handler type-checks through the same `check_field_value`.
+    let states: Vec<&StateDecl> = program
+        .stmts
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::State(d) => Some(d),
+            _ => None,
+        })
+        .collect();
+    if !states.is_empty() {
+        let fields = entity_fields.entry(STATE_ENTITY.to_string()).or_default();
+        for d in &states {
+            fields.insert(d.name.clone(), d.ty.clone());
+        }
+    }
     // `type Name = A | B` -> its constructors' atoms, written verbatim
     // (S-50). Collected before pass 0 because `on` handlers are checked
     // there and a mutation value may name a constructor (`t.done := True`).
     // `Bool` is predeclared, matching `Env::new`.
     let mut type_ctors: std::collections::HashMap<String, Vec<String>> = Default::default();
-    type_ctors.insert("Bool".into(), vec!["True".into(), "False".into()]);
+    type_ctors.insert("Bool".into(), vec![TRUE.to_string(), FALSE.to_string()]);
     let mut ctor_type: std::collections::HashMap<String, String> = Default::default();
-    ctor_type.insert("True".into(), "Bool".into());
-    ctor_type.insert("False".into(), "Bool".into());
+    ctor_type.insert(TRUE.to_string(), "Bool".into());
+    ctor_type.insert(FALSE.to_string(), "Bool".into());
     for stmt in &program.stmts {
         if let Stmt::Type(t) = stmt {
             for c in &t.ctors {
@@ -78,6 +95,7 @@ pub fn desugar(program: &Program) -> Desugared {
         entity_fields,
         type_ctors,
         ctor_type,
+        states: states.iter().map(|d| (d.name.clone(), d.ty.clone())).collect(),
         event_param_types: Default::default(),
         event_spans: Default::default(),
         hidden_lets: Vec::new(),
@@ -113,10 +131,8 @@ pub fn desugar(program: &Program) -> Desugared {
     for stmt in &program.stmts {
         match stmt {
             Stmt::View(v) => d.view(v),
-            Stmt::State(s) => d.diagnostics.push(Diagnostic::error(
-                s.span,
-                "`state` is not supported yet (MVP-PLAN S-51)".to_string(),
-            )),
+            // Consumed below: every `state` is a field of one hidden entity.
+            Stmt::State(_) => {}
             // Consumed in pass 0.
             Stmt::Event(_) | Stmt::On(_) => {}
             // Kept for the checker, which turns it into a coproduct of atoms
@@ -152,6 +168,51 @@ pub fn desugar(program: &Program) -> Desugared {
     // could read is already in `d.stmts` by now, regardless of whether the
     // `on` handler that produced them appeared before or after it in source.
     d.stmts.append(&mut d.hidden_lets);
+    // The `State#` entity and its single row go *first* (S-51), so the row
+    // exists before any view that reads a state field — and, being an
+    // ordinary top-level `new`, it is logged as a genesis event, so replay
+    // from an empty engine reproduces it (S-21 subtask 3).
+    if !states.is_empty() {
+        let span = states[0].span;
+        let mut head = vec![
+            Stmt::Entity(EntityDecl {
+                name: STATE_ENTITY.to_string(),
+                fields: states
+                    .iter()
+                    .map(|d| FieldDecl { name: d.name.clone(), ty: d.ty.clone(), span: d.span })
+                    .collect(),
+                span,
+            }),
+            Stmt::Let(LetDecl {
+                name: Some(STATE_ROW.to_string()),
+                ty: None,
+                body: Expr {
+                    kind: ExprKind::New {
+                        entity: STATE_ENTITY.to_string(),
+                        // Only defaulted states get a field row; a defaultless
+                        // one starts genuinely empty (0 rows for that field),
+                        // which is how "no current user" is said without an
+                        // option type.
+                        fields: states
+                            .iter()
+                            .filter_map(|d| {
+                                d.default.as_ref().map(|v| FieldInit {
+                                    name: d.name.clone(),
+                                    value: v.clone(),
+                                    span: d.span,
+                                })
+                            })
+                            .collect(),
+                    },
+                    span,
+                },
+                recursive: false,
+                span,
+            }),
+        ];
+        head.append(&mut d.stmts);
+        d.stmts = head;
+    }
     Desugared {
         program: Program { stmts: d.stmts },
         shapes: d.shapes,
@@ -174,6 +235,9 @@ struct Desugar {
     /// tables; desugaring runs before the checker builds those (S-50).
     type_ctors: TypeTable,
     ctor_type: std::collections::HashMap<String, String>,
+    /// State name -> its declared type (S-51). A `set` resolves through it,
+    /// and a bare state name in a mutation value point-reads the singleton.
+    states: std::collections::HashMap<String, Type>,
     /// Event name -> its params' declared surface types, in order. `EventDef`
     /// keeps only the wire `ParamTy`, which cannot say *which* atoms a
     /// declared `type` admits; a handler body needs that to check an
@@ -334,6 +398,12 @@ fn rewrite_row_refs(e: &Expr, row: &str) -> Expr {
 
 /// Whether a value of type `got` may be written where `want` is declared:
 /// exact match, `Int` widening to `Money`, or an atom subset.
+/// The mutation-value type of the predeclared `Bool` — what a comparison
+/// yields, and what a `Bool`-typed field holds.
+fn bool_val_ty() -> ValTy {
+    ValTy::Atoms(vec![TRUE.to_string(), FALSE.to_string()])
+}
+
 fn valty_assignable(want: &ValTy, got: &ValTy) -> bool {
     if want == got {
         return true;
@@ -522,18 +592,6 @@ impl Desugar {
                 Some(MutationIR::Set { target: bulk_target, entity, updates })
             }
             HStmt::Delete { target, .. } => {
-                // `delete Entity` (no predicate at all): retract the whole
-                // identity relation in one transaction (S-41 subtask 3) —
-                // distinct from a `where`-targeted bulk delete below.
-                if let ExprKind::Ident(name) = &target.kind
-                    && scope.iter().all(|(n, _, _)| n != name)
-                {
-                    if !self.entity_fields.contains_key(name) {
-                        self.error(target.span, format!("unknown parameter or entity `{name}` in mutation"));
-                        return None;
-                    }
-                    return Some(MutationIR::Delete { target: Target::All { entity: name.clone() } });
-                }
                 let (bulk_target, _entity) = self.mutation_target(target, scope, event)?;
                 Some(MutationIR::Delete { target: bulk_target })
             }
@@ -569,9 +627,22 @@ impl Desugar {
                 }
                 Some(MutationIR::Do { event: event.clone(), args: vals })
             }
-            HStmt::Set { .. } => {
-                self.error(span, "`set` is not supported yet (MVP-PLAN S-51)");
-                None
+            // `set s = v` (S-51): an ordinary field set on the one `State#`
+            // row. `Target::All` names every row of the entity, and there is
+            // exactly one, so the singleton needs no Target variant of its own.
+            HStmt::Set { name, value, .. } => {
+                let Some(ty) = self.states.get(name).cloned() else {
+                    self.error(span, format!("unknown state `{name}`; declare it with `state {name} : T`"));
+                    return None;
+                };
+                let _ = ty;
+                let (v, vty) = self.val(value, scope)?;
+                self.check_field_value(STATE_ENTITY, name, &vty, value.span)?;
+                Some(MutationIR::Set {
+                    target: Target::All { entity: STATE_ENTITY.to_string() },
+                    entity: STATE_ENTITY.to_string(),
+                    updates: vec![(name.clone(), v)],
+                })
             }
             HStmt::Clear { .. } | HStmt::Focus { .. } => {
                 self.error(span, "`clear`/`focus` are DOM actions; they are not allowed in an `on` body");
@@ -585,6 +656,20 @@ impl Desugar {
     /// [`Target`] together with the entity it ranges over.
     fn mutation_target(&mut self, target: &Expr, scope: &Scope, event: &str) -> Option<(Target, String)> {
         match &target.kind {
+            // A name in scope is a single row; a bare entity name is every
+            // row of it (`update Todo { … }`, `delete Todo`) — one
+            // transaction over the whole identity relation, S-41 subtask 3.
+            // Both verbs come through here, so they cannot disagree.
+            ExprKind::Ident(name) if scope.iter().all(|(n, _, _)| n != name) => {
+                if !self.entity_fields.contains_key(name) {
+                    self.error(
+                        target.span,
+                        format!("unknown parameter or entity `{name}` in mutation"),
+                    );
+                    return None;
+                }
+                Some((Target::All { entity: name.clone() }, name.clone()))
+            }
             ExprKind::Ident(name) => {
                 let entity = self.target_entity(name, scope, target.span)?;
                 Some((Target::One(Ref(name.clone())), entity))
@@ -611,7 +696,7 @@ impl Desugar {
                     ));
                     let rewritten = rewrite_row_refs(pred, ROW_SELF);
                     let (ve, ty) = self.val_expr(&rewritten, &pscope)?;
-                    if ty != ValTy::Atoms(vec!["true".to_string(), "false".to_string()]) {
+                    if ty != bool_val_ty() {
                         self.error(pred.span, "a bulk mutation's `where` predicate must be a comparison");
                         return None;
                     }
@@ -816,6 +901,12 @@ impl Desugar {
                     ValRef::Lit(Lit::Atom(name.clone())),
                     ValTy::Atoms(vec![name.clone()]),
                 )),
+                // A bare state name reads the singleton (S-51).
+                None if self.states.contains_key(name) => {
+                    let ty = self.states[name].clone();
+                    let vty = self.resolve_val_ty(&ty)?;
+                    Some((ValRef::Expr(ValExpr::State(name.clone())), vty))
+                }
                 None => {
                     self.error(e.span, format!("unknown parameter `{name}` in mutation value"));
                     None
@@ -852,6 +943,13 @@ impl Desugar {
                     ValExpr::Lit(Lit::Atom(name.clone())),
                     ValTy::Atoms(vec![name.clone()]),
                 )),
+                // A bare state name reads the singleton (S-51), so
+                // `set nextId = nextId + n` composes like any other value.
+                None if self.states.contains_key(name) => {
+                    let ty = self.states[name].clone();
+                    let vty = self.resolve_val_ty(&ty)?;
+                    Some((ValExpr::State(name.clone()), vty))
+                }
                 None => {
                     self.error(e.span, format!("unknown parameter `{name}`"));
                     None
@@ -900,7 +998,7 @@ impl Desugar {
                 }
                 Some((
                     ValExpr::Compare(*op, Box::new(va), Box::new(vb)),
-                    ValTy::Atoms(vec!["true".to_string(), "false".to_string()]),
+                    bool_val_ty(),
                 ))
             }
             _ => {

@@ -14,6 +14,7 @@
 
 use super::env::{Binding, Env};
 use super::ty::{RelTy, SortId, ValueTy};
+use super::shape_ir::STATE_ENTITY;
 use super::typed::*;
 use crate::ast::*;
 use crate::diagnostic::Diagnostic;
@@ -422,6 +423,13 @@ impl Checker {
                 }),
             )),
             ExprKind::Atom(a) => Ok((ValueTy::Atom(a.clone()), TValue::Lit(Lit::Atom(a.clone())))),
+            // A declared constructor is its atom, written without the `@`
+            // (S-50); a binding of the same name shadows it, as elsewhere.
+            ExprKind::Ident(name)
+                if self.env.ctor_owner(name).is_some() && self.env.binding(name).is_none() =>
+            {
+                Ok((ValueTy::Atom(name.clone()), TValue::Lit(Lit::Atom(name.clone()))))
+            }
             ExprKind::Ident(name) => match self.env.binding(name) {
                 Some(Binding::Value(vt)) => Ok((vt.clone(), TValue::Ref(name.clone()))),
                 Some(Binding::Rel(_)) => {
@@ -453,6 +461,18 @@ impl Checker {
             // point of `Unit`, grounded by the ambient domain exactly like the
             // literal constants below. It is a built-in name rather than a
             // keyword, so it only wins when nothing else has bound it.
+            // A bare `state` name (S-51): the value held by the one `State#`
+            // row, carried to every point of the ambient domain.
+            ExprKind::Ident(name)
+                if self.env.binding(name).is_none()
+                    && self
+                        .env
+                        .entity_sort(STATE_ENTITY)
+                        .is_some_and(|s| self.env.field_ty(s, name).is_some()) =>
+            {
+                self.state_rel(name, dom, span)
+            }
+
             // A declared constructor is an atom literal spelled without the
             // `@` (S-50): `All` is `@All`. Like `unit`, it only wins when
             // nothing else has bound the name.
@@ -586,7 +606,14 @@ impl Checker {
             ExprKind::Div(a, b) => self.check_arith(a, b, dom, span, ArithOp::Div),
             ExprKind::Mod(a, b) => self.check_arith(a, b, dom, span, ArithOp::Mod),
             ExprKind::Concat(a, b) => self.check_arith(a, b, dom, span, ArithOp::Concat),
-            ExprKind::Not(_) => self.error(span, "`not` is not supported yet (MVP-PLAN S-40)"),
+            // Relational `not` (`Todo where not .completed`) is S-52's
+            // `except (where P)`, not S-40's mutation-value `not`, which
+            // landed and lives in `types/view.rs`.
+            ExprKind::Not(_) => self.error(
+                span,
+                "`not` in a relational expression is not supported yet (MVP-PLAN S-52: `not P` \
+                 desugars to `except (where P)`)",
+            ),
             ExprKind::Match { .. } => self.error(span, "`match` is not supported yet (MVP-PLAN S-52)"),
             ExprKind::If { .. } => self.error(span, "`if … then … else` is not supported yet (MVP-PLAN S-52)"),
 
@@ -599,6 +626,69 @@ impl Checker {
                 self.error(span, "`new` may only appear as the body of a `let`")
             }
         }
+    }
+
+    /// A bare `state` name as a relation `X -> V` (S-51).
+    ///
+    /// `State#` has exactly one row, so "the state value at every point of
+    /// `X`" is the composite
+    ///
+    /// ```text
+    /// unit          : X       -> Unit     (constant, grounded in X)
+    /// ~(State# . unit) : Unit -> State#   (the one row, reached through Unit)
+    /// .name         : State#  -> V
+    /// ```
+    ///
+    /// Nothing new is needed to maintain it: every hop is an existing
+    /// operator, so a `set` is one field delta flowing through two joins
+    /// rather than a recompute (MVP-PLAN §2.4). When the ambient domain is
+    /// already `Unit` (a `Unit`-root view level, S-53) the first hop is
+    /// skipped — there is no sort to ground a constant in, and none is needed.
+    fn state_rel(&mut self, name: &str, dom: Option<ValueTy>, span: Span) -> TResult<TExpr> {
+        let state_sort = self.env.entity_sort(STATE_ENTITY).expect("checked by the caller");
+        let field_ty = self.env.field_ty(state_sort, name).expect("checked by the caller").clone();
+
+        // `State# . unit`, inverted: Unit -> State#.
+        let state_unit = TExpr::new(
+            TExprKind::Const { lit: Lit::Unit, dom: state_sort },
+            RelTy::new(ValueTy::Id(state_sort), ValueTy::Unit),
+            span,
+        );
+        let to_row = TExpr::new(
+            TExprKind::Inverse(Box::new(state_unit)),
+            RelTy::new(ValueTy::Unit, ValueTy::Id(state_sort)),
+            span,
+        );
+        let field = TExpr::new(
+            TExprKind::Field(vec![FieldHop { sort: state_sort, field: name.to_string() }]),
+            RelTy::new(ValueTy::Id(state_sort), field_ty.clone()),
+            span,
+        );
+        let row_to_value = TExpr::new(
+            TExprKind::Compose(Box::new(to_row), Box::new(field)),
+            RelTy::new(ValueTy::Unit, field_ty.clone()),
+            span,
+        );
+        let Some(d) = dom else {
+            return self.error(
+                span,
+                format!("state `{name}` needs a known domain here (add a type annotation)"),
+            );
+        };
+        if d == ValueTy::Unit {
+            return Ok(row_to_value);
+        }
+        let sort = self.as_sort(span, &d, &format!("state `{name}`"))?;
+        let unit_x = TExpr::new(
+            TExprKind::Const { lit: Lit::Unit, dom: sort },
+            RelTy::new(d.clone(), ValueTy::Unit),
+            span,
+        );
+        Ok(TExpr::new(
+            TExprKind::Compose(Box::new(unit_x), Box::new(row_to_value)),
+            RelTy::new(d, field_ty),
+            span,
+        ))
     }
 
     /// Ground an atom (written `@a`, or as a declared constructor) in the

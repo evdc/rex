@@ -40,7 +40,7 @@ impl Env {
         let mut env = Env::default();
         // `Bool` is sugar for a two-constructor type (MVP-PLAN §5 decision 3),
         // predeclared so `not` and `class.x=` have a type to work against.
-        env.declare_type("Bool", &["True".to_string(), "False".to_string()]);
+        env.declare_type("Bool", &[super::typed::TRUE.to_string(), super::typed::FALSE.to_string()]);
         env
     }
 

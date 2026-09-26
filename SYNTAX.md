@@ -58,9 +58,10 @@ state nextId  : Int = 1
 state current : User          // no default: starts EMPTY (0 or 1 rows)
 ```
 
-A `state` is a hidden entity with one row. A bare `filter` in an expression
-means `unit . filter` — a relation `X -> V` from whatever the ambient domain
-is. A state with no default is the empty singleton until `set`, which is how
+A `state` is a hidden entity (`State#`) with one row. A bare `filter` in an
+expression means `unit . ~(State# . unit) . .filter` — a relation `X -> V`
+from whatever the ambient domain is, built only from operators the engine
+already maintains. A state with no default is the empty singleton until `set`, which is how
 "no current user" is expressed without an option type. Changing state is one
 field delta that flows through joins; nothing is recomputed from scratch.
 

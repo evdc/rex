@@ -29,6 +29,13 @@ pub enum Lit {
 /// shadows it.
 pub const UNIT: &str = "unit";
 
+/// The constructors of the predeclared `type Bool = True | False`
+/// (MVP-PLAN §5 decision 3). A constructor names its atom verbatim (S-50),
+/// so these are the atom names a comparison yields and a `Bool` field holds —
+/// one spelling, shared by the checker, the desugarer and the dispatcher.
+pub const TRUE: &str = "True";
+pub const FALSE: &str = "False";
+
 /// Whether an aggregate's group-key domain is statically non-empty; see
 /// [`TExprKind::Agg`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

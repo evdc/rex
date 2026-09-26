@@ -14,18 +14,18 @@ use std::collections::HashMap;
 const SRC: &str = r#"
 entity List { title: Text, pos: Text }
 entity Card { title: Text, pos: Text, list: ListID }
-entity Task { n: Int, done: {@yes | @no}, big: {@true | @false} }
+entity Task { n: Int, done: {@yes | @no}, big: Bool }
 
 let l0 = new List { title: "Todo",  pos: "a0" }
 let l1 = new List { title: "Doing", pos: "a1" }
 let c0 = new Card { title: "Design", pos: "a0", list: l0 }
-let t0 = new Task { n: 5, done: @no, big: @false }
+let t0 = new Task { n: 5, done: @no, big: False }
 
 let card_list  : Card -> ListID = .list
 let card_pos   : Card -> Text = .pos
 let task_n     : Task -> Int = .n
 let task_done  : Task -> {@yes | @no} = .done
-let task_big   : Task -> {@true | @false} = .big
+let task_big   : Task -> Bool = .big
 
 entity Row { label: Text, pos: Int }
 let r0 = new Row { label: "r0", pos: 0 }
@@ -45,6 +45,7 @@ event ToggleTask(t: Task)
 event IncrementTask(t: Task, amount: Int)
 event MarkBig(t: Task, limit: Int)
 event ClearAllRows()
+event RelabelAllRows(label: Text)
 event DeleteHighPos()
 event RelabelAtPos(pos: Int)
 event MakeRows(rows: Int -> Text)
@@ -61,6 +62,7 @@ on Nope(card) => card.title := "never"
 on ToggleTask(t)        => t.done := not t.done
 on IncrementTask(t, amount) => t.n := t.n + amount
 on MarkBig(t, limit)    => t.big := t.n > limit
+on RelabelAllRows(label) => update Row { label: label }
 on ClearAllRows()       => delete Row
 on DeleteHighPos()      => delete Row where .pos > 1
 on RelabelAtPos(pos)    => update Row where .pos = pos { label: "hit" }
@@ -267,17 +269,20 @@ fn increment_adds_to_the_fields_current_value() {
 
 #[test]
 fn conditional_set_from_a_comparison() {
-    // `t.big := t.n > limit` computes a boolean-atom field from a comparison
+    // `t.big := t.n > limit` computes a `Bool` field from a comparison. A
+    // comparison's result type *is* `Bool` (S-50), so the field it lands in
+    // has to be `Bool`-typed — the atoms are `@True`/`@False`, spelled the
+    // way the constructors are.
     // against an event arg — the "conditional" mutation-value shape.
     let mut app = setup();
     let t0 = app.values["t0"].clone();
-    assert_eq!(read_field(&app, &t0, "big"), Value::atom("false"));
+    assert_eq!(read_field(&app, &t0, "big"), Value::atom("False"));
 
     app.dispatch("MarkBig", &[("t", t0.clone()), ("limit", Value::Int(3))]).unwrap();
-    assert_eq!(read_field(&app, &t0, "big"), Value::atom("true"), "5 > 3");
+    assert_eq!(read_field(&app, &t0, "big"), Value::atom("True"), "5 > 3");
 
     app.dispatch("MarkBig", &[("t", t0.clone()), ("limit", Value::Int(10))]).unwrap();
-    assert_eq!(read_field(&app, &t0, "big"), Value::atom("false"), "5 > 10 is false");
+    assert_eq!(read_field(&app, &t0, "big"), Value::atom("False"), "5 > 10 is false");
 }
 
 #[test]
@@ -332,6 +337,25 @@ fn delete_with_no_predicate_retracts_every_row() {
     for r in &rows {
         assert!(!is_live(&app, r), "{r:?} should have been retracted");
     }
+}
+
+#[test]
+fn update_with_no_predicate_sets_every_row() {
+    // The counterpart of `delete Row`, and TodoMVC's `ToggleAll`: a bare
+    // entity target means every row of it, in one transaction. S-41 landed
+    // this for `delete` only, so `update Todo { … }` used to report "unknown
+    // parameter `Todo` in mutation" — both verbs now share one target rule.
+    let mut app = setup();
+    let rows: Vec<Value> = ["r0", "r1", "r2", "r3"].iter().map(|n| app.values[*n].clone()).collect();
+    let (_, step) = app.dispatch("RelabelAllRows", &[("label", text("same"))]).unwrap();
+    for r in &rows {
+        assert_eq!(read_field(&app, r, "label"), text("same"));
+    }
+    // One step, and every row's label moved in it: four retractions and four
+    // assertions in a single delta batch, not four transactions.
+    let delta = step.view_deltas.get("row_label").expect("row_label delta");
+    assert_eq!(delta.triples().filter(|(_, _, w)| *w < 0).count(), 4);
+    assert_eq!(delta.triples().filter(|(_, _, w)| *w > 0).count(), 4);
 }
 
 #[test]

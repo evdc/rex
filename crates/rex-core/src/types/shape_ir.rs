@@ -245,6 +245,15 @@ pub struct Ref(pub String);
 /// turn. Not a legal Rex identifier, so it never collides with a real param.
 pub const ROW_SELF: &str = "#row";
 
+/// The hidden entity every `state` declaration becomes a field of (S-51). It
+/// has exactly one row, minted as a genesis `new` so replay reproduces it,
+/// and each `state s : T [= d]` is a field `s` on it — seeded iff a default
+/// was written, so a defaultless state is genuinely absent rather than null.
+/// `#` keeps the name unreachable from source.
+pub const STATE_ENTITY: &str = "State#";
+/// The `let` that binds the singleton's id.
+pub const STATE_ROW: &str = "state#row";
+
 /// Which rows a `Set`/`Delete` acts on (MVP-PLAN S-41).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Target {
@@ -290,6 +299,11 @@ pub enum ValExpr {
     Not(Box<ValExpr>, [String; 2]),
     /// `+ - / %` on numeric operands; `true` when the result is `Money`.
     Arith(super::typed::ArithKind, Box<ValExpr>, Box<ValExpr>, bool),
-    /// `a OP b`, decoded to the atom `@true`/`@false`.
+    /// `a OP b`, decoded to the atom `@True`/`@False`.
     Compare(crate::ast::CmpOp, Box<ValExpr>, Box<ValExpr>),
+    /// A bare `state` name (S-51): a point read of the one [`STATE_ENTITY`]
+    /// row's field, against the pre-event snapshot like every other read
+    /// here. A defaultless state that has never been `set` has no row, which
+    /// is an error at dispatch rather than a silent null.
+    State(String),
 }

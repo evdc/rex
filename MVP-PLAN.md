@@ -649,7 +649,55 @@ which only did the `delete` case; and relational `not` in a view expression
 *Acceptance:* `let n : Unit -> Int = count(Todo by unit)` evaluates
 incrementally under insert/retract to 0 when empty.
 
-#### S-51 `state` as a singleton relation (M, deps S-50, S-40)
+#### S-51 `state` as a singleton relation (M, deps S-50, S-40) — **done 2026-09-25** (`types/shape_ir.rs`'s `STATE_ENTITY`/`STATE_ROW`/`ValExpr::State`, `types/view.rs`'s state collection + `HStmt::Set`, `types/check.rs`'s `state_rel`, `events.rs`'s `ValExpr::State` arm; `crates/rex-core/tests/state.rs`, 10 tests)
+*Landed as:* every `state s : T [= d]` is a field of one hidden `State#`
+entity, whose single row is emitted as an ordinary top-level `new` — so S-21's
+genesis logging already covers it and replay from an empty engine restores the
+state with no new mechanism (`the_state_row_is_logged_as_genesis_so_replay_reproduces_it`).
+A defaultless `state` simply contributes no field initializer, so it is 0 rows
+until `set` (chat's `current : User`); reading it before then is a dispatch
+error rather than a silent null.
+
+**A bare state name elaborates to `unit . ~(State# . unit) . .s`.** §2.4 said
+"referenced via `unit`" without saying how, and the answer turned out to need
+no new machinery at all: `unit : X -> Unit` grounded in the ambient domain
+(S-50), the *inverse* of `State# . unit` to reach the one row through `Unit`,
+then the field. Every hop is an operator the circuit already maintains, which
+is exactly what makes §2.4's promise true — a `set` is one field delta flowing
+through two joins. The acceptance test asserts the observable form of that: a
+view that does not read the state does not move at all when the state changes,
+however many rows are downstream. When the ambient domain is already `Unit`
+(an S-53 root level) the first hop is skipped.
+
+`set s = v` is `MutationIR::Set` with `Target::All { entity: "State#" }` — the
+singleton needs no `Target` variant of its own, since "every row" is that row.
+Reading a state *inside* a mutation value (`set nextId = nextId + n`) is
+`ValExpr::State`, a point read of the one row against the pre-event snapshot,
+so the benchmark's increment is well defined rather than a loop.
+
+*Also in this story (folded in at the owner's request):*
+- **The S-41 bulk-update gap.** `update Todo { … }` with no `where` reported
+  "unknown parameter `Todo` in mutation": S-41 special-cased a bare entity
+  target inside the `delete` arm only. That case moved into
+  `Desugar::mutation_target`, so both verbs share one target rule and cannot
+  drift apart again. Covered by `update_with_no_predicate_sets_every_row`,
+  which also asserts it is one step (4 retractions + 4 assertions in one
+  delta batch), and it is what TodoMVC's `ToggleAll` needs.
+- **A `Bool` coherence bug S-50's verbatim spelling created.** Comparisons
+  still produced lowercase `@true`/`@false` while `Bool` had become
+  `{@True | @False}`, so a comparison could not be stored in a `Bool` field.
+  `TRUE`/`FALSE` are now single constants in `types/typed.rs`, shared by the
+  checker, the desugarer and the dispatcher. A constructor in *value*
+  position (a top-level `new`'s field initializer) also needed the S-50
+  treatment in `check_value`, which the type story missed.
+- `check.rs`'s relational-`not` diagnostic said "MVP-PLAN S-40", a story that
+  has landed; it is S-52's `except (where P)` and now says so.
+
+*Still open for their own stories:* TodoMVC is down from 8 check errors to 4,
+all of them S-52 (`match`, relational `not`), S-53 (`Unit` root) and S-61
+(components). Chat additionally needs `let x = new …` inside a handler.
+
+*Original story text:*
 *Files:* `types/view.rs` (the `state` rejection at line ~58), `check.rs`, `engine.rs`.
 *Subtasks:*
 1. Desugar `state filter : {@all+@active+@completed} = @all` to a hidden
