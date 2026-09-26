@@ -154,7 +154,8 @@ export class Shaper<El> {
         const el = level.shape.template(this.driver, child, this.ancestorKeys(level, parentKey));
         for (const attr of level.shape.attrs) {
           const v = this.resolveOne(attr.view, child);
-          if (v !== undefined) attr.apply(this.driver, el, v);
+          if (attr.presence) attr.apply(this.driver, el, v);
+          else if (v !== undefined) attr.apply(this.driver, el, v);
         }
         level.nodes.set(child, el);
         this.driver.insertBefore(
@@ -179,7 +180,11 @@ export class Shaper<El> {
           const el = level.nodes.get(child);
           if (el === undefined) continue;
           const v = this.resolveOne(attr.view, child);
-          if (v !== undefined) attr.apply(this.driver, el, v);
+          // A presence attribute is applied when its row *goes away* as well:
+          // that retraction is exactly "turn the class off" (S-52). A value
+          // attribute has nothing to apply without a value.
+          if (attr.presence) attr.apply(this.driver, el, v);
+          else if (v !== undefined) attr.apply(this.driver, el, v);
         }
       }
     }

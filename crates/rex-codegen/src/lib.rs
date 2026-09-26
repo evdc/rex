@@ -241,6 +241,11 @@ impl Emit {
             let t = nav_expr("el", &a.path);
             self.line("    {");
             self.line(&format!("      view: {},", js_str(&a.view)));
+            // A class gate is applied on absence too, so the shaper must not
+            // skip it when the view has no row for this key (S-52).
+            if matches!(a.kind, BindKind::Class(_)) {
+                self.line("      presence: true,");
+            }
             self.line("      apply: (_d, el, v) => {");
             let decode = decode_fn(a.encoding);
             match &a.kind {
@@ -253,14 +258,19 @@ impl Emit {
                     self.line("        if (_i.value !== _s) _i.value = _s;");
                 }
                 BindKind::Prop(prop) if prop == "checked" => {
-                    self.line(&format!("        ({t} as HTMLInputElement).checked = (v === encodeAtom(\"true\"));"));
+                    self.line(&format!(
+                        "        ({t} as HTMLInputElement).checked = (v === encodeAtom({}));",
+                        js_str(rex::types::typed::TRUE)
+                    ));
                 }
                 BindKind::Prop(prop) => {
                     self.line(&format!("        ({t} as any).{prop} = {decode}(v);"));
                 }
+                // Presence, not value: the gate view holds the key exactly
+                // when the class is on, so `undefined` means off (S-52).
                 BindKind::Class(cls) => {
                     self.line(&format!(
-                        "        ({t}).classList.toggle({}, v === encodeAtom(\"true\"));",
+                        "        ({t}).classList.toggle({}, v !== undefined);",
                         js_str(cls)
                     ));
                 }

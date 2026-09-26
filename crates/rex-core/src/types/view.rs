@@ -1225,13 +1225,30 @@ impl LevelWalk<'_> {
                 }
                 AttrValue::Static(s) => static_attrs.push((a.name.clone(), s.clone())),
                 AttrValue::Bind(expr) => {
-                    let kind = if let Some(cls) = a.name.strip_prefix("class.") {
-                        BindKind::Class(cls.to_string())
+                    if let Some(cls) = a.name.strip_prefix("class.") {
+                        // A class bind is a *gate*, not a value (S-52): its
+                        // view is coreflexive on the level's key, present
+                        // exactly when the class should be on, so the driver
+                        // toggles by presence and never decodes a boolean.
+                        // That is also what lets the gate be a comparison
+                        // (`class.selected=(filter = All)`) rather than only
+                        // a `Bool` field.
+                        let view = self.gate_view(expr);
+                        self.attrs.push(AttrBinding {
+                            view,
+                            path: path.to_vec(),
+                            kind: BindKind::Class(cls.to_string()),
+                            encoding: Encoding::Text,
+                        });
                     } else {
-                        BindKind::Prop(a.name.clone())
-                    };
-                    let (view, encoding) = self.bind_view(expr);
-                    self.attrs.push(AttrBinding { view, path: path.to_vec(), kind, encoding });
+                        let (view, encoding) = self.bind_view(expr);
+                        self.attrs.push(AttrBinding {
+                            view,
+                            path: path.to_vec(),
+                            kind: BindKind::Prop(a.name.clone()),
+                            encoding,
+                        });
+                    }
                 }
             }
         }
@@ -1306,6 +1323,25 @@ impl LevelWalk<'_> {
             compose(ident(self.entity, Span::point(0)), expr.clone(), Span::point(0)),
         );
         (name, Encoding::Text)
+    }
+
+    /// The hidden view behind a class bind (S-52): `Binder where expr`, a
+    /// coreflexive on the level's key. Putting `expr` in filter position is
+    /// what makes both spellings work — a `Bool` field coerces to `… = True`
+    /// in the checker, and a comparison is already a coreflexive.
+    fn gate_view(&mut self, expr: &Expr) -> String {
+        self.d.attr_seq += 1;
+        let name = format!("{}#gate{}", self.level_name, self.d.attr_seq);
+        let span = Span::point(0);
+        let body = Expr {
+            kind: ExprKind::Where(
+                Box::new(ident(self.entity, span)),
+                Box::new(expr.clone()),
+            ),
+            span,
+        };
+        self.d.emit_let(&name, body);
+        name
     }
 
     fn attr_view(&mut self, field: &[String]) -> String {

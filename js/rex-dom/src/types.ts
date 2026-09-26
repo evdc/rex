@@ -47,6 +47,18 @@ export interface DomDriver<El> {
  * The root level's `parent` column is ignored: its children mount under the
  * container element the Shaper was constructed with.
  */
+export type AttrBinding<El> =
+  | {
+      readonly view: string;
+      readonly presence?: false;
+      readonly apply: (driver: DomDriver<El>, el: El, value: string) => void;
+    }
+  | {
+      readonly view: string;
+      readonly presence: true;
+      readonly apply: (driver: DomDriver<El>, el: El, value: string | undefined) => void;
+    };
+
 export interface ShapeNode<El> {
   /** Unique name within the shape tree. */
   readonly name: string;
@@ -56,11 +68,14 @@ export interface ShapeNode<El> {
    *  `ancestors` are the enclosing rows' keys, nearest first (`[0]` is the
    *  parent row), so a listener can pass an enclosing binder to a dispatch. */
   readonly template: (driver: DomDriver<El>, key: string, ancestors: readonly string[]) => El;
-  /** Attribute views (`child -> value`) and how each lands on the element. */
-  readonly attrs: readonly {
-    readonly view: string;
-    readonly apply: (driver: DomDriver<El>, el: El, value: string) => void;
-  }[];
+  /** Attribute views and how each lands on the element.
+   *
+   *  A **value** attribute (`child -> value`) is applied only when the view
+   *  has a value for the key. A **presence** attribute (`child -> child`, a
+   *  coreflexive gate holding the key exactly when a class is on) is applied
+   *  on absence as well, since the row going away *is* "turn the class off";
+   *  its `value` is therefore `string | undefined`. */
+  readonly attrs: readonly AttrBinding<El>[];
   /** Optional ordering view (`child -> fractional key`). Unordered levels
    *  append. */
   readonly orderView?: string;

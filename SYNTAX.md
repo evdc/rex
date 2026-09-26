@@ -268,11 +268,12 @@ first input of the row the preceding `do` created at level `c`;
 | `entity Card { list: List }` | field `list : Card -> List` + identity `Card` |
 | `rel R(A, B)` | field `R` on `A` + `let R = A . R` |
 | `.f` / `x.f` / `R . S` | compose-join; `.f` composes the ambient row with field `f` |
-| `type T = A \| B` ; `Bool` | coproduct of atoms `{@A \| @B}`; `where .done` ≡ `where .done = True`; `not P` ≡ `except (where P)` |
-| `Unit`, `unit` | built-in one-row sort; `unit : X -> Unit` constant |
-| `state s : T [= d]` | hidden entity `State#` (one genesis row, field `s` seeded iff a default); `s` ≡ `unit . s` |
-| `match e { p => r, … }` | `(e = p₁) . r₁ \| (e = p₂) . r₂ \| …` |
-| `if c then a else b` | `(c . a) \| (not c . b)` |
+| `type T = A \| B` ; `Bool` | coproduct of atoms `{@A \| @B}` (a constructor names its atom verbatim); `where .done` ≡ `where .done = True`; `not P` ≡ `id except P` |
+| `Unit`, `unit` | built-in one-row sort; `unit : X -> Unit` constant; `count(X by unit)` is total, so it is `0` when empty |
+| `state s : T [= d]` | hidden entity `State#` (one genesis row, field `s` seeded iff a default); `s` ≡ `unit . ~(State# . unit) . .s` |
+| `match e { p => r, …, _ => d }` | `(id where e = p₁) . r₁ \| … \| (id except ((id where e = p₁) \| …)) . d` |
+| `if c then a else b` | `(id where c) . a \| (id except (id where c)) . b` |
+| `class.x = e` | hidden gate view `Binder where e` (coreflexive); the driver toggles `x` by row presence, decoding nothing |
 | `event E(p: T…)` / `on E(p…) { … }` | an `EventDef`; handler = checked statement list run as ONE transaction |
 | `update E where P {…}` (arg-free `P`) | hidden `let on#E#k = E where P`; dispatch reads the keyset |
 | `x.f := e` | `update x { f: e }` |

@@ -606,16 +606,45 @@ impl Checker {
             ExprKind::Div(a, b) => self.check_arith(a, b, dom, span, ArithOp::Div),
             ExprKind::Mod(a, b) => self.check_arith(a, b, dom, span, ArithOp::Mod),
             ExprKind::Concat(a, b) => self.check_arith(a, b, dom, span, ArithOp::Concat),
-            // Relational `not` (`Todo where not .completed`) is S-52's
-            // `except (where P)`, not S-40's mutation-value `not`, which
-            // landed and lives in `types/view.rs`.
-            ExprKind::Not(_) => self.error(
-                span,
-                "`not` in a relational expression is not supported yet (MVP-PLAN S-52: `not P` \
-                 desugars to `except (where P)`)",
-            ),
-            ExprKind::Match { .. } => self.error(span, "`match` is not supported yet (MVP-PLAN S-52)"),
-            ExprKind::If { .. } => self.error(span, "`if … then … else` is not supported yet (MVP-PLAN S-52)"),
+            // `not P` is the complement of `P`'s coreflexive within the
+            // ambient domain: `id except P` (S-52). `P` is first coerced the
+            // way any predicate is, so `not .completed` means "no `True` in
+            // `.completed`" — which correctly includes a row with no value
+            // there at all, not just one holding `False`.
+            ExprKind::Not(p) => {
+                let Some(d) = dom.clone() else {
+                    return self.error(span, "`not` needs a known domain (add a type annotation)");
+                };
+                let sort = self.as_sort(span, &d, "`not`")?;
+                let tp = self.check_rel(p, dom)?;
+                let tp = self.as_predicate(tp, span)?;
+                let ident = TExpr::new(
+                    TExprKind::Identity(sort),
+                    RelTy::coreflexive(d.clone()),
+                    span,
+                );
+                Ok(TExpr::new(
+                    TExprKind::Antijoin(Box::new(ident), Box::new(tp)),
+                    RelTy::coreflexive(d),
+                    span,
+                ))
+            }
+            // Both expand to core forms and are then checked normally, so
+            // they need no node of their own in the typed IR, the batch
+            // evaluator or the circuit — and the oracle tests cover them for
+            // free. The expansions are in SYNTAX.md's desugaring table.
+            ExprKind::Match { scrutinee, arms } => {
+                let expanded = self.expand_match(scrutinee, arms, span)?;
+                self.check_rel(&expanded, dom)
+            }
+            ExprKind::If { cond, then, els } => {
+                let expanded = gated_union(
+                    &[((**cond).clone(), (**then).clone())],
+                    Some((**els).clone()),
+                    span,
+                );
+                self.check_rel(&expanded, dom)
+            }
 
             ExprKind::Compare { op, lhs, rhs } => self.check_compare(*op, lhs, rhs, dom, span),
             ExprKind::In { lhs, rhs } => self.check_in(lhs, rhs, dom, span),
@@ -626,6 +655,97 @@ impl Checker {
                 self.error(span, "`new` may only appear as the body of a `let`")
             }
         }
+    }
+
+    /// Coerce an expression used in predicate position to a coreflexive.
+    ///
+    /// A `Bool`-valued expression standing alone as a filter means "the ones
+    /// where it holds": `where .completed` is `where .completed = True`
+    /// (SYNTAX §4). Anything already coreflexive passes through untouched,
+    /// and anything else is an error here rather than at the join.
+    fn as_predicate(&mut self, t: TExpr, span: Span) -> TResult<TExpr> {
+        let ty = t.ty.clone();
+        let t = self.coerce_bool_filter(t, span);
+        if t.ty.from == t.ty.to {
+            return Ok(t);
+        }
+        self.error(
+            span,
+            format!(
+                "a filter must be a comparison or a `Bool`, but this is `{}`",
+                self.env.show_rel(&ty)
+            ),
+        )
+    }
+
+    /// Rewrite a `Bool`-valued expression in filter position to `… = True`,
+    /// and leave anything else exactly as it was. Not erroring on "anything
+    /// else" matters: a restrictor whose columns simply do not line up should
+    /// still get `expect_join`'s precise "join column mismatch", not a vaguer
+    /// complaint about filters.
+    fn coerce_bool_filter(&mut self, t: TExpr, span: Span) -> TExpr {
+        if t.ty.from == t.ty.to {
+            return t;
+        }
+        let is_bool = t
+            .ty
+            .to
+            .atoms()
+            .is_some_and(|a| a.contains(&TRUE) && a.iter().all(|x| *x == TRUE || *x == FALSE));
+        if !is_bool {
+            return t;
+        }
+        let ValueTy::Id(sort) = t.ty.from else {
+            return t;
+        };
+        let from = t.ty.from.clone();
+        let yes = TExpr::new(
+            TExprKind::Const { lit: Lit::Atom(TRUE.to_string()), dom: sort },
+            RelTy::new(from.clone(), ValueTy::Atom(TRUE.to_string())),
+            span,
+        );
+        TExpr::new(
+            TExprKind::BinCompare(CmpOp::Eq, Box::new(t), Box::new(yes)),
+            RelTy::coreflexive(from),
+            span,
+        )
+    }
+
+    /// `match S { P => R, … }` is a union of arms, each gated by a comparison
+    /// of the scrutinee against that arm's pattern (S-52). A `_` arm is gated
+    /// by the complement of every named pattern, so exactly one arm's gate
+    /// holds at each key and the union is a disjoint sum.
+    fn expand_match(&mut self, scrutinee: &Expr, arms: &[MatchArm], span: Span) -> TResult<Expr> {
+        if arms.is_empty() {
+            return self.error(span, "`match` needs at least one arm");
+        }
+        let mut gated: Vec<(Expr, Expr)> = Vec::new();
+        let mut default = None;
+        for (i, arm) in arms.iter().enumerate() {
+            let pat = match &arm.pat {
+                Pattern::Wildcard => {
+                    if i + 1 != arms.len() {
+                        return self.error(arm.span, "a `_` arm must come last");
+                    }
+                    default = Some(arm.body.clone());
+                    continue;
+                }
+                Pattern::Ident(n) => Expr { kind: ExprKind::Ident(n.clone()), span: arm.span },
+                Pattern::Atom(a) => Expr { kind: ExprKind::Atom(a.clone()), span: arm.span },
+                Pattern::Int(n) => Expr { kind: ExprKind::Int(*n), span: arm.span },
+                Pattern::Str(t) => Expr { kind: ExprKind::Str(t.clone()), span: arm.span },
+            };
+            let cond = Expr {
+                kind: ExprKind::Compare {
+                    op: CmpOp::Eq,
+                    lhs: Some(Box::new(scrutinee.clone())),
+                    rhs: Box::new(pat),
+                },
+                span: arm.span,
+            };
+            gated.push((cond, arm.body.clone()));
+        }
+        Ok(gated_union(&gated, default, span))
     }
 
     /// A bare `state` name as a relation `X -> V` (S-51).
@@ -801,6 +921,11 @@ impl Checker {
     ) -> TResult<TExpr> {
         let ta = self.check_rel(a, dom)?;
         let tb = self.check_rel(b, Some(ta.ty.to.clone()))?;
+        // `where .completed` is `where .completed = True` (S-52): a
+        // `Bool`-valued filter standing alone means the ones where it holds.
+        // A semijoin against the raw `Todo -> Bool` would instead keep every
+        // row that has *any* value there.
+        let tb = self.coerce_bool_filter(tb, b.span);
         self.expect_join(span, &ta.ty.to, &tb.ty.from, "restriction `[]`/`where`")?;
         let ty = ta.ty.clone();
         // Ground a coreflexive built-in on the value column into a Filter (§9).
@@ -1223,6 +1348,52 @@ impl ArithOp {
             ArithOp::Concat => "`++`",
         }
     }
+}
+
+/// Build `(c1 . r1) | (c2 . r2) | … [| ((id except (c1 | c2 | …)) . default)]`
+/// — the shared shape of `match` and `if … then … else` (S-52). Each `c` is a
+/// coreflexive gate on the ambient domain, so composing it with that arm's
+/// body keeps the body where the gate holds and drops it elsewhere.
+fn gated_union(arms: &[(Expr, Expr)], default: Option<Expr>, span: Span) -> Expr {
+    let node = |kind| Expr { kind, span };
+    let compose = |a: Expr, b: Expr| node(ExprKind::Compose(Box::new(a), Box::new(b)));
+    let union = |a: Expr, b: Expr| node(ExprKind::Union(Box::new(a), Box::new(b)));
+    // `id where c`, so the gate is a coreflexive on the ambient domain
+    // whatever `c` is: composing a bare `Todo -> Bool` would thread `Bool`
+    // through as the next domain instead of keeping `Todo`. It also routes
+    // `c` through filter position, which is where a `Bool` picks up its
+    // implicit `= True`.
+    let gate = |c: Expr| node(ExprKind::Where(Box::new(node(ExprKind::Id)), Box::new(c)));
+
+    let mut out: Option<Expr> = None;
+    for (cond, body) in arms {
+        let arm = compose(gate(cond.clone()), body.clone());
+        out = Some(match out {
+            Some(acc) => union(acc, arm),
+            None => arm,
+        });
+    }
+    if let Some(body) = default {
+        // The `_` gate: every key the named gates did not claim.
+        let mut claimed: Option<Expr> = None;
+        for (cond, _) in arms {
+            let g = gate(cond.clone());
+            claimed = Some(match claimed {
+                Some(acc) => union(acc, g),
+                None => g,
+            });
+        }
+        let gate = match claimed {
+            Some(c) => node(ExprKind::Except(Box::new(node(ExprKind::Id)), Box::new(c))),
+            None => node(ExprKind::Id),
+        };
+        let arm = compose(gate, body);
+        out = Some(match out {
+            Some(acc) => union(acc, arm),
+            None => arm,
+        });
+    }
+    out.expect("at least one arm")
 }
 
 // --- literal helpers ------------------------------------------------------

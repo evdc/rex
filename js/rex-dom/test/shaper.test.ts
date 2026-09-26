@@ -254,3 +254,70 @@ describe("batch atomicity", () => {
     expect(shaper.el("list", "doing")!.children).toEqual([]);
   });
 });
+
+/**
+ * S-52: a class bind is a *gate*, not a value. Its view is coreflexive —
+ * it holds the child's key exactly when the class should be on — so the
+ * driver toggles by presence and never decodes a boolean. The case that
+ * makes this different from a value attribute is the retraction: the row
+ * going away has to turn the class *off*, and a value attribute would
+ * simply not be applied at all.
+ */
+describe("presence attributes", () => {
+  const gatedShape: ShapeNode<SpyEl> = {
+    name: "todo",
+    membershipView: "todo",
+    template: (d) => d.createElement("li"),
+    attrs: [
+      { view: "todo_title", apply: (d, el, v) => d.setText(el, v) },
+      {
+        view: "todo_done",
+        presence: true,
+        apply: (d, el, v) => d.setAttr(el, "done", v === undefined ? "off" : "on"),
+      },
+    ],
+    children: [],
+  };
+
+  function setupGated() {
+    const driver = new SpyDriver();
+    const root = driver.createElement("ul");
+    const shaper = new Shaper(driver, root, [gatedShape]);
+    shaper.applyStep({
+      todo: [
+        ["t1", "u", 1],
+        ["t2", "u", 1],
+      ],
+      todo_title: [
+        ["t1", "Write", 1],
+        ["t2", "Ship", 1],
+      ],
+      // Only t2 is done, so only t2's gate has a row.
+      todo_done: [["t2", "t2", 1]],
+    });
+    return { driver, shaper };
+  }
+
+  test("applies the gate on mount, on and off", () => {
+    const { shaper } = setupGated();
+    expect(shaper.el("todo", "t1")!.attrs.done).toBe("off");
+    expect(shaper.el("todo", "t2")!.attrs.done).toBe("on");
+  });
+
+  test("turns the class off when the gate row is retracted", () => {
+    const { driver, shaper } = setupGated();
+    driver.resetCounts();
+    shaper.applyStep({ todo_done: [["t2", "t2", -1]] });
+    expect(shaper.el("todo", "t2")!.attrs.done).toBe("off");
+    // One setAttr on the same element — no remount, no other element touched.
+    expect(driver.counts).toMatchObject({ setAttr: 1, createElement: 0, removeChild: 0 });
+  });
+
+  test("turns the class on when a gate row appears", () => {
+    const { driver, shaper } = setupGated();
+    driver.resetCounts();
+    shaper.applyStep({ todo_done: [["t1", "t1", 1]] });
+    expect(shaper.el("todo", "t1")!.attrs.done).toBe("on");
+    expect(driver.counts).toMatchObject({ setAttr: 1, createElement: 0, removeChild: 0 });
+  });
+});

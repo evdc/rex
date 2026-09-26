@@ -710,7 +710,56 @@ all of them S-52 (`match`, relational `not`), S-53 (`Unit` root) and S-61
 delta; test asserts no view is backfilled/recomputed (count circuit node
 evaluations).
 
-#### S-52 `match` / `if` in filters and attributes (M, deps S-51)
+#### S-52 `match` / `if` in filters and attributes (M, deps S-51) — **done 2026-09-26** (`types/check.rs`'s `expand_match`/`gated_union`/`as_predicate`/`coerce_bool_filter`, `types/view.rs`'s `gate_view`, `rex-codegen`'s `BindKind::Class` arm, `js/rex-dom`'s `AttrBinding` union; `crates/rex-core/tests/match_if.rs` (9), `crates/rex-codegen/tests/class_gate.rs` (3), 3 new vitest cases)
+*Landed as:* `match`, `if … then … else` and relational `not` **expand to
+core forms in the checker and are then checked normally**, so none of them
+adds a node to the typed IR, the batch evaluator or the circuit — and the
+oracle property tests cover them for free. The expansions are in SYNTAX.md's
+table; each is also asserted against a fresh batch evaluation.
+
+The one subtlety: an arm's gate must be *coreflexive on the ambient domain*,
+so every gate is built as `id where c` rather than `c` itself. Composing a
+bare `Todo -> Bool` would thread `Bool` through as the next ambient domain
+and the arm body would then fail to ground. Wrapping in `where` also routes
+the condition through filter position, which is where a `Bool` picks up its
+implicit `= True` — so `if .completed then … else …` and `match` arms get
+that coercion by construction rather than by a second rule.
+
+*Deviation from the literal subtasks:* subtask 1 wrote the surface as
+`Todo where match filter { … }`, but the acceptance program (`app.rex`, the
+S-02 authority) has `match` at *expression* level as a `let` body, with whole
+relations as arms. That is what was implemented. `_` is the complement of
+every named gate, and must come last.
+
+`not P` is `id except P`, not `except (where P)` applied to a specific base —
+the complement within the ambient domain. This matters at 6NF: a row with no
+value for the field at all *is* "not completed", which `= False` would miss
+and the complement gets right. Covered by
+`relational_not_is_the_complement_within_the_domain`.
+
+Subtask 2 (class binds by presence) went end to end, since TodoMVC's
+`class.selected=(filter = All)` is coreflexive-valued and could never have
+matched a decoded atom:
+- `Desugar::gate_view` emits `Binder where e` for a `class.x=` bind, so the
+  attribute view is a coreflexive gate holding the key exactly when the class
+  is on.
+- Codegen emits `classList.toggle(x, v !== undefined)` plus `presence: true`
+  on the binding.
+- `js/rex-dom`'s attribute contract became a discriminated union: a value
+  attribute's `apply` still takes `string`, a presence attribute's takes
+  `string | undefined`, and the shaper applies the latter **on absence too**.
+  Without that the class could be turned on but never off — the shaper's
+  `if (v !== undefined)` guard silently skipped the retraction.
+
+*Also fixed:* codegen's `checked` prop compared against `encodeAtom("true")`,
+the last lowercase-`Bool` site left over from S-50's verbatim spelling.
+
+*Result:* TodoMVC is down to **2** check errors, S-53 and S-61. Per the
+owner's call, the element-level `if (total > 0) { … }` that wraps static
+chrome stays in S-53 — it is a `Unit`-level conditional membership view, not
+a bind.
+
+*Original story text:*
 *Files:* `types/view.rs`, `check.rs`, `shape_ir.rs` (`BindKind::Class` with
 an expression), codegen.
 *Subtasks:*
