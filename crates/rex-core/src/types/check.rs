@@ -618,6 +618,10 @@ impl Checker {
                 let sort = self.as_sort(span, &d, "`not`")?;
                 let tp = self.check_rel(p, dom)?;
                 let tp = self.as_predicate(tp, span)?;
+                // The complement is only the complement if `P` ranges over
+                // the same keys: without this, `not (Other where …)` would
+                // antijoin against a foreign sort and quietly keep every row.
+                self.expect_join(span, &d, &tp.ty.from, "`not`")?;
                 let ident = TExpr::new(
                     TExprKind::Identity(sort),
                     RelTy::coreflexive(d.clone()),

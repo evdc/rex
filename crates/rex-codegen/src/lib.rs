@@ -213,8 +213,14 @@ impl Emit {
         // desugarer has already resolved the surface binder to a level name.
         let raw = match &a.extractor {
             Extractor::Value => "(ev.currentTarget as HTMLInputElement).value".to_string(),
+            // Must spell the same atoms the `checked` bind reads back
+            // (`True`/`False`), or the round trip silently un-toggles.
             Extractor::Checked => {
-                return "((ev.currentTarget as HTMLInputElement).checked ? encodeAtom(\"true\") : encodeAtom(\"false\"))".to_string()
+                return format!(
+                    "((ev.currentTarget as HTMLInputElement).checked ? encodeAtom({}) : encodeAtom({}))",
+                    js_str(rex::types::typed::TRUE),
+                    js_str(rex::types::typed::FALSE)
+                )
             }
             Extractor::Drag(_) => return "dragValue(ev)".to_string(),
             Extractor::DropPos { level, exclude } => format!(

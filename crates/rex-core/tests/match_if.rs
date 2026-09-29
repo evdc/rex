@@ -279,3 +279,20 @@ let bad : Todo = Todo where not .text
         "got {errs:?}"
     );
 }
+
+#[test]
+fn not_over_a_foreign_domain_is_rejected() {
+    // `not P` is `id except P`, so `P` has to range over the *ambient* keys.
+    // Antijoining against another sort's keys matches nothing, which would
+    // silently make `not` the identity instead of the complement.
+    let src = r#"
+entity Todo { text: Text }
+entity Project { name: Text }
+let bad : Todo = Todo where not (Project where .name = "x")
+"#;
+    let errs = errors(src);
+    assert!(
+        errs.iter().any(|e| e.contains("`not` join column mismatch")),
+        "got {errs:?}"
+    );
+}
