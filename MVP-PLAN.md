@@ -966,7 +966,24 @@ default applied via `except`-based defaulting (`present + (Todo except present) 
 
 ### E6 — Ordering (∥ with E2–E5)
 
-#### S-70 Typed order keys, `desc`, tiebreak (M, deps S-04)
+#### S-70 Typed order keys, `desc`, tiebreak (M, deps S-04) — **done 2026-09-29** (`js/rex-dom/src/order.ts`'s `compareEncoded`/`OrderIndex(desc)`, `types.ts`'s `orderDesc`, `shape_ir.rs`'s `order_desc`, `types/view.rs`, codegen; `js/rex-dom/test/order.test.ts` (10), `rex-codegen/tests/unit_root.rs`)
+*Was it a real dependency of S-90? Yes.* TodoMVC is `order by id`, and ids
+encode as `#3:9` / `#3:10`: compared as strings, the tenth todo sorts before
+the ninth. (The same bug bites any `Int` order key — the benchmark's `pos`.)
+*Landed as:* the comparator is picked by the **value's own encoding tag**
+rather than a new `orderKind` field threaded through the IR — the wire format
+is already self-describing (`i:`/`m:` numeric via `BigInt`, `#sort:seq`
+numeric by sort then sequence, everything else string order), so codegen needs
+to say nothing about types and a mixed/unknown key still sorts totally. The
+child key is the ascending tiebreak (numeric for ids too), also under `desc`.
+`order by … desc` is the only new IR: `ShapeLevel.order_desc` →
+`orderDesc: true` on the emitted `ShapeNode`, and the checker's "not
+supported yet" error is gone. Acceptance: `3 < 10`, ids `9 < 10`, and the
+benchmark's `SwapRows` is exactly two `insertBefore`, zero `createElement`/
+`removeChild` (spy driver).
+*Not done:* `orderedChildren` still returns encoded keys (its only consumer,
+the rebalance/drop helpers, wants them encoded).
+
 *Files:* `js/rex-dom/src/order.ts`, `types.ts` (`ShapeNode.orderKind`),
 `shape_ir.rs`, codegen.
 *Subtasks:* `OrderIndex` takes a comparator built from the order view's
@@ -1022,7 +1039,45 @@ in ROADMAP §3.2. No optimisation beyond low-hanging fruit.
 
 ### E8 — Persistence
 
-#### S-80 Persistence adapter + reload restore (M, deps S-22, S-30)
+#### S-80 Persistence adapter + reload restore (M, deps S-22, S-30) — **done 2026-09-29** (`js/rex-runtime/`: `src/{boot,persist,index}.ts`, `src/adapters/{memory,indexeddb}.ts`; codegen preamble; `js/rex-runtime/test/*` (12), `examples/kanban/e2e/persist.spec.ts` (3))
+*Was it a real dependency of S-90? Yes* — "reload restores" is in S-90's
+acceptance, and until now nothing consumed S-22's `log_since`/`base_snapshot`/
+`restore`/`forRestore`: generated code always did `new RexApp(PROGRAM)`.
+*Its own deps:* S-22's Rust/wasm side was already complete; **S-30 was not
+done and is only partly needed.** What S-80 needs from it is a home for
+`persist.ts` and `boot`, so this created a *minimal* `js/rex-runtime`. Not
+done (still S-30): moving `pkg/` out of `examples/kanban/src`, the `EnginePort`
+interface, removing `rex-dom`'s `Rebalancer` shim, `npm pack`, READMEs.
+`boot` takes the wasm class as an argument (`{ RexApp, program, adapter }`)
+instead of importing the glue, so `rex-runtime` has no wasm dependency and S-30
+can move `pkg/` without touching it.
+*Landed as:* `PersistenceAdapter { loadSnapshot, saveSnapshot, appendEvents,
+eventsSince }`, `MemoryAdapter`, `IndexedDbAdapter` (one DB per program; an
+`events` store keyed by `seq`, a one-record `snapshot` store; a duplicate
+append is ignored, so a retry is harmless). `boot`:
+- **nothing stored** → `new RexApp(program)`, persist its `@genesis` events;
+- **anything stored** → `RexApp.forRestore` (no seed — it would double the
+  restored rows), `restore(snapshot)` if there is one, `replay(tail, silent)`;
+  with *no* snapshot the log alone rebuilds seed + edits, so a page killed
+  before the first snapshot loses nothing;
+- afterwards each `dispatch`/`rebalance` (the engine's own methods, wrapped in
+  place) appends `log_since(cursor)`; a snapshot every 50 events, on
+  `visibilitychange`→hidden and on `pagehide`. Appends are serialised through
+  one promise chain and never throw into `dispatch`; `flush()` awaits them.
+Two decisions worth knowing: the DB name is `programKey(name, source)` — a hash
+of the program text — so an edited program starts clean instead of replaying
+another version's log (**consequence: changing `app.rex` discards that
+browser's saved state**); and `?ephemeral` swaps in `MemoryAdapter` for dev.
+`replay` advances the engine's cursor without re-logging, so seqs continue
+after a restore with no collisions (tested). `log_since` takes a `u64`, which
+wasm-bindgen exposes as `bigint`.
+*Acceptance:* the Kanban Playwright suite is unchanged and green with
+persistence on (12/12, real wasm); new e2e: an edit survives a reload with the
+seed not doubled, an edit that exists only in the log (no snapshot) is
+replayed, and `?ephemeral` does not persist. **TodoMVC and the benchmark have
+no browser app yet**, so "all three apps" waits on S-90/S-91, which now only
+need the codegen'd preamble.
+
 *Files:* `js/rex-runtime/src/persist.ts`, `src/adapters/{memory,indexeddb}.ts`, codegen boot.
 *Subtasks:*
 1. `PersistenceAdapter { loadSnapshot, saveSnapshot, appendEvents, eventsSince }`
@@ -1039,7 +1094,7 @@ replayed (test kills the page before the snapshot interval).
 
 ### E9 — Apps, gate, docs
 
-#### S-90 TodoMVC on Rex (M, deps S-52, S-53, S-61, S-62, S-70, S-80)
+#### S-90 TodoMVC on Rex (M, deps S-52, S-53, S-61, S-62, S-70, S-80) — *all dependencies now landed*
 *Files:* `examples/todomvc/*` (Vite + Playwright, same layout as kanban).
 *Acceptance:* the S-02 program runs unchanged; Playwright: add/toggle/edit/
 delete/filter/clear-completed, focus survives edit, reload restores.

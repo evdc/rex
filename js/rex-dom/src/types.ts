@@ -79,6 +79,9 @@ export interface ShapeNode<El> {
   /** Optional ordering view (`child -> fractional key`). Unordered levels
    *  append. */
   readonly orderView?: string;
+  /** `order by … desc`: reverse the order view's key order (child key still
+   *  breaks ties ascending). */
+  readonly orderDesc?: boolean;
   /** Nested shape levels; their membership views' parent column must be this
    *  level's child key. */
   readonly children: readonly ShapeNode<El>[];

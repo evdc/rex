@@ -24,3 +24,15 @@ fn a_unit_root_view_generates_a_level_per_root_and_gate() {
     // The count is an Int bind, decoded as one.
     assert!(out.contains("decodeInt"), "{out}");
 }
+
+#[test]
+fn order_by_desc_reaches_the_shape_node() {
+    let src = r#"
+entity Todo { text: Text, n: Int }
+view main = ul { Todo as t order by .n desc select li { .text } }
+"#;
+    let out = rex_codegen::generate(src, "./app.rex?raw").expect("clean codegen");
+    assert!(out.contains("orderDesc: true"), "{out}");
+    let asc = rex_codegen::generate(&src.replace(" desc", ""), "./app.rex?raw").unwrap();
+    assert!(!asc.contains("orderDesc"), "{asc}");
+}

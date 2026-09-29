@@ -53,6 +53,19 @@ jobs:
       - run: npx vitest run
         working-directory: js/rex-dom
 
+  rex-runtime:
+    name: rex-runtime vitest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+        working-directory: js/rex-runtime
+      - run: npx vitest run
+        working-directory: js/rex-runtime
+
   examples:
     name: examples (build + Playwright)
     needs: wasm-build

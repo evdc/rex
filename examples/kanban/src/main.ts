@@ -6,10 +6,14 @@ import {
   makeDraggable, makeDropTarget, dragValue, endOf, dropPos, maybeRebalance,
   type ShapeNode,
 } from "rex-dom";
+import { boot, IndexedDbAdapter, MemoryAdapter, programKey } from "rex-runtime";
 import PROGRAM from "./board.rex?raw";
 
 await init();
-const app = new RexApp(PROGRAM);
+const store = new URLSearchParams(location.search).has("ephemeral")
+  ? new MemoryAdapter()
+  : new IndexedDbAdapter(programKey("board", PROGRAM));
+const app = await boot({ RexApp, program: PROGRAM, adapter: store });
 (window as unknown as { __rexApp: RexApp }).__rexApp = app;
 const driver = new BrowserDriver();
 const container = document.getElementById("app")!;

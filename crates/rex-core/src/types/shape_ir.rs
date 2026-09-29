@@ -36,6 +36,8 @@ pub struct ShapeLevel {
     pub order_view: Option<String>,
     /// The base field name behind the order view (for the rebalance sweep).
     pub order_field: Option<String>,
+    /// `order by … desc`: the order view's keys sort descending (S-70).
+    pub order_desc: bool,
     /// The static DOM skeleton for one row's element.
     pub template: Tpl,
     /// Dynamic value bindings, each with a child-index path to its target.

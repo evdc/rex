@@ -45,8 +45,10 @@ export function dragValue(e: DragEvent, mime: string = DRAG_MIME): string {
   return e.dataTransfer!.getData(mime);
 }
 
-/** The `endOf(child)` extractor: a fresh fractional key after `parentKey`'s
- *  last child of the given level. Returns a BARE key; the caller encodes it. */
+/** The `endOf(child)` extractor: a fresh fractional key placing an item after
+ *  `parentKey`'s last *displayed* child of the given level (under `desc`, that
+ *  is the smallest key, so the new key goes below it). Returns a BARE key; the
+ *  caller encodes it. */
 export function endOf<El>(
   shaper: Shaper<El>,
   childLevel: string,
@@ -54,7 +56,7 @@ export function endOf<El>(
 ): string {
   const children = shaper.orderedChildren(childLevel, parentKey);
   const last = children.length ? decodeText(children[children.length - 1]![0]) : null;
-  return keyBetween(last, null);
+  return shaper.orderDesc(childLevel) ? keyBetween(null, last) : keyBetween(last, null);
 }
 
 /** The `dropPos(exclude)` extractor: a fractional key placing an item at the
@@ -80,9 +82,11 @@ export function dropPos<El>(
       break;
     }
   }
-  const lo = index > 0 ? decodeText(siblings[index - 1]![0]) : null;
-  const hi = index < siblings.length ? decodeText(siblings[index]![0]) : null;
-  return keyBetween(lo, hi);
+  // `before`/`after` are display neighbors; under `desc` the larger key is
+  // the one displayed first.
+  const before = index > 0 ? decodeText(siblings[index - 1]![0]) : null;
+  const after = index < siblings.length ? decodeText(siblings[index]![0]) : null;
+  return shaper.orderDesc(childLevel) ? keyBetween(after, before) : keyBetween(before, after);
 }
 
 /** Re-space a level's order keys under `parentKey` when same-gap churn has
@@ -102,6 +106,8 @@ export function maybeRebalance<El>(
   const ordered = shaper
     .orderedChildren(childLevel, parentKey)
     .map(([k, c]) => [decodeText(k), c] as const);
+  // The plan hands out ascending keys in list order, so feed it key order.
+  if (shaper.orderDesc(childLevel)) ordered.reverse();
   const plan = rebalancePlan(ordered);
   if (!plan) return;
   const rows = Array.from(plan, ([child, fresh]) => [child, encode(fresh)]);

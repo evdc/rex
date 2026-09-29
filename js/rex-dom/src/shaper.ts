@@ -38,7 +38,7 @@ export class Shaper<El> {
         parentOf: new Map(),
         orderOf: new Map(),
         nodes: new Map(),
-        order: new OrderIndex(),
+        order: new OrderIndex(shape.orderDesc ?? false),
       };
       this.levels.push(level);
       if (this.levelByName.has(shape.name)) {
@@ -64,6 +64,12 @@ export class Shaper<El> {
    *  rebalance helper consumes. */
   orderedChildren(shapeName: string, parentKey: string): readonly [string, string][] {
     return this.levelByName.get(shapeName)?.order.childrenOf(parentKey) ?? [];
+  }
+
+  /** Whether a level orders `desc`: `orderedChildren` then runs from the
+   *  largest order key down, which the fractional-key helpers must undo. */
+  orderDesc(shapeName: string): boolean {
+    return this.levelByName.get(shapeName)?.shape.orderDesc ?? false;
   }
 
   /** Apply one engine step: one delta batch, one synchronous DOM transaction. */

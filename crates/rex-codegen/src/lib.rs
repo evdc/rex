@@ -77,10 +77,18 @@ impl Emit {
         self.line("  makeDraggable, makeDropTarget, dragValue, endOf, dropPos, maybeRebalance,");
         self.line("  type ShapeNode,");
         self.line("} from \"rex-dom\";");
+        self.line("import { boot, IndexedDbAdapter, MemoryAdapter, programKey } from \"rex-runtime\";");
         self.line(&format!("import PROGRAM from \"{program_import}\";"));
         self.line("");
         self.line("await init();");
-        self.line("const app = new RexApp(PROGRAM);");
+        // State survives a reload (S-80): boot restores from IndexedDB, keyed
+        // by the program's source so an edited program starts clean rather
+        // than replaying another version's log. `?ephemeral` opts out.
+        self.line(&format!(
+            "const store = new URLSearchParams(location.search).has(\"ephemeral\")\n  ? new MemoryAdapter()\n  : new IndexedDbAdapter(programKey({}, PROGRAM));",
+            js_str(&program_name(program_import))
+        ));
+        self.line("const app = await boot({ RexApp, program: PROGRAM, adapter: store });");
         // A test hook, not a runtime dependency: Playwright inspects the log
         // through this (e.g. asserting a rebalance sweep landed there,
         // S-22) rather than poking at wasm internals.
@@ -115,6 +123,9 @@ impl Emit {
         self.line(&format!("  membershipView: {},", js_str(&level.membership_view)));
         if let Some(o) = &level.order_view {
             self.line(&format!("  orderView: {},", js_str(o)));
+            if level.order_desc {
+                self.line("  orderDesc: true,");
+            }
         }
         self.template(level);
         self.attrs(level);
@@ -411,6 +422,13 @@ fn var_name(name: &str) -> String {
         s.push(if ch.is_ascii_alphanumeric() { ch } else { '_' });
     }
     s
+}
+
+/// The app name in a program import specifier: `./dir/board.rex?raw` -> `board`.
+fn program_name(import: &str) -> String {
+    let file = import.rsplit('/').next().unwrap_or(import);
+    let stem = file.split('?').next().unwrap_or(file);
+    stem.strip_suffix(".rex").unwrap_or(stem).to_string()
 }
 
 /// A JSON/JS string literal.

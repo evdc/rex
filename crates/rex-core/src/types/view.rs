@@ -1308,9 +1308,6 @@ impl Desugar {
 
         // Order view: `E . <order expr>` (a field path or any co-keyed expression).
         let order_view = sel.order_by.as_ref().map(|o| {
-            if o.desc {
-                self.error(o.expr.span, "`order by … desc` is not supported yet (MVP-PLAN S-70)");
-            }
             let vname = format!("{name}#order");
             self.emit_let(&vname, compose(ident(e, span), o.expr.clone(), span));
             vname
@@ -1331,7 +1328,10 @@ impl Desugar {
                 return None;
             }
         };
-        Some(self.walk_level(name, &ent, e, &binder, ancestors, body, order_view, order_field))
+        let order_desc = sel.order_by.as_ref().is_some_and(|o| o.desc);
+        let mut level = self.walk_level(name, &ent, e, &binder, ancestors, body, order_view, order_field);
+        level.order_desc = order_desc;
+        Some(level)
     }
 
     /// Walk one level's element into a template + bindings + events + child
@@ -1383,6 +1383,7 @@ impl Desugar {
             membership_view: name.to_string(),
             order_view,
             order_field,
+            order_desc: false,
             template,
             attrs,
             events,

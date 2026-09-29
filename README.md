@@ -35,6 +35,7 @@ Workspace layout:
 | `crates/rex-cli` | The `rex` binary: REPL, run-a-file, and `rex build` (UI codegen). |
 | `crates/rex-codegen` | Shape IR → generated TypeScript (`main.ts`: shape tree, templates, event wiring). |
 | `crates/rex-wasm` | `RexApp`, the wasm-bindgen API (`dispatch`, `snapshot`, `apply_new`, `update_fields`, `retract`, `read_view`). |
+| `js/rex-runtime` | Boot + persistence: restores from an IndexedDB snapshot and event log, appends every dispatched event (S-80). |
 | `js/rex-dom` | TS shaper + bridge: −/+ fusion, phased apply, fractional ordering, drag/drop helpers. |
 | `examples/kanban` | The one end-to-end app (Vite + Playwright). |
 

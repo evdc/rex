@@ -8,7 +8,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "rex-dom": "file:../../js/rex-dom"
+    "rex-dom": "file:../../js/rex-dom",
+    "rex-runtime": "file:../../js/rex-runtime"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",
