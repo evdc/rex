@@ -17,7 +17,7 @@
 //! mutation bodies (the EventIR).
 
 use super::shape_ir::*;
-use super::typed::{ArithKind, Lit, FALSE, TRUE};
+use super::typed::{ArithKind, Lit, FALSE, TRUE, UNIT, UNIT_ROOT};
 use crate::ast::*;
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
@@ -255,6 +255,11 @@ struct Desugar {
     hidden_seq: usize,
 }
 
+
+/// The entity name and binder of a `Unit`-root level (S-53). The binder is
+/// not writable in source (`#`), so nothing can ever refer to it.
+const UNIT_ENTITY: &str = "Unit";
+const UNIT_BINDER: &str = "#unit";
 
 /// `type Name` -> its constructors (S-50).
 type TypeTable = std::collections::HashMap<String, Vec<String>>;
@@ -1047,10 +1052,15 @@ impl Desugar {
                     self.shapes.views.push(level);
                 }
             }
-            ViewBody::Element(e) => self.error(
-                e.span,
-                "a view whose body is a bare element (an implicit `Unit` root) is not supported yet (MVP-PLAN S-53)",
-            ),
+            // A bare element sits at the implicit `Unit` root (S-53): one
+            // level whose membership is the single point `unit`, so static
+            // chrome and scalar binds need no entity to range over.
+            ViewBody::Element(e) => {
+                let name = format!("{}#unit", v.name);
+                self.emit_let(&name, ident(UNIT_ROOT, e.span));
+                let level = self.walk_level(&name, UNIT_ENTITY, UNIT_BINDER, &[], e, None, None);
+                self.shapes.views.push(level);
+            }
         }
     }
 
@@ -1069,6 +1079,7 @@ impl Desugar {
         let binder = sel.binder.clone().unwrap_or_else(|| e.clone());
         let span = sel.span;
         let parent = ancestors.last().map(|(b, _)| b.as_str());
+        let under_unit = ancestors.last().is_some_and(|(_, ent)| ent == UNIT_ENTITY);
         if ancestors.iter().any(|(b, _)| b == &binder) {
             self.error(span, format!("binder `{binder}` shadows an enclosing level's binder"));
             return None;
@@ -1079,7 +1090,9 @@ impl Desugar {
         let mut membership_rel: Option<Expr> = None;
         let mut restrictions: Vec<Expr> = Vec::new();
         for w in &sel.wheres {
-            if let Some(rel) = self.as_membership(w, parent) {
+            if under_unit {
+                restrictions.push(w.clone());
+            } else if let Some(rel) = self.as_membership(w, parent) {
                 if membership_rel.is_some() {
                     self.error(w.span, "a nested `select` may have only one membership `where`");
                 }
@@ -1087,6 +1100,15 @@ impl Desugar {
             } else {
                 restrictions.push(w.clone());
             }
+        }
+        // Under a `Unit` level every row belongs to the one point, so the
+        // membership is just `E . unit` and needs no `where` (S-53).
+        if under_unit {
+            if let Some(w) = sel.wheres.iter().find(|w| self.as_membership(w, parent).is_some()) {
+                self.error(w.span, "a `select` directly under a `Unit` level has no parent field to relate to");
+                return None;
+            }
+            membership_rel = Some(ident(UNIT, span));
         }
         if parent.is_some() && membership_rel.is_none() {
             self.error(
@@ -1130,17 +1152,35 @@ impl Desugar {
             self.error(span, "a `select` whose body is a component call is not supported yet (MVP-PLAN S-61)");
             return None;
         };
-        let mut child_levels = std::collections::HashMap::new();
-        collect_child_levels(&body.children, name, &mut child_levels);
+        Some(self.walk_level(name, e, &binder, ancestors, body, order_view, order_field))
+    }
 
-        // Walk the element into a template + bindings + events + child levels.
+    /// Walk one level's element into a template + bindings + events + child
+    /// levels. The level's membership view (`name`) is already emitted; this
+    /// is shared by `select` levels, the `Unit` root, and `if` gates.
+    #[allow(clippy::too_many_arguments)]
+    fn walk_level(
+        &mut self,
+        name: &str,
+        entity: &str,
+        binder: &str,
+        ancestors: &[(String, String)],
+        body: &ElementExpr,
+        order_view: Option<String>,
+        order_field: Option<String>,
+    ) -> ShapeLevel {
+        let mut child_levels = std::collections::HashMap::new();
+        let mut seen = std::collections::HashMap::new();
+        collect_child_levels(&body.children, name, &mut seen, &mut child_levels);
+
         let mut lw = LevelWalk {
             d: self,
-            entity: e,
-            binder: &binder,
+            entity,
+            binder,
             ancestors,
             level_name: name,
             child_levels,
+            seen: Default::default(),
             attrs: Vec::new(),
             events: Vec::new(),
             children: Vec::new(),
@@ -1150,9 +1190,9 @@ impl Desugar {
         let events = std::mem::take(&mut lw.events);
         let children = std::mem::take(&mut lw.children);
 
-        Some(ShapeLevel {
+        ShapeLevel {
             name: name.to_string(),
-            entity: e.clone(),
+            entity: entity.to_string(),
             membership_view: name.to_string(),
             order_view,
             order_field,
@@ -1160,7 +1200,7 @@ impl Desugar {
             attrs,
             events,
             children,
-        })
+        }
     }
 
     /// If `w` is a membership conjunct `<childrel> = Parent` — where the LHS is
@@ -1204,6 +1244,9 @@ struct LevelWalk<'a> {
     level_name: &'a str,
     /// Binder -> level name of every `select` nested directly in this level.
     child_levels: std::collections::HashMap<String, String>,
+    /// How many `select`s of each entity have been named so far in this
+    /// level, so two of the same entity get distinct level names (S-53).
+    seen: std::collections::HashMap<String, usize>,
     attrs: Vec<AttrBinding>,
     events: Vec<EventBinding>,
     children: Vec<ShapeLevel>,
@@ -1279,9 +1322,7 @@ impl LevelWalk<'_> {
                     cp.push(tpl_children.len());
                     tpl_children.push(self.element(child, &cp));
                 }
-                Content::If { span, .. } => {
-                    self.d.error(*span, "`if (…) { … }` in a view is not supported yet (MVP-PLAN S-53)");
-                }
+                Content::If { cond, children, span } => self.gate(cond, children, *span),
                 Content::Component { span, .. } => {
                     self.d.error(*span, "component calls are not supported yet (MVP-PLAN S-61)");
                 }
@@ -1289,7 +1330,7 @@ impl LevelWalk<'_> {
                     self.d.error(*span, "`children` slots are not supported yet (MVP-PLAN S-61)");
                 }
                 Content::Select(sel) => {
-                    let child_name = format!("{}#{}", self.level_name, sel.entity.to_lowercase());
+                    let child_name = child_level_name(self.level_name, &sel.entity, &mut self.seen);
                     // The child's membership `where .f = <binder>` references THIS
                     // level's binder (alias or entity name), the last ancestor.
                     let mut chain = self.ancestors.to_vec();
@@ -1320,7 +1361,7 @@ impl LevelWalk<'_> {
         let name = format!("{}#bind{}", self.level_name, self.d.attr_seq);
         self.d.emit_let(
             &name,
-            compose(ident(self.entity, Span::point(0)), expr.clone(), Span::point(0)),
+            compose(self.base(), expr.clone(), Span::point(0)),
         );
         (name, Encoding::Text)
     }
@@ -1334,20 +1375,48 @@ impl LevelWalk<'_> {
         let name = format!("{}#gate{}", self.level_name, self.d.attr_seq);
         let span = Span::point(0);
         let body = Expr {
-            kind: ExprKind::Where(
-                Box::new(ident(self.entity, span)),
-                Box::new(expr.clone()),
-            ),
+            kind: ExprKind::Where(Box::new(self.base()), Box::new(expr.clone())),
             span,
         };
         self.d.emit_let(&name, body);
         name
     }
 
+    /// The identity relation of this level's rows: the entity for a `select`
+    /// level, the single point for a `Unit` level (S-53).
+    fn base(&self) -> Expr {
+        let span = Span::point(0);
+        if self.entity == UNIT_ENTITY { ident(UNIT_ROOT, span) } else { ident(self.entity, span) }
+    }
+
+    /// `if (cond) { … }` (S-53): each element in the body becomes its own
+    /// child level over the *same* rows, present exactly where `cond` holds —
+    /// membership `base where cond`, a coreflexive, so the child key equals
+    /// its parent key and the shaper mounts/removes it as `cond` flips.
+    fn gate(&mut self, cond: &Expr, body: &[Content], span: Span) {
+        let mut chain = self.ancestors.to_vec();
+        chain.push((self.binder.to_string(), self.entity.to_string()));
+        for c in body {
+            let Content::Element(el) = c else {
+                self.d.error(span, "an `if (…) { … }` body may contain only elements");
+                continue;
+            };
+            self.d.attr_seq += 1;
+            let name = format!("{}#if{}", self.level_name, self.d.attr_seq);
+            let membership = Expr {
+                kind: ExprKind::Where(Box::new(self.base()), Box::new(cond.clone())),
+                span: cond.span,
+            };
+            self.d.emit_let(&name, membership);
+            let level = self.d.walk_level(&name, self.entity, self.binder, &chain, el, None, None);
+            self.children.push(level);
+        }
+    }
+
     fn attr_view(&mut self, field: &[String]) -> String {
         let name = format!("{}#{}", self.level_name, field.join("."));
         self.d
-            .emit_let(&name, compose(ident(self.entity, Span::point(0)), field_path(field, Span::point(0)), Span::point(0)));
+            .emit_let(&name, compose(self.base(), field_path(field, Span::point(0)), Span::point(0)));
         name
     }
 
@@ -1539,22 +1608,40 @@ fn infer_param_type(x: &Extractor, span: Span) -> Option<Type> {
 fn collect_child_levels(
     contents: &[Content],
     level_name: &str,
+    seen: &mut std::collections::HashMap<String, usize>,
     out: &mut std::collections::HashMap<String, String>,
 ) {
     for c in contents {
         match c {
             Content::Select(sel) => {
                 let binder = sel.binder.clone().unwrap_or_else(|| sel.entity.clone());
-                out.insert(binder, format!("{level_name}#{}", sel.entity.to_lowercase()));
+                out.insert(binder, child_level_name(level_name, &sel.entity, seen));
             }
-            Content::Element(e) => collect_child_levels(&e.children, level_name, out),
-            Content::If { children, .. } => collect_child_levels(children, level_name, out),
+            Content::Element(e) => collect_child_levels(&e.children, level_name, seen, out),
+            // An `if` body's elements are levels of their own (S-53), with
+            // their own child levels: not this level's to name.
+            Content::If { .. } => {}
             Content::Component { children: Some(kids), .. } => {
-                collect_child_levels(kids, level_name, out)
+                collect_child_levels(kids, level_name, seen, out)
             }
             _ => {}
         }
     }
+}
+
+/// The name of the next nested `select` of `entity` under `level_name`: the
+/// second and later ones of the same entity get a numeric suffix so sibling
+/// levels never collide (S-53). Called in document order by both
+/// `collect_child_levels` and `LevelWalk::element`, so they agree.
+fn child_level_name(
+    level_name: &str,
+    entity: &str,
+    seen: &mut std::collections::HashMap<String, usize>,
+) -> String {
+    let n = seen.entry(entity.to_string()).or_insert(0);
+    *n += 1;
+    let base = format!("{level_name}#{}", entity.to_lowercase());
+    if *n == 1 { base } else { format!("{base}{n}") }
 }
 
 fn show_type(ty: &Type) -> String {

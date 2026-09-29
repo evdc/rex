@@ -774,7 +774,52 @@ an expression), codegen.
 *Acceptance:* TodoMVC filter buttons work with node identity preserved
 (Playwright: toggling filter keeps the surviving `<li>` nodes).
 
-#### S-53 `Unit` root levels and scalar binds in views (M, deps S-50, S-20)
+#### S-53 `Unit` root levels and scalar binds in views (M, deps S-50, S-20) — **done 2026-09-29** (`types/view.rs`'s `Desugar::view`/`walk_level`/`LevelWalk::gate`/`base`, `types/check.rs`'s `UNIT_ROOT`/`UnitConst`, `types/typed.rs`'s `UnitPoint`/`UnitConst`; `crates/rex-core/tests/unit_root.rs` (7), `crates/rex-codegen/tests/unit_root.rs` (1))
+*Landed as:* a bare-element `view` is one `ShapeLevel` with `entity: "Unit"`,
+membership `let main#unit = unit#root`. `unit#root` is a desugarer-only name
+(the `#` keeps user code from writing it) for the coreflexive point
+`{unit ↦ unit}`: it needs no ambient domain, which is what lets a hidden
+`let` for a `Unit`-level bind go **un-annotated** like every other view `let`.
+Two checker additions made everything else in the level ground with no new
+circuit node beyond one `ConstSingleton`: `TExprKind::UnitPoint`, and
+`UnitConst(lit)` — what a literal (`0` in `total > 0`, `All` in
+`filter = All`) grounds to when the ambient domain is `Unit` instead of an
+entity, lowered as `MapConst(ConstSingleton(unit), lit)`. Binds, class gates
+and state reads at a Unit level all reuse `LevelWalk::base()` (the point
+instead of the entity), so `active`, `filter = All` and `count(… by unit)`
+work unchanged; a bare state skips its first hop, as S-51 anticipated.
+
+`if (c) { … }` is **one child level per element in the body**, over the same
+point/row, membership `Base where c`. A level holds one root element, so the
+alternative — a single wrapper — would have changed the DOM. Because the
+gate is coreflexive the child key equals its parent's, the shaper mounts and
+removes it as `c` flips, and it works at *any* level (an entity row too), not
+just the root. A `select` directly under a `Unit` level takes membership
+`E . unit` and needs no `where`. Two `select`s of one entity in a level now
+get distinct names (`…#todo`, `…#todo2`); `collect_child_levels` and the
+walk number them in the same document order.
+
+*Known limitation (not fixed — needs shaper work, and the plan expected
+`rex-dom` untouched):* sibling levels under one parent element append in
+mount order, so a gate that flips *after* a later static/level sibling is
+already present mounts after it. TodoMVC's `if`s are the last children of
+their parents (and `section.main`/`footer` flip together, in tree order), so
+it is unaffected; an `if` *followed* by siblings is not covered. The fix is a
+sibling-position anchor in the shaper; write it before an app needs it.
+
+*Acceptance:* `unit_root.rs` checks the root is one level with the one-point
+membership; the gate asserts exactly one assertion at the root key when the
+count goes 0→1 and *no* delta on the gate for 1→2; the count bind is a
+single −1/+2 pair at one key (the shaper fuses it to one `setText`, S-03's
+contract); a class gate over `filter` retracts on `Set`. A shaper-level
+spy-driver test was not added: it would only re-prove S-03's fusion contract
+on a new fixture. **TodoMVC now checks with only S-61 errors left** (component
+decl + `select TodoItem(t)`); `todomvc_checks`'s ignore reason says so. Chat's
+remaining errors are a binder used as an expression (`u = current`) and
+`let x = new …` in a handler; the benchmark's are `import js` and untyped
+extractor params.
+
+*Original story text:*
 *Files:* `types/view.rs`, `shape_ir.rs`, codegen, `js/rex-dom` (none expected).
 *Subtasks:*
 1. A `view` whose body starts with an element (not a `select`) gets an

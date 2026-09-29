@@ -152,6 +152,14 @@ fn lower_in(
             let ids = input_node(circuit, scope, InputKey::Identity(*dom));
             circuit.add_node(Node::MapConst(ids, lit_value(lit)))
         }
+        TExprKind::UnitConst(lit) => {
+            let point = circuit.add_node(Node::ConstSingleton { value: Value::Unit, fired: false });
+            circuit.add_node(Node::MapConst(point, lit_value(lit)))
+        }
+        TExprKind::UnitPoint => circuit.add_node(Node::ConstSingleton {
+            value: Value::Unit,
+            fired: false,
+        }),
         TExprKind::Atom(a) => circuit.add_node(Node::ConstSingleton {
             value: Value::atom(a),
             fired: false,

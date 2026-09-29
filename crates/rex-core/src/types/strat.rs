@@ -58,7 +58,7 @@ fn op_name(kind: &TExprKind) -> Option<&'static str> {
         },
         Concat(..) => "concat",
         Identity(..) | View(..) | RecVar(..) | ValueRef(..) | Field(..) | Const { .. }
-        | Atom(..) | Filter(..) | Coreflexive(..) => return None,
+        | Atom(..) | UnitPoint | UnitConst(..) | Filter(..) | Coreflexive(..) => return None,
     })
 }
 
@@ -68,7 +68,7 @@ fn walk(e: &TExpr, out: &mut Vec<Diagnostic>) -> bool {
     use TExprKind::*;
     let recursive = match &e.kind {
         RecVar(_) => true,
-        Identity(_) | View(_) | ValueRef(_) | Field(_) | Const { .. } | Atom(_)
+        Identity(_) | View(_) | ValueRef(_) | Field(_) | Const { .. } | Atom(_) | UnitPoint | UnitConst(_)
         | Coreflexive(_) => false,
         Filter(a, _) | Distinct(a) | Inverse(a) | Proj(_, a) | Agg(_, a, _) | InRel(a, _) => {
             walk(a, out)

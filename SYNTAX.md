@@ -279,10 +279,12 @@ first input of the row the preceding `do` created at level `c`;
 | `x.f := e` | `update x { f: e }` |
 | `new E from R as (k, v) {…}` | one `new` per tuple, `k` ≡ `id`, `v` ≡ `R`, in one transaction |
 | `do F(args)` in a handler | inline `F`'s body into the same transaction |
-| `view main = <element>` | implicit root level over `Unit`; `let main#unit = Unit` |
+| `view main = <element>` | implicit root level over `Unit`; `let main#unit = unit#root` (the point `{unit ↦ unit}`); a bind is `unit#root . e`, a class gate `unit#root where e` |
 | `R as x order by e select …` | `let main#x = R`, `let main#x#order = R . e` |
 | `Card as c where .list = l …` (nested) | `let …#c = Card . list` (composite membership) |
-| `if (c) { … }` in a view | a level `X where c select …` |
+| `if (c) { … }` in a view | one child level per element in the body, membership `Base where c` (coreflexive: child key = parent key), so it mounts/removes as `c` flips |
+| `select` directly under a `Unit` level | membership `E . unit`; no `where` relating it to a parent |
+| two `select`s of one entity in a level | second is named `…#entity2`, third `…#entity3` |
 | `{ e }` / `attr=e` | attribute view `let …#attr = X . e`; coreflexives bind by presence |
 | `Name(args) { … }` | inline expansion with binder substitution; block at the `children` slot |
 | `local s = d` in `Name(x: E)` | hidden entity keyed by `E` with field `s`, defaulted via `except` |

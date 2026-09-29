@@ -29,6 +29,12 @@ pub enum Lit {
 /// shadows it.
 pub const UNIT: &str = "unit";
 
+/// The desugarer's spelling of the coreflexive point `{unit -> unit}` (S-53):
+/// the membership relation and bind base of a `Unit`-root view level. Unlike
+/// `unit` it needs no ambient domain (it *is* a `Unit -> Unit`), and the `#`
+/// keeps a user program from ever writing it.
+pub const UNIT_ROOT: &str = "unit#root";
+
 /// The constructors of the predeclared `type Bool = True | False`
 /// (MVP-PLAN §5 decision 3). A constructor names its atom verbatim (S-50),
 /// so these are the atom names a comparison yields and a `Bool` field holds —
@@ -100,6 +106,12 @@ pub enum TExprKind {
     Const { lit: Lit, dom: SortId },
     /// A singleton coreflexive `{@a -> @a}`.
     Atom(String),
+    /// The singleton coreflexive `{unit -> unit}` on `Unit` (S-53).
+    UnitPoint,
+    /// A constant relation `unit -> lit` on `Unit` itself: what a literal
+    /// grounds to when the ambient domain is `Unit` rather than an entity
+    /// (S-53), so `total > 0` and `filter = All` type-check at a root level.
+    UnitConst(Lit),
 
     Compose(Box<TExpr>, Box<TExpr>),
     Semijoin(Box<TExpr>, Box<TExpr>),

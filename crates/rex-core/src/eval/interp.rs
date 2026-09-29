@@ -240,6 +240,12 @@ pub fn eval_expr_with(store: &dyn Store, te: &TExpr) -> BTreeRelation {
             r
         }
         TExprKind::Atom(a) => singleton(Value::atom(a)),
+        TExprKind::UnitPoint => singleton(Value::Unit),
+        TExprKind::UnitConst(lit) => {
+            let mut r = BTreeRelation::new();
+            r.add(Value::Unit, lit_value(lit), 1);
+            r
+        }
 
         TExprKind::Compose(a, b) => algebra::compose(&eval(a), &eval(b)),
         TExprKind::Semijoin(a, b) => algebra::semijoin(&eval(a), &eval(b)),

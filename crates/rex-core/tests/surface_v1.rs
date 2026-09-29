@@ -36,15 +36,15 @@ fn kanban_v1_parses() { parses_clean(KANBAN_V1); }
 fn chat_parses() { parses_clean(CHAT); }
 
 #[test]
-#[ignore = "S-51/S-53/S-61: empty state, Unit root, components"]
+#[ignore = "S-60/S-61: binder in an expression (`u = current`), components, `let x = new` in a handler"]
 fn chat_checks() { checks_clean(CHAT); }
 
 #[test]
-#[ignore = "S-53/S-61/S-62: Unit root, components, local"]
+#[ignore = "S-61/S-62: components, local"]
 fn todomvc_checks() { checks_clean(TODOMVC); }
 
 #[test]
-#[ignore = "S-42/S-53/S-61: insert-from, Unit root, components"]
+#[ignore = "S-42/S-61: `import js`, untyped extractor params, components"]
 fn bench_checks() { checks_clean(BENCH); }
 
 #[test]

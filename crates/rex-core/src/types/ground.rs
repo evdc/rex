@@ -56,7 +56,7 @@ fn walk(e: &TExpr, env: &Env, out: &mut Vec<Diagnostic>) -> bool {
     match &e.kind {
         // Finite leaves. A `RecVar` is grounded: the fixpoint iterates from the
         // empty Z-set, so every iterate is finite when the rest of the body is.
-        Identity(_) | View(_) | RecVar(_) | ValueRef(_) | Field(_) | Const { .. } | Atom(_) => true,
+        Identity(_) | View(_) | RecVar(_) | ValueRef(_) | Field(_) | Const { .. } | Atom(_) | UnitPoint | UnitConst(_) => true,
 
         // The one leaf that can be ungrounded: an infinite built-in standing on its
         // own, grounded only when its domain is enumerable.

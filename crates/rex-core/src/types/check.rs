@@ -484,6 +484,14 @@ impl Checker {
                 self.atom_rel(name, dom, span)
             }
 
+            // The desugarer's `Unit -> Unit` point (S-53), for `Unit`-root view
+            // levels: a relation on `Unit` itself, so it grounds nothing.
+            ExprKind::Ident(name) if name == UNIT_ROOT => Ok(TExpr::new(
+                TExprKind::UnitPoint,
+                RelTy::coreflexive(ValueTy::Unit),
+                span,
+            )),
+
             ExprKind::Ident(name) if name == UNIT && self.env.binding(name).is_none() => {
                 let Some(d) = dom else {
                     return self.error(span, "`unit` needs a known domain (add a type annotation)");
@@ -819,6 +827,11 @@ impl Checker {
     /// ambient domain. See the `ExprKind::Atom` call site for why.
     fn atom_rel(&mut self, a: &str, dom: Option<ValueTy>, span: Span) -> TResult<TExpr> {
         match &dom {
+            Some(ValueTy::Unit) => Ok(TExpr::new(
+                TExprKind::UnitConst(Lit::Atom(a.to_string())),
+                RelTy::new(ValueTy::Unit, ValueTy::Atom(a.to_string())),
+                span,
+            )),
             Some(ValueTy::Id(sort)) => Ok(TExpr::new(
                 TExprKind::Const { lit: Lit::Atom(a.to_string()), dom: *sort },
                 RelTy::new(ValueTy::Id(*sort), ValueTy::Atom(a.to_string())),
@@ -1191,8 +1204,11 @@ impl Checker {
         let Some(d) = dom else {
             return self.error(expr.span, "a constant needs a known domain (add a type annotation)");
         };
-        let sort = self.as_sort(expr.span, &d, "a constant")?;
         let lit = lit_of(expr).expect("literal expression");
+        if d == ValueTy::Unit {
+            return Ok(TExpr::new(TExprKind::UnitConst(lit), RelTy::new(d, to), expr.span));
+        }
+        let sort = self.as_sort(expr.span, &d, "a constant")?;
         Ok(TExpr::new(
             TExprKind::Const { lit, dom: sort },
             RelTy::new(d, to),
