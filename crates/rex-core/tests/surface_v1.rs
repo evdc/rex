@@ -36,11 +36,10 @@ fn kanban_v1_parses() { parses_clean(KANBAN_V1); }
 fn chat_parses() { parses_clean(CHAT); }
 
 #[test]
-#[ignore = "S-60/S-61: binder in an expression (`u = current`), components, `let x = new` in a handler"]
+#[ignore = "`let x = new …` inside a handler (unassigned)"]
 fn chat_checks() { checks_clean(CHAT); }
 
 #[test]
-#[ignore = "S-61/S-62: components, local"]
 fn todomvc_checks() { checks_clean(TODOMVC); }
 
 #[test]

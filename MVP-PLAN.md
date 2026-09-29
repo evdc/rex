@@ -832,7 +832,38 @@ text mutation per change (spy-driver test via S-03 fixtures).
 
 ### E5 — Derived binds and components
 
-#### S-60 Bind any relation co-keyed with the level (M, deps S-53)
+#### S-60 Bind any relation co-keyed with the level (M, deps S-53) — **done 2026-09-29** (`types/view.rs`'s `LevelWalk::subst`/`emit_bind`/`Desugar::view_stack`, `types/check.rs`'s `bind_ctx`, `types/component.rs`'s `Renamer`; `crates/rex-core/tests/binds.rs`, 7 tests)
+*Landed as:* most of the story was already true — a non-path bind has been
+`Level . expr` since S-20 and the checker types it — so the work was the
+three things that were not:
+- **A binder is a value in a bind.** `(u = current)`, `l.user.name`, and an
+  *enclosing* level's `m.text` all failed with "unknown name". `LevelWalk::subst`
+  rewrites each explicit `as` binder in a bind/gate expression before it is
+  emitted: the level's own binder is `id`, and an ancestor's is the chain of
+  membership views up to that level (child→parent, then parent→grandparent…),
+  read off `Desugar::view_stack`, so `m.text` from two levels down is one more
+  join, incrementally maintained like any other. Only an *explicit* alias
+  substitutes — a defaulted binder (`Card select …`) is also the relation's
+  name (`count(Card by .list)`), so it never does. This reuses S-61's
+  `Renamer`, generalised from name→name to name→`Expr`.
+- **Diagnostics.** A bind view is now emitted at the bind's own source span
+  (it was `Span::point(0)`, so every bind error pointed at byte 0), and a
+  failed bind is prefixed `not co-keyed with `c : Card`: …` (the root reads
+  `the `Unit` root`). Done in the checker off a `Desugared::bind_ctx` side
+  table rather than a new `LetDecl` field, which the parser and tests all
+  construct. "Unknown name" errors are left alone — that is not a co-keying
+  problem.
+- **Inline aggregates** (`span { (count(Card by .list)) }`) already type and get
+  their encoding from the elaborated view (`type_binds`); now pinned by a test.
+  Note the parentheses: a bare `count(…)` in an element body parses as an
+  element.
+Kanban's per-list count was already a bind on a named `let`
+(`{ cards }`), so its output is unchanged; I did not rewrite it inline.
+
+*Result:* **`chat` now fails only on `let x = new …` inside a handler** (no
+story owns it yet). TodoMVC is unchanged by this story — see S-62.
+
+*Original story text:*
 *Files:* `types/view.rs`, `check.rs`.
 *Subtasks:* a bind `{ e }` where `e : Binder -> V` is any expression (join,
 FK path `:author.name`, aggregate `count(Comment by :post)`); the desugarer
@@ -841,7 +872,48 @@ remains the common case. Diagnostics name the expected domain.
 *Acceptance:* Kanban shows per-list card counts; a bind on a wrong domain is
 a "not co-keyed with `l : List`" error.
 
-#### S-61 Components with props by inline expansion (M, deps S-60)
+#### S-61 Components with props by inline expansion (M, deps S-60) — **done 2026-09-29** (`types/component.rs`'s `Expander`/`Renamer`, `types/view.rs`'s `expand_components`/`source_entity`; `crates/rex-core/tests/components.rs` (7), `crates/rex-codegen/tests/components.rs` (1))
+*Landed as:* a **pre-pass**, not an expansion inside the level walk.
+`Desugar::view` expands every component call in a root view's body first
+(`component::Expander`), so level lowering, `collect_child_levels`' naming and
+`focus(c)` resolution only ever see plain elements and `select`s and cannot
+disagree about what exists. The expander tracks the `(binder, entity)` scope
+itself, since a call may sit under any number of nested `select`s and each
+argument is checked against the type of the binder it names.
+
+A call renames the template's params to the caller's binders (`Renamer`, an
+exhaustive walk over `Expr`/`HStmt`/handlers/content — a bare identifier is
+renamed, but never the field on the right of a `.`, so `x.text` survives a
+param called `text`). Checked: unknown component, arity, an argument that is
+not a binder in scope, wrong entity (`ListID` spelling accepted), recursion
+(a stack of components being expanded; the call's own `{ … }` block is
+expanded in the caller's scope *before* the callee is pushed, so
+`Card { Card { … } }` is nesting, not recursion), and a block needs exactly one
+`children` slot (two is an error even with no block). A component is any
+`view` with an element body; only ones with params are template-only — a
+zero-param view still lowers as a root too.
+
+*Also needed:* `visible as t select TodoItem(t)` ranges over a derived keyset
+`let`, not an entity, so `select` now resolves its source to an entity
+(`Desugar::source_entity`: an entity, or a top-level `let x : Entity`). The
+`ShapeLevel`/binder/handler typing use the entity; the membership, order and
+attribute views are still built on the source as written, so the keyset
+restriction applies (`LevelWalk::source` vs `entity`).
+
+*Deviation:* level names do **not** gain a `#TodoItem` segment
+(`app#todo#TodoItem` in the story text). A select-body component adds no level
+of its own, and the call site already names the level, so there is nothing to
+disambiguate — and it is what makes the generated TS *byte-identical* to the
+hand-inlined view, which is the stronger form of the acceptance line
+(`generated_code_is_identical_to_the_inlined_version`, and
+`a_component_expands_to_the_same_shapes_as_the_inlined_view` on the ShapeIR).
+Nested components and a component-in-a-component are covered.
+
+*Result:* **TodoMVC now fails to check only on S-62** (`local editing`,
+`set editing`, and the `editing` name they define). Chat additionally shows a
+binder used as an expression (`u = current`, `l`), which is S-60 territory.
+
+*Original story text:*
 *Files:* `ast.rs` (done), `types/view.rs`.
 *Subtasks:* `view TodoItem(t: Todo) = li { … }` is a template; `TodoItem(c)`
 inside a `select` expands with positional binder substitution; a
@@ -851,7 +923,41 @@ call site (`app#todo#TodoItem`); recursion between components is an error.
 *Acceptance:* TodoMVC's `TodoItem`/`Footer` are components; generated TS is
 identical in shape to the inlined version (snapshot).
 
-#### S-62 `local` per-instance state (S, deps S-61, S-51)
+#### S-62 `local` per-instance state (S, deps S-61, S-51) — **done 2026-09-29** (`types/view.rs`'s `Desugar::local_decls`, `types/component.rs`'s `local_view`/`local_event` and `Renamer::sets`; `crates/rex-core/tests/locals.rs`, 6 tests)
+*Landed as:* a `local` is a hidden **field** on the entity of the component's
+first param (`local#TodoItem#editing : Todo -> Bool`), not a hidden entity: it
+needs no row to mint, and it dies with the row for free (deleting a Todo
+retracts its fields — `a_local_dies_with_its_row`). Absence is the default, so
+nothing is written until the first `set`. A read view is emitted right after the
+entity, `(K . .f) | ((K except .f) . default)` — the `except` defaulting the
+story text asked for — and a bare `editing` in the component body expands to
+`arg . local#TodoItem#editing`, which S-60's binder substitution then turns
+into `id` (or an ancestor chain), so the local is read at the *argument's* row
+wherever the call sits. A `set editing = v` in a DOM handler becomes
+`do local#TodoItem#editing#set(arg, v)`: a real, declared event with a checked
+`Set` body, so it is logged and replays like any other
+(`a_local_is_logged_and_replays`), and it is one step touching only the
+local's own views (`setting_a_local_is_one_step_on_one_field`).
+
+The type is the annotation, or is inferred from the default literal
+(`False` → `Bool`, `0` → `Int`, `"x"` → `Text`); anything else asks for an
+annotation. A `local` needs a component whose first param is an entity — a
+root view or a non-entity param is an error saying what to key it by. The
+event's value param is named `#value` so it cannot collide with the
+component's own param name.
+
+*Not done here:* the acceptance line's Playwright check (double-click to edit
+with focus preserved) has no app to run against yet — `examples/todomvc` has
+only `app.rex` until **S-90** builds it. What is proven at this level: the
+class gate for `editing` flips per row on one field delta, and
+`focus(.edit)` targets an `input` that is always in the DOM (the class only
+toggles visibility), so nothing is mounted or removed when editing starts,
+which is what preserves focus. S-90 should carry the browser assertion.
+
+**TodoMVC (`examples/todomvc/src/app.rex`) now checks clean and `rex build`
+generates code for it**; `todomvc_checks` is un-ignored.
+
+*Original story text:*
 *Subtasks:* `local editing : Bool = @false` in a component desugars to a
 hidden entity keyed by the component's binder (`Todo -> Bool`) with the
 default applied via `except`-based defaulting (`present + (Todo except present) . @false`);

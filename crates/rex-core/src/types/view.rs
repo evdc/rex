@@ -23,6 +23,10 @@ use crate::diagnostic::Diagnostic;
 use crate::span::Span;
 
 pub struct Desugared {
+    /// Bind/gate view name -> the level row it must be co-keyed with, shown
+    /// as `l : List`, so the checker can say so when its body does not fit
+    /// (S-60).
+    pub bind_ctx: std::collections::HashMap<String, String>,
     pub program: Program,
     pub shapes: ShapeProgram,
     pub diagnostics: Vec<Diagnostic>,
@@ -87,6 +91,7 @@ pub fn desugar(program: &Program) -> Desugared {
             type_ctors.insert(t.name.clone(), t.ctors.clone());
         }
     }
+    let entity_names: std::collections::HashSet<String> = entity_fields.keys().cloned().collect();
     let mut d = Desugar {
         stmts: Vec::new(),
         shapes: ShapeProgram::default(),
@@ -100,7 +105,33 @@ pub fn desugar(program: &Program) -> Desugared {
         event_spans: Default::default(),
         hidden_lets: Vec::new(),
         hidden_seq: 0,
+        bind_ctx: Default::default(),
+        view_stack: Vec::new(),
+        components: program
+            .stmts
+            .iter()
+            .filter_map(|s| match s {
+                Stmt::View(v) if matches!(v.body, ViewBody::Element(_)) => Some((v.name.clone(), (**v).clone())),
+                _ => None,
+            })
+            .collect(),
+        let_entities: program
+            .stmts
+            .iter()
+            .filter_map(|s| match s {
+                Stmt::Let(LetDecl { name: Some(n), ty: Some(Type { kind: TypeKind::Named(e), .. }), .. })
+                    if entity_names.contains(e) =>
+                {
+                    Some((n.clone(), e.clone()))
+                }
+                _ => None,
+            })
+            .collect(),
     };
+    // Component `local` state (S-62): a hidden field on the keying entity, a
+    // read view, and a hidden event to set it. Before pass 0 so a DOM handler
+    // may `do` the event, and before pass 2 so the field lands on its entity.
+    let (local_fields, local_lets) = d.local_decls(program);
     // Pass 0: `event` declarations, then their `on` handlers (order-free, so a
     // view or a handler may `do` an event declared later in the file).
     for stmt in &program.stmts {
@@ -116,7 +147,7 @@ pub fn desugar(program: &Program) -> Desugared {
     d.check_do_graph();
     // Pass 1: collect `rel` decls so each becomes a functional field on its
     // source entity (grouped by entity name), regardless of decl order.
-    let mut rel_fields: std::collections::HashMap<String, Vec<FieldDecl>> = Default::default();
+    let mut rel_fields: std::collections::HashMap<String, Vec<FieldDecl>> = local_fields;
     for stmt in &program.stmts {
         if let Stmt::Rel(r) = stmt {
             rel_fields.entry(r.from.clone()).or_default().push(FieldDecl {
@@ -159,7 +190,12 @@ pub fn desugar(program: &Program) -> Desugared {
                 if let Some(extra) = rel_fields.get(&e.name) {
                     e.fields.extend(extra.iter().cloned());
                 }
+                let name = e.name.clone();
                 d.stmts.push(Stmt::Entity(e));
+                // A local's read view needs its entity declared first.
+                if let Some(lets) = local_lets.get(&name) {
+                    d.stmts.extend(lets.iter().cloned());
+                }
             }
             other => d.stmts.push(other.clone()),
         }
@@ -214,6 +250,7 @@ pub fn desugar(program: &Program) -> Desugared {
         d.stmts = head;
     }
     Desugared {
+        bind_ctx: d.bind_ctx,
         program: Program { stmts: d.stmts },
         shapes: d.shapes,
         diagnostics: d.diagnostics,
@@ -253,6 +290,18 @@ struct Desugar {
     hidden_lets: Vec<Stmt>,
     /// Sequence for hidden keyset view names (`on#E#k`).
     hidden_seq: usize,
+    /// See [`Desugared::bind_ctx`].
+    bind_ctx: std::collections::HashMap<String, String>,
+    /// The levels being walked, outermost first: each one's membership view
+    /// and its explicit `as` binder (if any). Lets a bind name a binder — its
+    /// own row or an ancestor's — as a value (S-60).
+    view_stack: Vec<(String, Option<String>)>,
+    /// Every element-bodied `view`, by name: the templates a component call
+    /// expands (S-61).
+    components: std::collections::HashMap<String, ViewDecl>,
+    /// A top-level `let x : Entity` -> `Entity`, so a `select` may range over
+    /// a derived keyset (`visible as t select …`) and still know its entity.
+    let_entities: std::collections::HashMap<String, String>,
 }
 
 
@@ -1036,16 +1085,137 @@ impl Desugar {
         Some((ValExpr::Arith(kind, Box::new(va), Box::new(vb), money), result))
     }
 
+    /// Lower every component's `local` declarations (S-62). A local is a
+    /// relation `Key -> T` keyed by the component's first param, stored as a
+    /// hidden *field* on that entity — so it dies with the row and needs no
+    /// row-minting — with the default applied on read:
+    /// `(K . .f) | ((K except .f) . default)`. Returns the hidden fields and
+    /// read `let`s, each by entity.
+    #[allow(clippy::type_complexity)]
+    fn local_decls(
+        &mut self,
+        program: &Program,
+    ) -> (std::collections::HashMap<String, Vec<FieldDecl>>, std::collections::HashMap<String, Vec<Stmt>>) {
+        use super::component::{local_event, local_view};
+        let mut fields: std::collections::HashMap<String, Vec<FieldDecl>> = Default::default();
+        let mut lets: std::collections::HashMap<String, Vec<Stmt>> = Default::default();
+        for stmt in &program.stmts {
+            let Stmt::View(v) = stmt else { continue };
+            if v.locals.is_empty() {
+                continue;
+            }
+            let Some(key) = v.params.first() else {
+                self.error(v.locals[0].span, "`local` needs a component parameter to key it by: `view Name(x: Entity) = …`");
+                continue;
+            };
+            let Some(ParamTy::Id(entity)) = self.param_ty(&key.ty) else {
+                self.error(key.span, "a component with `local` state must take an entity as its first parameter");
+                continue;
+            };
+            for l in &v.locals {
+                let span = l.span;
+                let Some(ty) = l.ty.clone().or_else(|| self.infer_local_type(&l.default)) else {
+                    self.error(span, format!("`local {}` needs a type annotation: `local {} : T = …`", l.name, l.name));
+                    continue;
+                };
+                let (Some(pty), Some(vty)) = (self.param_ty(&ty), self.resolve_val_ty(&ty)) else { continue };
+                let field = local_view(&v.name, &l.name);
+                fields.entry(entity.clone()).or_default().push(FieldDecl { name: field.clone(), ty: ty.clone(), span });
+                self.entity_fields.entry(entity.clone()).or_default().insert(field.clone(), ty);
+                // `K . .f` where set; the default for every `K` without one.
+                let present = compose(ident(&entity, span), field_path(std::slice::from_ref(&field), span), span);
+                let absent = Expr {
+                    kind: ExprKind::Except(
+                        Box::new(ident(&entity, span)),
+                        Box::new(field_path(std::slice::from_ref(&field), span)),
+                    ),
+                    span,
+                };
+                let body = Expr {
+                    kind: ExprKind::Union(Box::new(present), Box::new(compose(absent, l.default.clone(), span))),
+                    span,
+                };
+                lets.entry(entity.clone()).or_default().push(Stmt::Let(LetDecl {
+                    name: Some(field.clone()),
+                    ty: None,
+                    body,
+                    recursive: false,
+                    span,
+                }));
+                // The setter: an ordinary event, so it is logged and replays.
+                let event = local_event(&v.name, &l.name);
+                let target = key.name.clone();
+                self.event_spans.insert(event.clone(), (span, Some(span)));
+                self.shapes.events.push(EventDef {
+                    name: event,
+                    params: vec![
+                        EventParam { name: target.clone(), ty: ParamTy::Id(entity.clone()) },
+                        EventParam { name: "#value".to_string(), ty: pty },
+                    ],
+                    body: vec![MutationIR::Set {
+                        target: Target::One(Ref(target)),
+                        entity: entity.clone(),
+                        updates: vec![(field, ValRef::Arg("#value".to_string()))],
+                    }],
+                });
+                let _ = vty;
+            }
+        }
+        (fields, lets)
+    }
+
+    /// The declared type of a `local` written without one: what its default
+    /// literal is (`local n = 0`, `local editing = False`).
+    fn infer_local_type(&self, default: &Expr) -> Option<Type> {
+        let named = |n: &str| Type { kind: TypeKind::Named(n.to_string()), span: default.span };
+        match &default.kind {
+            ExprKind::Int(_) => Some(named("Int")),
+            ExprKind::Decimal(_) => Some(named("Money")),
+            ExprKind::Str(_) => Some(named("Text")),
+            ExprKind::Ident(c) => self.ctor_type.get(c).map(|t| named(t)),
+            _ => None,
+        }
+    }
+
+    /// The entity a `select` source names: an entity itself, or a `let`
+    /// declared `: Entity`.
+    fn source_entity(&self, name: &str) -> Option<String> {
+        if self.entity_fields.contains_key(name) {
+            Some(name.to_string())
+        } else {
+            self.let_entities.get(name).cloned()
+        }
+    }
+
+    /// Expand every component call in a root view's body (S-61), so the rest
+    /// of desugaring only ever sees plain elements and `select`s.
+    fn expand_components(&mut self, body: &ViewBody) -> ViewBody {
+        let refs: std::collections::HashMap<String, &ViewDecl> =
+            self.components.iter().map(|(k, v)| (k.clone(), v)).collect();
+        let resolve = |n: &str| self.source_entity(n);
+        let mut ex = super::component::Expander::new(&refs, &resolve);
+        let out = match body {
+            ViewBody::Select(sel) => ViewBody::Select(ex.select(sel, &mut Vec::new())),
+            ViewBody::Element(e) => {
+                ViewBody::Element(ex.element(e, &mut vec![(UNIT_BINDER.to_string(), UNIT_ENTITY.to_string())]))
+            }
+        };
+        let diags = std::mem::take(&mut ex.diagnostics);
+        self.diagnostics.extend(diags);
+        out
+    }
+
     fn view(&mut self, v: &ViewDecl) {
+        // A component (S-61) is only a template: it is expanded at each call
+        // site and lowers to nothing on its own.
         if !v.params.is_empty() {
-            self.error(v.span, "components (`view Name(params)`) are not supported yet (MVP-PLAN S-61)");
+            if !matches!(v.body, ViewBody::Element(_)) {
+                self.error(v.span, format!("component `{}` must have an element body, not a `select`", v.name));
+            }
             return;
         }
-        if let Some(l) = v.locals.first() {
-            self.error(l.span, "`local` state is not supported yet (MVP-PLAN S-62)");
-            return;
-        }
-        match &v.body {
+        let body = self.expand_components(&v.body);
+        match &body {
             ViewBody::Select(sel) => {
                 let root_name = format!("{}#{}", v.name, sel.entity.to_lowercase());
                 if let Some(level) = self.level(sel, &root_name, &[]) {
@@ -1058,7 +1228,7 @@ impl Desugar {
             ViewBody::Element(e) => {
                 let name = format!("{}#unit", v.name);
                 self.emit_let(&name, ident(UNIT_ROOT, e.span));
-                let level = self.walk_level(&name, UNIT_ENTITY, UNIT_BINDER, &[], e, None, None);
+                let level = self.walk_level(&name, UNIT_ENTITY, UNIT_ENTITY, UNIT_BINDER, &[], e, None, None);
                 self.shapes.views.push(level);
             }
         }
@@ -1074,7 +1244,11 @@ impl Desugar {
         name: &str,
         ancestors: &[(String, String)],
     ) -> Option<ShapeLevel> {
+        // `e` is the source relation as written (an entity, or a keyset
+        // `let`); `ent` is the entity its rows are, which is what a binder
+        // *is* to a handler's `do` arguments.
         let e = &sel.entity;
+        let ent = self.source_entity(e).unwrap_or_else(|| e.clone());
         // The row binder in scope: the explicit `as l` alias, or the entity name.
         let binder = sel.binder.clone().unwrap_or_else(|| e.clone());
         let span = sel.span;
@@ -1148,11 +1322,16 @@ impl Desugar {
 
         // Child levels by binder, so `endOf(c)` / `dropPos(c, x)` in this
         // level's handlers can name the level they range over.
-        let Content::Element(body) = &sel.body else {
-            self.error(span, "a `select` whose body is a component call is not supported yet (MVP-PLAN S-61)");
-            return None;
+        let body = match &sel.body {
+            Content::Element(body) => body,
+            // Component expansion already reported why this call failed.
+            Content::Component { .. } => return None,
+            _ => {
+                self.error(span, "a `select` body must be an element");
+                return None;
+            }
         };
-        Some(self.walk_level(name, e, &binder, ancestors, body, order_view, order_field))
+        Some(self.walk_level(name, &ent, e, &binder, ancestors, body, order_view, order_field))
     }
 
     /// Walk one level's element into a template + bindings + events + child
@@ -1163,12 +1342,18 @@ impl Desugar {
         &mut self,
         name: &str,
         entity: &str,
+        source: &str,
         binder: &str,
         ancestors: &[(String, String)],
         body: &ElementExpr,
         order_view: Option<String>,
         order_field: Option<String>,
     ) -> ShapeLevel {
+        // An explicit `as` alias (not the defaulted entity/source name, which
+        // could just as well mean the relation) is what a bind may use as a
+        // value.
+        let alias = (binder != entity && binder != source && binder != UNIT_BINDER).then(|| binder.to_string());
+        self.view_stack.push((name.to_string(), alias));
         let mut child_levels = std::collections::HashMap::new();
         let mut seen = std::collections::HashMap::new();
         collect_child_levels(&body.children, name, &mut seen, &mut child_levels);
@@ -1176,6 +1361,7 @@ impl Desugar {
         let mut lw = LevelWalk {
             d: self,
             entity,
+            source,
             binder,
             ancestors,
             level_name: name,
@@ -1189,6 +1375,7 @@ impl Desugar {
         let attrs = std::mem::take(&mut lw.attrs);
         let events = std::mem::take(&mut lw.events);
         let children = std::mem::take(&mut lw.children);
+        self.view_stack.pop();
 
         ShapeLevel {
             name: name.to_string(),
@@ -1235,7 +1422,11 @@ impl Desugar {
 /// attr/event bindings (with child-index paths), and nested child levels.
 struct LevelWalk<'a> {
     d: &'a mut Desugar,
+    /// The entity this level's rows are.
     entity: &'a str,
+    /// The relation the level ranges over as written — `entity` itself, or a
+    /// keyset `let` of it (`visible`). Views are built on this.
+    source: &'a str,
     /// The row binder name in scope (alias or entity name) — what membership
     /// conjuncts of nested selects and handler bodies reference.
     binder: &'a str,
@@ -1323,11 +1514,10 @@ impl LevelWalk<'_> {
                     tpl_children.push(self.element(child, &cp));
                 }
                 Content::If { cond, children, span } => self.gate(cond, children, *span),
-                Content::Component { span, .. } => {
-                    self.d.error(*span, "component calls are not supported yet (MVP-PLAN S-61)");
-                }
+                // Expansion replaced every call, or dropped it with a diagnostic.
+                Content::Component { .. } => {}
                 Content::ChildrenSlot(span) => {
-                    self.d.error(*span, "`children` slots are not supported yet (MVP-PLAN S-61)");
+                    self.d.error(*span, "`children` is only allowed in a component's body");
                 }
                 Content::Select(sel) => {
                     let child_name = child_level_name(self.level_name, &sel.entity, &mut self.seen);
@@ -1359,10 +1549,8 @@ impl LevelWalk<'_> {
         }
         self.d.attr_seq += 1;
         let name = format!("{}#bind{}", self.level_name, self.d.attr_seq);
-        self.d.emit_let(
-            &name,
-            compose(self.base(), expr.clone(), Span::point(0)),
-        );
+        let body = compose(self.base(), self.subst(expr), expr.span);
+        self.emit_bind(&name, body, expr.span);
         (name, Encoding::Text)
     }
 
@@ -1373,20 +1561,67 @@ impl LevelWalk<'_> {
     fn gate_view(&mut self, expr: &Expr) -> String {
         self.d.attr_seq += 1;
         let name = format!("{}#gate{}", self.level_name, self.d.attr_seq);
-        let span = Span::point(0);
+        let span = expr.span;
         let body = Expr {
-            kind: ExprKind::Where(Box::new(self.base()), Box::new(expr.clone())),
+            kind: ExprKind::Where(Box::new(self.base()), Box::new(self.subst(expr))),
             span,
         };
-        self.d.emit_let(&name, body);
+        self.emit_bind(&name, body, span);
         name
+    }
+
+    /// Emit a bind/gate view at the bind's own source span, and remember the
+    /// row it must be co-keyed with for the checker's diagnostic (S-60).
+    fn emit_bind(&mut self, name: &str, body: Expr, span: Span) {
+        let row = if self.entity == UNIT_ENTITY {
+            "the `Unit` root".to_string()
+        } else {
+            format!("`{} : {}`", self.binder, self.entity)
+        };
+        self.d.bind_ctx.insert(name.to_string(), row);
+        self.d.stmts.push(Stmt::Let(LetDecl {
+            name: Some(name.to_string()),
+            ty: None,
+            body,
+            recursive: false,
+            span,
+        }));
+    }
+
+    /// Replace each explicit binder named in a bind expression by the relation
+    /// it denotes at this level (S-60): the level's own binder is `id`, and
+    /// an enclosing level's is the chain of membership views up to that
+    /// level, so `m.text` from a row nested under `m` reads the parent's field.
+    fn subst(&self, e: &Expr) -> Expr {
+        let stack = &self.d.view_stack;
+        let mut map: std::collections::HashMap<String, Expr> = Default::default();
+        // Outermost first, so a nearer binder of the same name overwrites.
+        for (i, (_, alias)) in stack.iter().enumerate() {
+            let Some(a) = alias else { continue };
+            let up = stack.len() - 1 - i;
+            let rep = if up == 0 {
+                Expr { kind: ExprKind::Id, span: e.span }
+            } else {
+                stack[stack.len() - up..]
+                    .iter()
+                    .rev()
+                    .map(|(v, _)| ident(v, e.span))
+                    .reduce(|acc, v| compose(acc, v, e.span))
+                    .expect("up >= 1")
+            };
+            map.insert(a.clone(), rep);
+        }
+        if map.is_empty() {
+            return e.clone();
+        }
+        super::component::Renamer { map: &map, sets: None }.expr(e)
     }
 
     /// The identity relation of this level's rows: the entity for a `select`
     /// level, the single point for a `Unit` level (S-53).
     fn base(&self) -> Expr {
         let span = Span::point(0);
-        if self.entity == UNIT_ENTITY { ident(UNIT_ROOT, span) } else { ident(self.entity, span) }
+        if self.entity == UNIT_ENTITY { ident(UNIT_ROOT, span) } else { ident(self.source, span) }
     }
 
     /// `if (cond) { … }` (S-53): each element in the body becomes its own
@@ -1404,11 +1639,11 @@ impl LevelWalk<'_> {
             self.d.attr_seq += 1;
             let name = format!("{}#if{}", self.level_name, self.d.attr_seq);
             let membership = Expr {
-                kind: ExprKind::Where(Box::new(self.base()), Box::new(cond.clone())),
+                kind: ExprKind::Where(Box::new(self.base()), Box::new(self.subst(cond))),
                 span: cond.span,
             };
-            self.d.emit_let(&name, membership);
-            let level = self.d.walk_level(&name, self.entity, self.binder, &chain, el, None, None);
+            self.emit_bind(&name, membership, cond.span);
+            let level = self.d.walk_level(&name, self.entity, self.source, self.binder, &chain, el, None, None);
             self.children.push(level);
         }
     }
@@ -1527,7 +1762,7 @@ impl LevelWalk<'_> {
                 HStmt::Focus { target: FocusTarget::Class(c), .. } => actions.push(UiAction::FocusClass(c.clone())),
                 HStmt::Clear { .. } => actions.push(UiAction::Clear),
                 HStmt::Set { .. } => {
-                    self.d.error(span, "`set` is not supported yet (MVP-PLAN S-51)");
+                    self.d.error(span, "`set` needs a `state` or a component `local` in scope; a `state` is set from an `on` handler, not a DOM handler");
                     return None;
                 }
                 HStmt::New { .. } | HStmt::Assign { .. } | HStmt::Update { .. } | HStmt::Delete { .. } => {

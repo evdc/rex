@@ -41,6 +41,7 @@ pub fn check(program: &Program) -> CheckResult {
         env: Env::new(),
         diagnostics: desugared.diagnostics,
         rec_names: Default::default(),
+        bind_ctx: desugared.bind_ctx,
     };
     let stmts = cx.run(program);
     let prog = TProgram { stmts };
@@ -103,6 +104,9 @@ struct Checker {
     /// Names of the recursion group currently being checked: identifiers
     /// matching these elaborate to `RecVar`, not `View`. Empty outside groups.
     rec_names: std::collections::HashSet<String>,
+    /// Desugared bind/gate view -> the level row it must be co-keyed with
+    /// (S-60), to say so when its body doesn't fit.
+    bind_ctx: std::collections::HashMap<String, String>,
 }
 
 impl Checker {
@@ -179,8 +183,20 @@ impl Checker {
                 }
                 Stmt::Let(l) => {
                     i += 1;
-                    if let Ok(ts) = self.check_let(l) {
-                        stmts.push(ts);
+                    let before = self.diagnostics.len();
+                    match self.check_let(l) {
+                        Ok(ts) => stmts.push(ts),
+                        // A bind's own error, said in the bind's terms: the
+                        // usual cause is an expression keyed on something
+                        // other than the level's row (S-60).
+                        Err(_) => {
+                            let row = l.name.as_ref().and_then(|n| self.bind_ctx.get(n)).cloned();
+                            if let (Some(row), Some(d)) = (row, self.diagnostics.get_mut(before))
+                                && !d.message.starts_with("unknown ")
+                            {
+                                d.message = format!("not co-keyed with {row}: {}", d.message);
+                            }
+                        }
                     }
                 }
                 Stmt::Entity(_) => i += 1,

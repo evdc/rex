@@ -1,6 +1,7 @@
 //! Static type/soundness checking (§4, §9).
 
 pub mod check;
+pub mod component;
 pub mod env;
 pub mod ground;
 pub mod shape_ir;
