@@ -6,21 +6,24 @@ import {
   makeDraggable, makeDropTarget, dragValue, endOf, dropPos, maybeRebalance,
   type ShapeNode,
 } from "rex-dom";
-import { boot, IndexedDbAdapter, MemoryAdapter, programKey } from "rex-runtime";
+import { boot, IndexedDbAdapter, MemoryAdapter, profiler, programKey } from "rex-runtime";
 import PROGRAM from "./board.rex?raw";
 
 await init();
-const store = new URLSearchParams(location.search).has("ephemeral")
+const store = new URLSearchParams(location.search).has("ephemeral") || import.meta.env.VITE_REX_PERSIST === "0"
   ? new MemoryAdapter()
   : new IndexedDbAdapter(programKey("board", PROGRAM));
 const app = await boot({ RexApp, program: PROGRAM, adapter: store });
+const prof = profiler(new URLSearchParams(location.search).has("profile"));
 (window as unknown as { __rexApp: RexApp }).__rexApp = app;
 const driver = new BrowserDriver();
 const container = document.getElementById("app")!;
 const apply = (json: string) => shaper.applyStep(parseStepJson(json));
 function dispatch(name: string, args: Record<string, unknown>): string[] {
-  const res = JSON.parse(app.dispatch(name, JSON.stringify(args)));
-  shaper.applyStep(res.deltas.views);
+  const res = prof
+    ? prof.dispatch(name, () => app.dispatch(name, JSON.stringify(args)), (r: any) => shaper.applyStep(r.deltas.views))
+    : JSON.parse(app.dispatch(name, JSON.stringify(args)));
+  if (!prof) shaper.applyStep(res.deltas.views);
   return res.ids as string[];
 }
 

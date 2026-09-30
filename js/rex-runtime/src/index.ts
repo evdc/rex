@@ -5,5 +5,6 @@ export {
   type PersistenceAdapter,
   type StoredSnapshot,
 } from "./persist.js";
+export { profiler, type DispatchTiming, type Profiler } from "./profile.js";
 export { MemoryAdapter } from "./adapters/memory.js";
 export { IndexedDbAdapter } from "./adapters/indexeddb.js";

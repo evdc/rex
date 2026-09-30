@@ -77,7 +77,7 @@ impl Emit {
         self.line("  makeDraggable, makeDropTarget, dragValue, endOf, dropPos, maybeRebalance,");
         self.line("  type ShapeNode,");
         self.line("} from \"rex-dom\";");
-        self.line("import { boot, IndexedDbAdapter, MemoryAdapter, programKey } from \"rex-runtime\";");
+        self.line("import { boot, IndexedDbAdapter, MemoryAdapter, profiler, programKey } from \"rex-runtime\";");
         self.line(&format!("import PROGRAM from \"{program_import}\";"));
         for i in imports {
             self.line(&format!("import * as {} from {};", i.alias, js_str(&i.path)));
@@ -92,6 +92,9 @@ impl Emit {
             js_str(&program_name(program_import))
         ));
         self.line("const app = await boot({ RexApp, program: PROGRAM, adapter: store });");
+        // `?profile` logs each dispatch's engine / parse / shaper split and
+        // exposes them as `window.__rexProfile.timings` (P-0).
+        self.line("const prof = profiler(new URLSearchParams(location.search).has(\"profile\"));");
         // A test hook, not a runtime dependency: Playwright inspects the log
         // through this (e.g. asserting a rebalance sweep landed there,
         // S-22) rather than poking at wasm internals.
@@ -103,11 +106,13 @@ impl Emit {
         if self.debug {
             self.line("  console.debug(\"[rex] dispatch\", name, args);");
         }
-        self.line("  const res = JSON.parse(app.dispatch(name, JSON.stringify(args)));");
+        self.line("  const res = prof");
+        self.line("    ? prof.dispatch(name, () => app.dispatch(name, JSON.stringify(args)), (r: any) => shaper.applyStep(r.deltas.views))");
+        self.line("    : JSON.parse(app.dispatch(name, JSON.stringify(args)));");
         if self.debug {
             self.line("  console.debug(\"[rex]  ->\", name, \"ids:\", res.ids, \"views:\", Object.keys(res.deltas.views));");
         }
-        self.line("  shaper.applyStep(res.deltas.views);");
+        self.line("  if (!prof) shaper.applyStep(res.deltas.views);");
         self.line("  return res.ids as string[];");
         self.line("}");
         self.line("");
