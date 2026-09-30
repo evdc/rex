@@ -247,6 +247,32 @@ impl Node {
         }
     }
 
+    /// The children whose *integral* (not just delta) this node's kernel
+    /// reads — the demand that decides which nodes keep one (P-2). Must
+    /// mirror every `ctx.integral` read in [`Node::compute`], and the fix
+    /// region's reads of its imports.
+    pub fn integral_reads(&self) -> Vec<NodeId> {
+        match self {
+            // R' = I(R) + δR is probed per left row; linv stands in for I(L).
+            Node::Compose { r, .. } | Node::Semijoin { r, .. } | Node::Antijoin { r, .. } => vec![*r],
+            Node::CoKeyed { l, r, .. } | Node::Intersect(l, r) => vec![*l, *r],
+            Node::Distinct(a) => vec![*a],
+            Node::Aggregate { input, .. } => vec![*input],
+            // Enter presents each import's full post-step value.
+            Node::FixOutput { imports, .. } => imports.clone(),
+            Node::Input(_)
+            | Node::ConstSingleton { .. }
+            | Node::FixInput
+            | Node::Inverse(_)
+            | Node::Union(..)
+            | Node::Filter(..)
+            | Node::InRel(..)
+            | Node::MapConst(..)
+            | Node::FilterMap(..)
+            | Node::Proj(..) => vec![],
+        }
+    }
+
     /// Forget all accumulated private state. Fix-region inner circuits are
     /// re-derived from scratch each outer step, so their nodes must start
     /// every activation as if never run.
@@ -522,8 +548,11 @@ impl Node {
 pub(crate) struct Ctx<'a> {
     /// Deltas of nodes with smaller arena index (already computed this step).
     pub deltas: &'a [BTreeRelation],
-    /// Pre-step integrals of every node.
+    /// Pre-step integrals of every node (empty for one nobody reads whole).
     pub integrals: &'a [BTreeRelation],
+    /// Which nodes keep an integral (P-2), to catch a kernel reading one
+    /// that `integral_reads` did not declare.
+    pub keep: &'a [bool],
     /// Backfill boundary: nodes below this index present their full integral
     /// *as* their delta (see [`Ctx::delta`]), so their integral must read as
     /// empty here (otherwise the history would be counted twice). 0 during a
@@ -536,14 +565,17 @@ static EMPTY: std::sync::LazyLock<BTreeRelation> = std::sync::LazyLock::new(BTre
 impl Ctx<'_> {
     /// This step's delta of a child. During a backfill, below-floor nodes
     /// present their full integral *as* their delta — by reference, so the
-    /// history replay copies nothing.
+    /// history replay copies nothing. (Every node a new one can name from
+    /// below the floor — an input or a view — keeps its integral.)
     pub(crate) fn delta(&self, id: NodeId) -> &BTreeRelation {
+        debug_assert!(id.0 >= self.floor || self.keep[id.0], "backfill reads node {} with no integral", id.0);
         if id.0 < self.floor { &self.integrals[id.0] } else { &self.deltas[id.0] }
     }
 
     /// Pre-step integral of a child (empty for nodes being replayed as deltas
     /// during a backfill).
     pub(crate) fn integral(&self, id: NodeId) -> &BTreeRelation {
+        debug_assert!(self.keep[id.0], "node {} is read as an integral but keeps none", id.0);
         if id.0 < self.floor { &EMPTY } else { &self.integrals[id.0] }
     }
 }

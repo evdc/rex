@@ -149,6 +149,27 @@ only other linear nodes keep no state at all. Commit was about a third of step t
 after phase 1 most of what remains is inputs, which must commit anyway, so this
 matters most for larger programs.
 
+**Landed as P-2 (2026-09-30)**, with every output forced to keep its integral.
+`Node::integral_reads` declares which children each kernel reads whole. `Circuit`
+keeps a `keep` flag per node, set by that demand, by `set_output`, by being an input,
+and by being a fix-region member. `commit` skips nodes without the flag. In debug
+builds `Ctx::integral` asserts the flag, so an undeclared read fails loudly. Only
+a node that has never stepped can start keeping an integral. Lowering guarantees
+that, because a new node can name only new nodes, inputs and views.
+Measured:
+- js-framework-benchmark: no change (Run(10k) about 60 ms). After P-1 every
+  computed node there is a view.
+- TodoMVC: 48 of 114 nodes now keep no state. The new
+  `bench_create::todomvc_engine_cost`, keep-all vs P-2 (noisy): AddTodo ×2000
+  about 65 → 58 ms, ToggleAll(False) on 2k about 47 → 39 ms, ClearCompleted on 2k
+  about 63 → 51 ms.
+- Profiling Run(10k) after P-1: of the roughly 60 ms, circuit compute is about 4 ms
+  and commit about 18 ms, of which 15 ms is the five 10k-row inputs, which must commit.
+  The other ~35 ms is outside `Circuit::run` (event evaluation, `build_tx`,
+  seeding, `StepResult` clones) and is unprofiled. P-3 and P-4 target the input commits.
+- TodoMVC still lowers to 114 nodes. P-1's rewrites fire little there, which makes
+  it the next place to look for lowering wins.
+
 Trade-off: `snapshot()` on an output with no integral would need to recompute it
 (batch-evaluate from inputs). That only happens at boot, where batch evaluation is
 exactly right; simpler still is to force `needs_integral` for every output.

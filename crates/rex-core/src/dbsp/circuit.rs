@@ -8,7 +8,10 @@
 //!    arena in order; each node derives its output delta from its children's
 //!    deltas and their pre-step integrals, then updates its own *private*
 //!    state. All shared integrals hold *pre-step* values throughout this phase.
-//! 2. **Commit.** Fold every node's delta into its integral.
+//! 2. **Commit.** Fold each node's delta into its integral — for the nodes
+//!    that keep one (P-2): base inputs, views, fix-region members, and any
+//!    node a parent's kernel reads whole ([`Node::integral_reads`]). A chain
+//!    of linear nodes feeding only other linear nodes keeps no state at all.
 
 use super::node::{Ctx, InputKey, Node, NodeId};
 use crate::eval::relation::{BTreeRelation, BinaryRelation};
@@ -56,8 +59,15 @@ pub struct StepResult {
 #[derive(Debug, Default)]
 pub struct Circuit {
     nodes: Vec<Node>,
-    /// `I(output)` of every node, parallel to `nodes`.
+    /// `I(output)` of every node, parallel to `nodes`; stays empty for a node
+    /// that does not `keep` one.
     integrals: Vec<BTreeRelation>,
+    /// Whether each node's integral is maintained (P-2): demand from parents,
+    /// view registration, or being an input. Parallel to `nodes`.
+    keep: Vec<bool>,
+    /// How many nodes have been through a step. A node below this mark that
+    /// did not keep an integral cannot start keeping one — its history is gone.
+    stepped: usize,
     /// Base-table dedup: every mention of the same field must be the same node.
     inputs: HashMap<InputKey, NodeId>,
     /// View name -> producing node.
@@ -180,9 +190,24 @@ impl Circuit {
             node.children().iter().all(|c| c.0 < id.0),
             "arena must stay topologically ordered"
         );
+        let reads = node.integral_reads();
+        self.keep.push(matches!(node, Node::Input(_) | Node::FixInput));
         self.nodes.push(node);
         self.integrals.push(BTreeRelation::new());
+        for child in reads {
+            self.keep_integral(child);
+        }
         id
+    }
+
+    /// Demand `id`'s integral. Only a node that has never stepped can start
+    /// keeping one; lowering guarantees that, since a new node can name only
+    /// new nodes, inputs, and views (which already keep theirs).
+    fn keep_integral(&mut self, id: NodeId) {
+        if !self.keep[id.0] {
+            assert!(id.0 >= self.stepped, "node {} needs an integral it never kept", id.0);
+            self.keep[id.0] = true;
+        }
     }
 
     /// Get or create the input node for a base table. Called both by lowering
@@ -208,6 +233,10 @@ impl Circuit {
         member_outs: Vec<NodeId>,
     ) -> usize {
         let members = member_outs.len();
+        let mut inner = inner;
+        for &m in &member_outs {
+            inner.keep_integral(m); // the knot reads each member's integral
+        }
         self.fixes.push(FixRegion {
             inner,
             imports,
@@ -243,7 +272,7 @@ impl Circuit {
                 continue; // seeded, never computed
             }
             let (prev, rest) = deltas.split_at_mut(i);
-            let ctx = Ctx { deltas: prev, integrals: &self.integrals, floor: 0 };
+            let ctx = Ctx { deltas: prev, integrals: &self.integrals, keep: &self.keep, floor: 0 };
             let quiescent = !matches!(self.nodes[i], Node::ConstSingleton { fired: false, .. })
                 && self.nodes[i].children().iter().all(|c| ctx.delta(*c).is_empty());
             if quiescent {
@@ -251,18 +280,27 @@ impl Circuit {
             }
             rest[0] = self.nodes[i].compute(&ctx);
         }
-        for (i, delta) in deltas.iter().enumerate() {
-            for (l, r, w) in delta.triples() {
-                self.integrals[i].add(l.clone(), r.clone(), w);
+        self.commit(&deltas, 0);
+        deltas
+    }
+
+    /// Fold `deltas[from..]` into the integrals of the nodes that keep one.
+    fn commit(&mut self, deltas: &[BTreeRelation], from: usize) {
+        for (i, delta) in deltas.iter().enumerate().skip(from) {
+            if self.keep[i] {
+                for (l, r, w) in delta.triples() {
+                    self.integrals[i].add(l.clone(), r.clone(), w);
+                }
             }
         }
-        deltas
+        self.stepped = self.nodes.len();
     }
 
     /// Register `node` as the producer of the named view. Any node may be
     /// named, including an input or another view's node: lowering's rewrites
     /// (P-1) can reduce a view to a node that already exists.
     pub fn set_output(&mut self, name: &str, node: NodeId) {
+        self.keep_integral(node); // read back by `view` (snapshots, keyset targets)
         self.outputs.insert(name.to_string(), node);
     }
 
@@ -286,14 +324,21 @@ impl Circuit {
         &self.nodes[id.0]
     }
 
-    /// The integrated output of any node (tests, backfill, retraction reads).
+    /// The integrated output of a node that keeps one (an input, a view, or a
+    /// node some kernel reads whole — see [`Node::integral_reads`]).
     pub fn integral(&self, id: NodeId) -> &BTreeRelation {
+        assert!(self.keep[id.0], "node {} keeps no integral", id.0);
         &self.integrals[id.0]
     }
 
     /// The integrated contents of a base table, if it has been touched.
     pub fn input_integral(&self, key: &InputKey) -> Option<&BTreeRelation> {
         self.inputs.get(key).map(|id| &self.integrals[id.0])
+    }
+
+    /// Whether `id` maintains an integral (P-2's demand analysis).
+    pub fn keeps_integral(&self, id: NodeId) -> bool {
+        self.keep[id.0]
     }
 
     /// Number of nodes in the arena — the backfill mark to take *before*
@@ -377,7 +422,7 @@ impl Circuit {
                 continue; // seeded, never computed
             }
             let (prev, rest) = deltas.split_at_mut(i);
-            let ctx = Ctx { deltas: prev, integrals: &self.integrals, floor };
+            let ctx = Ctx { deltas: prev, integrals: &self.integrals, keep: &self.keep, floor };
             // Dirty-cone skip: a node whose children all sit still this step
             // emits nothing and changes no state. Three fire-from-no-children
             // exceptions: an unfired ConstSingleton; a FixOutput whose region
@@ -407,12 +452,8 @@ impl Circuit {
             rest[0] = self.nodes[i].compute(&ctx);
         }
 
-        // Phase 2: commit — fold computed deltas into their nodes' integrals.
-        for (i, delta) in deltas.iter().enumerate().skip(floor) {
-            for (l, r, w) in delta.triples() {
-                self.integrals[i].add(l.clone(), r.clone(), w);
-            }
-        }
+        // Phase 2: commit — fold computed deltas into the integrals kept.
+        self.commit(&deltas, floor);
 
         let mut result = StepResult::default();
         if collect {

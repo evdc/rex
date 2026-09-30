@@ -856,3 +856,33 @@ proptest! {
         }
     }
 }
+
+// --- P-2: integrals only where something reads them ------------------------
+
+/// `~A . B` filtered twice: the inverse feeds compose's *left* side (read
+/// only as a delta — `linv` stands in for its integral), and the compose and
+/// first filter feed only linear parents. Neither keeps state; B, probed as compose's right
+/// side, does; and the view is still exact, because it keeps its own.
+#[test]
+fn linear_nodes_keep_no_integral_unless_read() {
+    let mut circuit = Circuit::new();
+    let a = circuit.input(key_a());
+    let b = circuit.input(key_b());
+    let inv = circuit.add_node(Node::Inverse(a));
+    let ab = circuit.add_node(compose_node(inv, b));
+    let filt = circuit.add_node(Node::Filter(ab, Pred::Cmp(CmpOp::Gt, Lit::Int(0))));
+    let view = circuit.add_node(Node::Filter(filt, Pred::Cmp(CmpOp::Gt, Lit::Int(5))));
+    circuit.set_output("out", view);
+
+    assert!(circuit.keeps_integral(a) && circuit.keeps_integral(b), "inputs always keep theirs");
+    assert!(!circuit.keeps_integral(inv), "compose's left side is read as a delta only");
+    assert!(!circuit.keeps_integral(ab) && !circuit.keeps_integral(filt), "linear chain");
+    assert!(circuit.keeps_integral(view), "views are read back");
+
+    let mut tx = Transaction::new();
+    tx.push(key_a(), int(1), int(2), 1);
+    tx.push(key_b(), int(1), int(9), 1);
+    tx.push(key_b(), int(1), int(3), 1);
+    circuit.step(&tx);
+    assert_eq!(circuit.view("out").unwrap().to_sorted_vec(), vec![(int(2), int(9), 1)]);
+}
