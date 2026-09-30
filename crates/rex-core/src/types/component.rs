@@ -442,7 +442,7 @@ impl Renamer<'_> {
             HStmt::Focus { target: FocusTarget::Level(b), span } => {
                 HStmt::Focus { target: FocusTarget::Level(self.name(b)), span: *span }
             }
-            HStmt::Clear { .. } | HStmt::Focus { .. } => s.clone(),
+            HStmt::Clear { .. } | HStmt::Revert { .. } | HStmt::Focus { .. } => s.clone(),
         }
     }
 

@@ -3,7 +3,7 @@
 // ../../../elysium26/bench/js-framework-benchmark/main.ely and the upstream
 // vanillajs index.html (same element ids so the harness drives it).
 
-import js "./utils.js" as utils      // randomLabels(n): Int -> Text, DOM-layer only
+import js "./utils.js" as utils      // randomLabels(n): a JS array, keyed by index; DOM layer only
 
 entity Row {
   num: Int

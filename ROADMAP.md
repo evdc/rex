@@ -166,6 +166,33 @@ Findings:
 - **The shipped `wasm-release` profile (`opt-level = "z"`) costs ~1.4–1.7×** for
   ~27 KB gzipped (155 → 182 KB at `-O3`). The earlier 121 KB figure is stale.
 
+**js-framework-benchmark operations (S-91, Sept 2026)**, engine only (no DOM), µs per
+event, the real `examples/js-framework-benchmark/src/app.rex` with every view live
+(`cargo test --release -p rex --test bench_create -- --ignored --nocapture`; the wasm
+figure is the `engine cost` spec in that example's Playwright suite):
+
+| Operation | Rex native | elysium26, Bun | elysium26, Node |
+|---|---|---|---|
+| create 1,000 | 26,100 | 15,200 | 69,600 |
+| create 10,000 | **206,900** (wasm in Chrome: ~283,000) | 70,400 | 356,100 |
+| replace 10,000 | 382,700 | 84,100 | 195,600 |
+| append 1,000 | 14,500 | 7,100 | 18,500 |
+| update every 10th | 4,200 | 5,700 | 10,900 |
+| swap rows | 30 | 3,000 | 6,800 |
+| clear (10,000) | 190,700 | 20,900 | 27,500 |
+
+- **The "create 10k under one frame (16.6 ms)" target is not met**: ~13× over natively.
+  It is ~20 µs per row for ~4.5 delta rows per row through ~30 nodes of `BTreeMap` inserts
+  and `Value` compares (the profile is flat: `Value::cmp`, `BTreeRelation::add`, malloc).
+  Closing it is the precompiled-circuit / bulk-load work the plan lists as post-MVP.
+- **Not like-for-like**: elysium's numbers are its handler alone — `main.js` driven
+  through `rt.dispatch` with no platform mounted, so no row views are being maintained;
+  Rex's include maintaining every bind, membership and order view and building the delta
+  batch. The row's `swap` and `update` are where Rex's incremental design shows (30 µs
+  vs a predicate scan).
+- Found and fixed on the way: `Engine::push_retract` re-scanned the whole transaction per
+  retracted row, so `Clear` on 10k rows took 2.3 s; it now takes 0.19 s.
+
 **Why keep Rust+WASM, then:** not browser speed, but (1) **one engine everywhere** —
 the event log wants a server (replay, sync, multi-client fan-out), where native Rex is
 5–10× faster than either engine in V8; (2) the correctness investment (batch-oracle

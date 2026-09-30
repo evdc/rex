@@ -202,24 +202,29 @@ fn expand(
     rel_args: &RelArgs,
     ops: &mut Vec<DispatchOp>,
 ) -> Result<(), String> {
-    let resolve = |v: &ValRef| -> Result<Value, String> {
+    // `bound` is the event's args, plus per-row names (`ROW_SELF`, a
+    // `new … from` binder) when resolving a value once per row.
+    let resolve_in = |v: &ValRef, bound: &HashMap<String, Value>| -> Result<Value, String> {
         match v {
             ValRef::Lit(lit) => Ok(lit_value(lit)),
-            ValRef::Arg(n) => args
+            ValRef::Arg(n) => bound
                 .get(n)
                 .cloned()
                 .ok_or_else(|| format!("event `{}`: unbound parameter `{n}`", def.name)),
-            ValRef::Expr(ve) => eval_val_expr(env, circuit, args, ve),
+            ValRef::Expr(ve) => eval_val_expr(env, circuit, bound, ve),
         }
     };
+    let resolve = |v: &ValRef| resolve_in(v, args);
     for m in &def.body {
         match m {
             MutationIR::Set { target, entity, updates } => {
                 let sort = entity_sort(env, entity)?;
+                let mut row_args = args.clone();
                 for id in resolve_target(env, circuit, args, target)? {
+                    row_args.insert(ROW_SELF.to_string(), id.clone());
                     let mut resolved = Vec::new();
                     for (field, val) in updates {
-                        let value = resolve(val)?;
+                        let value = resolve_in(val, &row_args)?;
                         check_field(env, sort, field, &value)?;
                         resolved.push((field.clone(), value));
                     }
@@ -241,7 +246,7 @@ fn expand(
                 }
                 ops.push(DispatchOp::New { sort, fields: resolved });
             }
-            MutationIR::InsertFrom { entity, param, fields } => {
+            MutationIR::InsertFrom { entity, param, key, value: value_name, fields } => {
                 let sort = entity_sort(env, entity)?;
                 let rows = rel_args
                     .get(param)
@@ -250,13 +255,16 @@ fn expand(
                 // subtask 2) — never N independent `new`s that re-find a key.
                 let mut live: Vec<&(Value, Value, i64)> = rows.iter().filter(|(_, _, w)| *w > 0).collect();
                 live.sort_by(|a, b| a.0.cmp(&b.0));
+                let mut row_args = args.clone();
                 for (k, v, _) in live {
+                    row_args.insert(key.clone(), k.clone());
+                    row_args.insert(value_name.clone(), v.clone());
                     let mut resolved = Vec::new();
                     for (field, fr) in fields {
                         let value = match fr {
                             FromField::Key => k.clone(),
                             FromField::Value => v.clone(),
-                            FromField::Val(vr) => resolve(vr)?,
+                            FromField::Val(vr) => resolve_in(vr, &row_args)?,
                         };
                         check_field(env, sort, field, &value)?;
                         resolved.push((field.clone(), value));
@@ -332,6 +340,15 @@ fn eval_val_expr(
                 .input_integral(&key)
                 .and_then(|rel| rel.triples().find(|(_, _, w)| *w > 0).map(|(_, v, _)| v.clone()))
                 .ok_or_else(|| format!("state `{name}` has no value yet"))
+        }
+        ValExpr::Concat(a, b) => {
+            let (Value::Text(x), Value::Text(y)) = (
+                eval_val_expr(env, circuit, args, a)?,
+                eval_val_expr(env, circuit, args, b)?,
+            ) else {
+                return Err("`++` operand is not Text".to_string());
+            };
+            Ok(Value::text(&format!("{}{}", x.as_str(), y.as_str())))
         }
         ValExpr::Arith(kind, a, b, money) => {
             let va = eval_val_expr(env, circuit, args, a)?;

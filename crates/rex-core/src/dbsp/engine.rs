@@ -198,17 +198,24 @@ impl Engine {
     /// A transaction's *reads* see the pre-event snapshot, but its *writes*
     /// to one cell compose (two `set`s of the same field in one event leave
     /// exactly the last value live, never a double-negated original).
-    fn net_rows(&self, tx: &Transaction, key: &InputKey, id: &Value) -> Vec<(Value, i64)> {
+    ///
+    /// `pending` says an *earlier* op already wrote to `id` in `tx`; when it
+    /// did not, there is nothing to compose with and the scan of `tx.deltas`
+    /// (O(N) per call, so O(N²) for a bulk delete) is skipped. The caller
+    /// reads it once, before its own pushes.
+    fn net_rows(&self, tx: &Transaction, pending: bool, key: &InputKey, id: &Value) -> Vec<(Value, i64)> {
         let mut rows: Vec<(Value, i64)> = self
             .circuit
             .input_integral(key)
             .map(|rel| rel.row(id).collect())
             .unwrap_or_default();
-        for (k, l, r, w) in &tx.deltas {
-            if k == key && l == id {
-                match rows.iter_mut().find(|(v, _)| v == r) {
-                    Some(row) => row.1 += w,
-                    None => rows.push((r.clone(), *w)),
+        if pending {
+            for (k, l, r, w) in &tx.deltas {
+                if k == key && l == id {
+                    match rows.iter_mut().find(|(v, _)| v == r) {
+                        Some(row) => row.1 += w,
+                        None => rows.push((r.clone(), *w)),
+                    }
                 }
             }
         }
@@ -222,8 +229,9 @@ impl Engine {
         let Value::Id(sort, _) = id else {
             panic!("retract requires an entity id, got {id}")
         };
+        let pending = tx.touches(id);
         let identity = InputKey::Identity(*sort);
-        for (v, w) in self.net_rows(tx, &identity, id) {
+        for (v, w) in self.net_rows(tx, pending, &identity, id) {
             tx.push(identity, id.clone(), v, -w);
         }
         let mut field_keys: Vec<InputKey> = self
@@ -233,13 +241,15 @@ impl Engine {
             .copied()
             .collect();
         // Fields first written in this transaction (a `new` then `delete`).
-        for (k, l, _, _) in &tx.deltas {
-            if matches!(k, InputKey::Field(s, _) if s == sort) && l == id && !field_keys.contains(k) {
-                field_keys.push(*k);
+        if pending {
+            for (k, l, _, _) in &tx.deltas {
+                if matches!(k, InputKey::Field(s, _) if s == sort) && l == id && !field_keys.contains(k) {
+                    field_keys.push(*k);
+                }
             }
         }
         for key in field_keys {
-            for (v, w) in self.net_rows(tx, &key, id) {
+            for (v, w) in self.net_rows(tx, pending, &key, id) {
                 tx.push(key, id.clone(), v, -w);
             }
         }
@@ -275,13 +285,16 @@ impl Engine {
         let Value::Id(sort, _) = id else {
             panic!("set requires an entity id, got {id}")
         };
-        let alive = !self.net_rows(tx, &InputKey::Identity(*sort), id).is_empty();
+        // Two updates of one field inside this one op also compose.
+        let dup = updates.iter().enumerate().any(|(i, (f, _))| updates[..i].iter().any(|(g, _)| g == f));
+        let pending = tx.touches(id) || dup;
+        let alive = !self.net_rows(tx, pending, &InputKey::Identity(*sort), id).is_empty();
         if !alive {
             return;
         }
         for (field, new) in updates {
             let key = InputKey::Field(*sort, intern(field));
-            for (v, w) in self.net_rows(tx, &key, id) {
+            for (v, w) in self.net_rows(tx, pending, &key, id) {
                 tx.push(key, id.clone(), v, -w);
             }
             tx.push(key, id.clone(), new.clone(), 1);

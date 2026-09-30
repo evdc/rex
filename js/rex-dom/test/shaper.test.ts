@@ -321,3 +321,38 @@ describe("presence attributes", () => {
     expect(driver.counts).toMatchObject({ setAttr: 1, createElement: 0, removeChild: 0 });
   });
 });
+
+describe("slot (S-90)", () => {
+  test("a child level mounts into the element its slot names, not the row root", () => {
+    const item: ShapeNode<SpyEl> = {
+      name: "item",
+      membershipView: "item",
+      template: (d) => d.createElement("li"),
+      attrs: [],
+      children: [],
+      slot: (root) => root.children[1]!,
+    };
+    const app: ShapeNode<SpyEl> = {
+      name: "app",
+      membershipView: "app",
+      template: (d) => {
+        const root = d.createElement("section");
+        d.insertBefore(root, d.createElement("h1"), null);
+        d.insertBefore(root, d.createElement("ul"), null);
+        return root;
+      },
+      attrs: [],
+      children: [{ ...item, membershipView: "item" }],
+    };
+    const driver = new SpyDriver();
+    const root = driver.createElement("main");
+    const shaper = new Shaper(driver, root, [app]);
+    shaper.applyStep({ app: [["u", "u", 1]], item: [["i1", "u", 1]] });
+    const section = shaper.el("app", "u")!;
+    expect(section.children.map((c) => c.tag)).toEqual(["h1", "ul"]);
+    expect(section.children[1]!.children.map((c) => c.tag)).toEqual(["li"]);
+    // Removal finds the same slot.
+    shaper.applyStep({ item: [["i1", "u", -1]] });
+    expect(section.children[1]!.children).toEqual([]);
+  });
+});

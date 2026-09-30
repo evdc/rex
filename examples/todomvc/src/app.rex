@@ -92,6 +92,6 @@ view TodoItem(t: Todo) =
     }
     input(class="edit" value=.text
       on keydown.enter(v = value) { do EditTodo(t, v); set editing = False }
-      on keydown.escape           => set editing = False
+      on keydown.escape           { set editing = False; revert }
       on blur(v = value)          { do EditTodo(t, v); set editing = False })
   }

@@ -407,6 +407,12 @@ impl Parser {
                     span: start.to(self.prev_span()),
                 })
             }
+            TokenKind::Ident(w) if w == "revert" => {
+                self.bump();
+                Ok(HStmt::Revert {
+                    span: start.to(self.prev_span()),
+                })
+            }
             TokenKind::Ident(w) if w == "focus" => {
                 self.bump();
                 self.expect(&TokenKind::LParen, "after `focus`")?;

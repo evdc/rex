@@ -85,6 +85,10 @@ jobs:
           for dir in examples/*/; do
             if [ -f "$dir/package.json" ]; then
               echo "::group::$dir"
+              if [ "${dir%/}" != examples/kanban ]; then
+                rm -rf "$dir/src/pkg"
+                cp -r examples/kanban/src/pkg "$dir/src/pkg"
+              fi
               (
                 cd "$dir"
                 npm ci

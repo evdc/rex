@@ -7,6 +7,7 @@ export {
   encodeText,
   decodeText,
   encodeInt,
+  encodeRel,
   decodeInt,
   encodeMoney,
   decodeMoney,

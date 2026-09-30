@@ -4,4 +4,5 @@ dist/
 test-results/
 playwright-report/
 # generated wasm-bindgen glue (rebuild with wasm-bindgen; see ROADMAP §3.2)
-examples/kanban/src/pkg/
+examples/*/src/pkg/
+examples/*/dist-harness/

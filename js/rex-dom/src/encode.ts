@@ -45,6 +45,12 @@ export function encodeAtom(name: string): string {
   return "@" + escape(name);
 }
 
+/** Encode a JS array as the relation `Int -> T`, keyed by index (0-based):
+ *  the wire shape of a relation-typed event arg, `[[key, value, weight], …]`. */
+export function encodeRel<T>(values: readonly T[], enc: (v: T) => string): [string, string, number][] {
+  return values.map((v, i) => [encodeInt(i), enc(v), 1]);
+}
+
 /** Decode an `i:` Int value back to a number (passes non-`i:` through as-is). */
 export function decodeInt(v: string): number {
   return v.startsWith("i:") ? Number(v.slice(2)) : Number(v);

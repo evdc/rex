@@ -211,6 +211,7 @@ fn hstmt_to_sexpr(m: &HStmt) -> String {
             format!("(do {event} {args})")
         }
         HStmt::Clear { .. } => "(clear)".into(),
+        HStmt::Revert { .. } => "(revert)".into(),
         HStmt::Focus { target, .. } => match target {
             FocusTarget::Level(l) => format!("(focus {l})"),
             FocusTarget::Class(c) => format!("(focus .{c})"),

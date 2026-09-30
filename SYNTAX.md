@@ -229,7 +229,7 @@ on change                      => do ToggleTodo(t)
 
 ```
 on <domEvent>[.<modifier>][( name = extractor, … )] ( { stmt* } | => stmt )
-stmt := do E(args) | set local = e | clear | focus(level | .class)
+stmt := do E(args) | set local = e | clear | revert | focus(level | .class)
 ```
 
 A DOM handler is a property of its element. It names the DOM event
@@ -255,7 +255,7 @@ relational, implemented once in `rex-dom`:
 | `endOf(c)` | a fresh key after the last row of level `c` |
 | `utils.fn(args)` **(v1)** | a JS function from `import js "./utils.js" as utils`; the only escape hatch, and it lives entirely in the DOM layer — its result is an event arg, so the engine stays pure |
 
-Actions: `clear` resets the handler's target input; `focus(c)` focuses the
+Actions: `clear` resets the handler's target input; `revert` puts it back to the last value its bind set (so `Escape` cancels an edit — the blur that follows re-commits the old text); `focus(c)` focuses the
 first input of the row the preceding `do` created at level `c`;
 `focus(.cls)` focuses a child element of this row.
 

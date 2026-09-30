@@ -22,6 +22,16 @@ pub struct ShapeProgram {
     pub views: Vec<ShapeLevel>,
     /// Every declared `event` with its handler, keyed by event name.
     pub events: Vec<EventDef>,
+    /// `import js "path" as alias` modules DOM handlers call (S-91).
+    pub imports: Vec<JsImport>,
+}
+
+/// A JS module a DOM handler's extractor calls (`utils.randomLabels(1000)`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct JsImport {
+    pub alias: String,
+    /// The path as written, relative to the `.rex` file.
+    pub path: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -38,6 +48,10 @@ pub struct ShapeLevel {
     pub order_field: Option<String>,
     /// `order by … desc`: the order view's keys sort descending (S-70).
     pub order_desc: bool,
+    /// Child-index path, in the *parent* level's template, to the element this
+    /// level mounts into (`ul(class="list") { … select … }`); empty means the
+    /// parent's root element.
+    pub slot: Vec<usize>,
     /// The static DOM skeleton for one row's element.
     pub template: Tpl,
     /// Dynamic value bindings, each with a child-index path to its target.
@@ -83,6 +97,9 @@ pub enum BindKind {
     Text,
     /// A DOM property, cursor-guarded (`value` on an `<input>`).
     Prop(String),
+    /// A boolean DOM property (`checked`, `disabled`, …) set by the presence
+    /// of a gate row, like a class: `checked=(active = 0)`.
+    Flag(String),
     /// Toggle a class by the truthiness of the (atom/bool) value.
     Class(String),
 }
@@ -135,6 +152,8 @@ pub enum UiAction {
     FocusClass(String),
     /// Reset the listening input's value.
     Clear,
+    /// Restore the target input to the value its bind last set.
+    Revert,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -143,6 +162,9 @@ pub struct ArgSpec {
     /// Canonical encoding tag for the value (`text`, `atom`, `int`, `id`).
     pub encoding: Encoding,
     pub extractor: Extractor,
+    /// For a relation-typed param (`Int -> T`): the encoding of `T`. A JS
+    /// extractor then returns an array, keyed by index (S-91).
+    pub rel_value: Option<Encoding>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,6 +239,10 @@ pub enum MutationIR {
         entity: String,
         /// The relation-typed event param supplying rows.
         param: String,
+        /// The `as (key, value)` binder names, bound per row when a field's
+        /// value is a compound expression (`num: nextId + i`).
+        key: String,
+        value: String,
         fields: Vec<(String, FromField)>,
     },
     /// Synchronous `do E(args)`: the callee's mutations join this
@@ -301,6 +327,8 @@ pub enum ValExpr {
     Not(Box<ValExpr>, [String; 2]),
     /// `+ - / %` on numeric operands; `true` when the result is `Money`.
     Arith(super::typed::ArithKind, Box<ValExpr>, Box<ValExpr>, bool),
+    /// `a ++ b` on `Text`.
+    Concat(Box<ValExpr>, Box<ValExpr>),
     /// `a OP b`, decoded to the atom `@True`/`@False`.
     Compare(crate::ast::CmpOp, Box<ValExpr>, Box<ValExpr>),
     /// A bare `state` name (S-51): a point read of the one [`STATE_ENTITY`]

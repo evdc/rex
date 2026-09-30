@@ -279,7 +279,7 @@ export class Shaper<El> {
         `shape ${level.shape.name}: parent ${parentKey} of level ${level.parent.shape.name} is not mounted`,
       );
     }
-    return el;
+    return level.shape.slot ? level.shape.slot(el) : el;
   }
 
   /** Whether any ancestor of (level, parentKey) is removed in this batch —

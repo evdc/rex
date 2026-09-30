@@ -37,7 +37,9 @@ Workspace layout:
 | `crates/rex-wasm` | `RexApp`, the wasm-bindgen API (`dispatch`, `snapshot`, `apply_new`, `update_fields`, `retract`, `read_view`). |
 | `js/rex-runtime` | Boot + persistence: restores from an IndexedDB snapshot and event log, appends every dispatched event (S-80). |
 | `js/rex-dom` | TS shaper + bridge: −/+ fusion, phased apply, fractional ordering, drag/drop helpers. |
-| `examples/kanban` | The one end-to-end app (Vite + Playwright). |
+| `examples/kanban` | End-to-end app (Vite + Playwright). |
+| `examples/js-framework-benchmark` | The keyed benchmark on Rex: 10k-row bulk events, `import js` extractors (Vite + Playwright). |
+| `examples/todomvc` | TodoMVC, the S-02 program unchanged (Vite + Playwright). |
 
 ```sh
 cargo build
@@ -52,7 +54,7 @@ Running a file prints the canonical s-expression AST, a type-check result, and
 each view's materialized contents. `cargo run -p rex-cli --
 crates/rex-core/tests/fixtures/spec12.rex` is the best core demo; the Kanban
 app is the best whole-system demo — run `scripts/build-wasm.sh` to build
-`rex-wasm` and generate the wasm-bindgen glue into `examples/kanban/src/pkg/`
+`rex-wasm` and generate the wasm-bindgen glue into `examples/kanban/src/pkg/` (copied into every other example)
 (gitignored, not committed), then `cd examples/kanban && npm run build` and
 `npx playwright test`.
 

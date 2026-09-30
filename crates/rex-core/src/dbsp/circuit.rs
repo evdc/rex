@@ -22,6 +22,10 @@ use std::collections::HashMap;
 #[derive(Clone, Debug, Default)]
 pub struct Transaction {
     pub deltas: Vec<(InputKey, Value, Value, i64)>,
+    /// Every left key (entity id) some delta here names, so a later op in the
+    /// same transaction can tell in O(1) whether it must compose with pending
+    /// writes at all — without it, retracting N rows scans `deltas` N times.
+    touched: std::collections::HashSet<Value>,
 }
 
 impl Transaction {
@@ -30,7 +34,16 @@ impl Transaction {
     }
 
     pub fn push(&mut self, key: InputKey, left: Value, right: Value, weight: i64) {
+        // A row's deltas are pushed together, so the last one is the usual hit.
+        if self.deltas.last().is_none_or(|(_, l, _, _)| *l != left) {
+            self.touched.insert(left.clone());
+        }
         self.deltas.push((key, left, right, weight));
+    }
+
+    /// Whether any delta so far has `left` as its left key.
+    pub fn touches(&self, left: &Value) -> bool {
+        self.touched.contains(left)
     }
 }
 

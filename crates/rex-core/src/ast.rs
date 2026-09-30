@@ -130,6 +130,8 @@ pub enum HStmt {
     },
     /// DOM action: reset the handler's target input.
     Clear { span: Span },
+    /// DOM action: put the target input back to the last value the view gave it.
+    Revert { span: Span },
     /// DOM action: `focus(c)` (a level binder) or `focus(.cls)` (a child element).
     Focus { target: FocusTarget, span: Span },
 }
@@ -144,6 +146,7 @@ impl HStmt {
             | HStmt::Set { span, .. }
             | HStmt::Do { span, .. }
             | HStmt::Clear { span }
+            | HStmt::Revert { span }
             | HStmt::Focus { span, .. } => *span,
         }
     }

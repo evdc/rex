@@ -128,6 +128,14 @@ pub fn desugar(program: &Program) -> Desugared {
             })
             .collect(),
     };
+    d.shapes.imports = program
+        .stmts
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::Import(i) => Some(JsImport { alias: i.alias.clone(), path: i.path.clone() }),
+            _ => None,
+        })
+        .collect();
     // Component `local` state (S-62): a hidden field on the keying entity, a
     // read view, and a hidden event to set it. Before pass 0 so a DOM handler
     // may `do` the event, and before pass 2 so the field lands on its entity.
@@ -169,10 +177,8 @@ pub fn desugar(program: &Program) -> Desugared {
             // Kept for the checker, which turns it into a coproduct of atoms
             // and registers its constructors (S-50).
             Stmt::Type(t) => d.stmts.push(Stmt::Type(t.clone())),
-            Stmt::Import(i) => d.diagnostics.push(Diagnostic::error(
-                i.span,
-                "`import js` is not supported yet (MVP-PLAN S-42)".to_string(),
-            )),
+            // Recorded up front in `shapes.imports`; codegen emits the import.
+            Stmt::Import(_) => {}
             Stmt::Rel(r) => {
                 // `rel R(A, B)` -> `let R = A . :R` (A's identity, then the
                 // injected field). The field itself is added to A's entity decl.
@@ -437,6 +443,7 @@ fn rewrite_row_refs(e: &Expr, row: &str) -> Expr {
         ExprKind::Sub(a, b) => ExprKind::Sub(Box::new(rewrite_row_refs(a, row)), Box::new(rewrite_row_refs(b, row))),
         ExprKind::Div(a, b) => ExprKind::Div(Box::new(rewrite_row_refs(a, row)), Box::new(rewrite_row_refs(b, row))),
         ExprKind::Mod(a, b) => ExprKind::Mod(Box::new(rewrite_row_refs(a, row)), Box::new(rewrite_row_refs(b, row))),
+        ExprKind::Concat(a, b) => ExprKind::Concat(Box::new(rewrite_row_refs(a, row)), Box::new(rewrite_row_refs(b, row))),
         ExprKind::Compose(a, b) => {
             ExprKind::Compose(Box::new(rewrite_row_refs(a, row)), Box::new(rewrite_row_refs(b, row)))
         }
@@ -638,8 +645,18 @@ impl Desugar {
             HStmt::Update { target, sets, .. } => {
                 let (bulk_target, entity) = self.mutation_target(target, scope, event)?;
                 let mut updates = Vec::new();
+                // A bulk update's values are per-row: `.f` reads the row being
+                // updated (bound as ROW_SELF at dispatch), so
+                // `update Row where … { label: .label ++ "!" }` works.
+                let mut vscope = scope.clone();
+                let bulk = !matches!(bulk_target, Target::One(_));
+                if bulk {
+                    vscope.push((ROW_SELF.to_string(), ParamTy::Id(entity.clone()), ValTy::Id(entity.clone())));
+                }
+                let scope = &vscope;
                 for f in sets {
-                    let (v, ty) = self.val(&f.value, scope)?;
+                    let value = if bulk { rewrite_row_refs(&f.value, ROW_SELF) } else { f.value.clone() };
+                    let (v, ty) = self.val(&value, scope)?;
                     self.check_field_value(&entity, &f.name, &ty, f.value.span)?;
                     updates.push((f.name.clone(), v));
                 }
@@ -698,8 +715,8 @@ impl Desugar {
                     updates: vec![(name.clone(), v)],
                 })
             }
-            HStmt::Clear { .. } | HStmt::Focus { .. } => {
-                self.error(span, "`clear`/`focus` are DOM actions; they are not allowed in an `on` body");
+            HStmt::Clear { .. } | HStmt::Revert { .. } | HStmt::Focus { .. } => {
+                self.error(span, "`clear`/`revert`/`focus` are DOM actions; they are not allowed in an `on` body");
                 None
             }
         }
@@ -799,6 +816,15 @@ impl Desugar {
         };
         let key_vt = self.named_val_ty(&key_ty, span)?;
         let val_vt = self.named_val_ty(&val_ty, span)?;
+        // The binders are per-row params in a compound field value
+        // (`num: nextId + i`), bound at dispatch alongside the event's own.
+        let mut scope = scope.clone();
+        for (name, ty, vt) in [(&from.key, &key_ty, &key_vt), (&from.value, &val_ty, &val_vt)] {
+            let pty = self.param_ty(&Type { kind: TypeKind::Named(ty.clone()), span })?;
+            scope.retain(|(n, _, _)| n != name);
+            scope.push((name.clone(), pty, vt.clone()));
+        }
+        let scope = &scope;
         let mut fs = Vec::new();
         for f in fields {
             let (field_val, ty) = match &f.value.kind {
@@ -812,7 +838,13 @@ impl Desugar {
             self.check_field_value(entity, &f.name, &ty, f.value.span)?;
             fs.push((f.name.clone(), field_val));
         }
-        Some(MutationIR::InsertFrom { entity: entity.to_string(), param: param.clone(), fields: fs })
+        Some(MutationIR::InsertFrom {
+            entity: entity.to_string(),
+            param: param.clone(),
+            key: from.key.clone(),
+            value: from.value.clone(),
+            fields: fs,
+        })
     }
 
     /// A `ParamTy::Rel` side's name (an entity or a scalar type name)
@@ -1038,6 +1070,15 @@ impl Desugar {
                 }
                 let pair = [atoms[0].clone(), atoms[1].clone()];
                 Some((ValExpr::Not(Box::new(vi), pair), ti))
+            }
+            ExprKind::Concat(a, b) => {
+                let (va, ta) = self.val_expr(a, scope)?;
+                let (vb, tb) = self.val_expr(b, scope)?;
+                if ta != ValTy::Text || tb != ValTy::Text {
+                    self.error(e.span, format!("`++` needs `Text` operands, got `{}` and `{}`", show_valty(&ta), show_valty(&tb)));
+                    return None;
+                }
+                Some((ValExpr::Concat(Box::new(va), Box::new(vb)), ValTy::Text))
             }
             ExprKind::Add(a, b) => self.val_arith(a, b, scope, ArithKind::Add, false),
             ExprKind::Sub(a, b) => self.val_arith(a, b, scope, ArithKind::Sub, false),
@@ -1384,6 +1425,7 @@ impl Desugar {
             order_view,
             order_field,
             order_desc: false,
+            slot: Vec::new(),
             template,
             attrs,
             events,
@@ -1444,6 +1486,9 @@ struct LevelWalk<'a> {
     children: Vec<ShapeLevel>,
 }
 
+/// DOM properties that are booleans: a non-field bind on one is a gate.
+const BOOL_PROPS: &[&str] = &["checked", "disabled", "hidden", "selected", "readOnly", "required"];
+
 impl LevelWalk<'_> {
     /// Lower an element into a `Tpl`, registering its bindings/handlers at
     /// child-index `path` and its nested selects as child levels.
@@ -1473,6 +1518,18 @@ impl LevelWalk<'_> {
                             view,
                             path: path.to_vec(),
                             kind: BindKind::Class(cls.to_string()),
+                            encoding: Encoding::Text,
+                        });
+                    } else if BOOL_PROPS.contains(&a.name.as_str())
+                        && !matches!(expr.kind, ExprKind::FieldPath(_))
+                    {
+                        // A comparison is a coreflexive, not a `Bool` value:
+                        // bind it as a gate, as a class bind does.
+                        let view = self.gate_view(expr);
+                        self.attrs.push(AttrBinding {
+                            view,
+                            path: path.to_vec(),
+                            kind: BindKind::Flag(a.name.clone()),
                             encoding: Encoding::Text,
                         });
                     } else {
@@ -1514,7 +1571,13 @@ impl LevelWalk<'_> {
                     cp.push(tpl_children.len());
                     tpl_children.push(self.element(child, &cp));
                 }
-                Content::If { cond, children, span } => self.gate(cond, children, *span),
+                Content::If { cond, children, span } => {
+                    let before = self.children.len();
+                    self.gate(cond, children, *span);
+                    for l in &mut self.children[before..] {
+                        l.slot = path.to_vec();
+                    }
+                }
                 // Expansion replaced every call, or dropped it with a diagnostic.
                 Content::Component { .. } => {}
                 Content::ChildrenSlot(span) => {
@@ -1526,7 +1589,8 @@ impl LevelWalk<'_> {
                     // level's binder (alias or entity name), the last ancestor.
                     let mut chain = self.ancestors.to_vec();
                     chain.push((self.binder.to_string(), self.entity.to_string()));
-                    if let Some(level) = self.d.level(sel, &child_name, &chain) {
+                    if let Some(mut level) = self.d.level(sel, &child_name, &chain) {
+                        level.slot = path.to_vec();
                         self.children.push(level);
                     }
                 }
@@ -1693,19 +1757,40 @@ impl LevelWalk<'_> {
 
         let mut params = Vec::new();
         for p in &h.params {
-            let ty = match &p.ty {
-                Some(t) => t.clone(),
+            let pty = match &p.ty {
+                Some(t) => self.d.param_ty(t)?,
                 None => match infer_param_type(&p.extractor, p.span) {
-                    Some(t) => t,
-                    None => {
-                        self.d.error(p.span, format!("parameter `{}` needs a type annotation", p.name));
-                        return None;
-                    }
+                    Some(t) => self.d.param_ty(&t)?,
+                    // A JS extractor's type is whatever the event it feeds
+                    // declares (S-91): `do Run(1000, labels)` fixes `labels`.
+                    None => match self.type_from_use(&p.name, &h.body) {
+                        Some(t) => t,
+                        None => {
+                            self.d.error(
+                                p.span,
+                                format!("parameter `{}` needs a type annotation, or a `do` that passes it to an event", p.name),
+                            );
+                            return None;
+                        }
+                    },
                 },
             };
-            let pty = self.d.param_ty(&ty)?;
             let extractor = self.resolve_extractor(&p.extractor, p.span)?;
-            params.push(ArgSpec { name: p.name.clone(), encoding: pty.encoding(), extractor });
+            let rel_value = match &pty {
+                ParamTy::Rel(k, v) => {
+                    let scalar = match self.d.param_ty(&Type { kind: TypeKind::Named(v.clone()), span: p.span })? {
+                        ParamTy::Scalar(e) => Some(e),
+                        _ => None,
+                    };
+                    if k != "Int" || scalar.is_none() {
+                        self.d.error(p.span, "a relation-typed handler parameter must be `Int -> T` with a scalar `T`");
+                        return None;
+                    }
+                    scalar
+                }
+                _ => None,
+            };
+            params.push(ArgSpec { name: p.name.clone(), encoding: pty.encoding(), extractor, rel_value });
             scope.push((p.name.clone(), pty, ArgRef::Param(p.name.clone())));
         }
 
@@ -1762,6 +1847,7 @@ impl LevelWalk<'_> {
                 },
                 HStmt::Focus { target: FocusTarget::Class(c), .. } => actions.push(UiAction::FocusClass(c.clone())),
                 HStmt::Clear { .. } => actions.push(UiAction::Clear),
+                HStmt::Revert { .. } => actions.push(UiAction::Revert),
                 HStmt::Set { .. } => {
                     self.d.error(span, "`set` needs a `state` or a component `local` in scope; a `state` is set from an `on` handler, not a DOM handler");
                     return None;
@@ -1780,6 +1866,17 @@ impl LevelWalk<'_> {
             params,
             dispatches,
             actions,
+        })
+    }
+
+    /// The declared type of the event parameter a handler param is passed to
+    /// in a `do`, when it is passed bare.
+    fn type_from_use(&self, name: &str, body: &[HStmt]) -> Option<ParamTy> {
+        body.iter().find_map(|s| {
+            let HStmt::Do { event, args, .. } = s else { return None };
+            let at = args.iter().position(|a| matches!(&a.kind, ExprKind::Ident(n) if n == name))?;
+            let def = self.d.shapes.events.iter().find(|e| e.name == *event)?;
+            def.params.get(at).map(|p| p.ty.clone())
         })
     }
 
@@ -1804,9 +1901,17 @@ impl LevelWalk<'_> {
                 level: level(self, b)?,
                 exclude: exclude.clone(),
             },
-            Extractor::Js { .. } => {
-                self.d.error(span, "JS extractors (`import js`) are not supported yet (MVP-PLAN S-42)");
-                return None;
+            Extractor::Js { module, args, .. } => {
+                if !self.d.shapes.imports.iter().any(|i| i.alias == *module) {
+                    self.d.error(span, format!("`{module}` is not an `import js` module"));
+                    return None;
+                }
+                let literal = |a: &Expr| matches!(a.kind, ExprKind::Int(_) | ExprKind::Str(_));
+                if let Some(bad) = args.iter().find(|a| !literal(a)) {
+                    self.d.error(bad.span, "a JS extractor's arguments must be literals");
+                    return None;
+                }
+                x.clone()
             }
             other => other.clone(),
         })

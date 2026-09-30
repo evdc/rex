@@ -7,6 +7,7 @@ import {
   encodeAtom,
   encodeInt,
   encodeMoney,
+  encodeRel,
   encodeText,
 } from "../src/encode.js";
 
@@ -41,5 +42,15 @@ describe("canonical encoding (mirror of rex-core encode.rs)", () => {
     expect(decodeMoney(encodeMoney(999))).toBe(999);
     expect(decodeAtom(encodeAtom("west"))).toBe("west");
     expect(decodeAtom(encodeAtom("a,b(c)"))).toBe("a,b(c)");
+  });
+});
+
+describe("encodeRel (S-91)", () => {
+  test("an array becomes the relation Int -> T keyed by 0-based index", () => {
+    expect(encodeRel(["a", "b,c"], encodeText)).toEqual([
+      ["i:0", "t:a", 1],
+      ["i:1", "t:b\\,c", 1],
+    ]);
+    expect(encodeRel([], encodeText)).toEqual([]);
   });
 });

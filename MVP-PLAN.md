@@ -1094,17 +1094,75 @@ replayed (test kills the page before the snapshot interval).
 
 ### E9 — Apps, gate, docs
 
-#### S-90 TodoMVC on Rex (M, deps S-52, S-53, S-61, S-62, S-70, S-80) — *all dependencies now landed*
+#### S-90 TodoMVC on Rex (M, deps S-52, S-53, S-61, S-62, S-70, S-80) — **done 2026-09-29** (`examples/todomvc/`, 8 Playwright specs)
 *Files:* `examples/todomvc/*` (Vite + Playwright, same layout as kanban).
 *Acceptance:* the S-02 program runs unchanged; Playwright: add/toggle/edit/
 delete/filter/clear-completed, focus survives edit, reload restores.
 
-#### S-91 js-framework-benchmark on Rex (M, deps S-41, S-42, S-70, S-80)
+*Landed as:* `app.rex` is the S-02 program with one edit: Escape is
+`{ set editing = False; revert }` (see 4). Running it in a real browser found
+five gaps that no unit test had reached, all fixed generally:
+1. **Child levels mounted into the parent row's root**, not the element they
+   were written in (`ul.todo-list` inside `section.main`). `ShapeLevel.slot`
+   is the child-index path in the parent template; codegen emits
+   `slot: root => …` and `Shaper.parentEl` applies it. Kanban never hit it
+   because its selects sit directly under the row element.
+2. **Key selectors were ignored**: `keydown.enter` fired on every key. Codegen
+   now filters on `KeyboardEvent.key` (`enter`, `escape`, `tab`, `space`,
+   arrows, single characters).
+3. **`autofocus` became a class.** It is now the attribute plus a `focus()`
+   after insertion.
+4. **`checked=(active = 0)`**: a comparison is a coreflexive, not a `Bool`
+   value, so the bind never turned on. Non-field binds on boolean DOM
+   properties (`checked disabled hidden selected readOnly required`) are now
+   gates applied by presence (`BindKind::Flag`), like class binds.
+5. **Escape re-committed the edit**: hiding the input fires `blur`, whose
+   handler saved the abandoned text. New handler action `revert` restores the
+   input from `defaultValue`, which value binds now keep in sync.
+The wasm glue is now copied into every example by `scripts/build-wasm.sh`
+(CI does the same), since each Vite app imports its own `src/pkg`.
+*Not covered:* S-53's sibling-order limitation (a gate flipping after a later
+sibling mounted appends out of order) does not bite here: `main` and `footer`
+gate on the same condition and mount in one batch.
+
+#### S-91 js-framework-benchmark on Rex (M, deps S-41, S-42, S-70, S-80) — **done 2026-09-29, except the frame-budget number** (`examples/js-framework-benchmark/`, 11 Playwright specs; `crates/rex-core/tests/{bulk_values,bench_create}.rs`)
 *Files:* `examples/js-framework-benchmark/*` following
 `../elysium26/bench/js-framework-benchmark/` (same `index.html` ids so the
 upstream harness works).
 *Acceptance:* all seven operations; `create 10k` under 1 frame budget in the
 engine (record µs); numbers for Rex and elysium in `ROADMAP.md` §3.2.
+
+*Landed as:* all seven operations (plus select/remove) pass in a real browser
+against the real wasm, including reload-restores with the same random labels
+(they are logged with the event). **`create 10k` is 207 ms native, ~283 ms in
+wasm, not 16 ms**; numbers for both engines are in `ROADMAP.md` §3.2, with the
+caveat that they are not like-for-like. Not met, and not closable inside this
+story: the profile is flat BTree/`Value` work, so it needs the post-MVP
+precompiled circuit, not a hot-spot fix.
+
+`app.rex` compiled with four gaps, all closed in the language rather than
+worked around:
+1. **`new … from rows as (i, v) { num: nextId + i }`**: the key/value binders
+   are per-row params in a compound field value (`MutationIR::InsertFrom` now
+   carries the binder names; `expand` binds them per minted row).
+2. **Bulk update values are per-row**: `update Row where P { label: .label ++ "!" }`
+   evaluates `.label` on the row being updated (`ROW_SELF`, as S-41's scan
+   predicate already did). Before, the value was computed once for all rows.
+3. **`++`** in mutation values (`ValExpr::Concat`, `Text` only).
+4. **`import js` extractors**: `import js "./utils.js" as utils` is recorded in
+   `ShapeProgram.imports` and emitted as `import * as utils`; a handler param
+   `rows = utils.randomLabels(1000)` takes its type from the event it is passed
+   to (`do Run(1000, rows)` fixes `Int -> Text`), arguments must be literals, and
+   the JS result is encoded at the boundary (`encodeRel` turns an array into the
+   relation `Int -> T` keyed by 0-based index), so the log holds plain
+   canonical values and replay never re-randomises.
+Also fixed: `Engine::push_retract`/`push_set` re-scanned the transaction's
+deltas per row (O(N²) for a bulk delete: `Clear` on 10k rows 2.3 s → 0.19 s);
+`Transaction` now remembers which ids it has written and only composes with
+pending writes when one applies.
+*Not covered:* the harness's `#main` container is `#app` here; the upstream
+Bootstrap stylesheet is replaced by a small inline one (the glyphicon is a CSS
+`::before`), so the visual is approximate, the ids are the harness's.
 
 #### S-92 Kanban re-port to named events (S, deps S-22, S-71)
 *Acceptance:* existing Playwright suite unchanged and green; per-list card

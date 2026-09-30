@@ -44,6 +44,14 @@ rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR"
 wasm-bindgen --target web --out-dir "$OUT_DIR" "$WASM_FILE"
 
+# Every example that has a Vite app gets its own copy of the glue.
+for dir in examples/*/; do
+  if [ -f "$dir/package.json" ] && [ "${dir%/}/src/pkg" != "$OUT_DIR" ]; then
+    rm -rf "$dir/src/pkg"
+    cp -r "$OUT_DIR" "$dir/src/pkg"
+  fi
+done
+
 SIZE=$(wc -c < "$OUT_DIR"/*_bg.wasm | tr -d ' ')
 GZIP_SIZE=$(gzip -c "$OUT_DIR"/*_bg.wasm | wc -c | tr -d ' ')
 echo "done: $OUT_DIR (wasm: ${SIZE} bytes, gzipped: ${GZIP_SIZE} bytes)"

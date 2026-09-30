@@ -82,6 +82,9 @@ export interface ShapeNode<El> {
   /** `order by … desc`: reverse the order view's key order (child key still
    *  breaks ties ascending). */
   readonly orderDesc?: boolean;
+  /** The element inside a parent row's element that this level mounts into
+   *  (default: the parent row's element itself). */
+  readonly slot?: (root: El) => El;
   /** Nested shape levels; their membership views' parent column must be this
    *  level's child key. */
   readonly children: readonly ShapeNode<El>[];
