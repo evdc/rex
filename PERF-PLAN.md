@@ -106,6 +106,26 @@ This also resolves the "hidden keyset views are expensive" finding **without
 changing their semantics**. After fusion each one is a single filter over one field:
 about 10k closure calls per bulk create, which is noise, and `SwapRows` stays O(1).
 
+**Landed as P-1 (2026-09-30).** Native `bench_create`, before → after: Run(1k)
+11.3 → 7.4 ms, Run(10k) 205 → 59 ms, replace-10k 374 → 117 ms, Clear 188 → 60 ms,
+Add(1k) 16.2 → 4.4 ms. Delta row counts are unchanged. The benchmark lowers to 8 inputs + 7
+computed nodes (`ConstSingleton`, the membership `MapConst`, and five `FilterMap`s:
+the `danger` gate and the four keyset views). `num`, `label` and `order` alias their
+inputs. Notes on what was built:
+- Lowering returns a pending `Low` (`Node` / `Const` / per-row `Map`) so a parent can
+  fuse a child without leaving the unfused node computing in the arena.
+- The rewrites check node properties, not syntax: `anchor` (which sort's live ids bound
+  the left keys) and `functional` (≤1 weight-1 row per key). Fix-region bodies read
+  `FixInput` imports, so they are never rewritten.
+- `Identity(E)[X] → X` requires X to be a weight-1 coreflexive, so it also depends on
+  base fields being functional. The engine asserts both halves in debug builds
+  (`Engine::debug_assert_base_invariant`); `tests/lower_rewrites.rs` checks them from
+  outside and checks every view and every step delta against batch evaluation.
+- `Circuit::backfill` now takes the names of the views being added, since an aliased
+  view's node can sit below the backfill floor.
+- The duplicate `.selected = True` filter (`gate1` and `on#Select#4`) is not deduplicated;
+  CSE is left for later.
+
 Trade-offs:
 - Rewrites must be proven per rule. The first and last rows depend on the no-orphan
   invariant, so it becomes a debug assertion in `Engine::build_tx`, plus a property test.

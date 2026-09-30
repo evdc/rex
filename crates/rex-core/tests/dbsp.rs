@@ -815,6 +815,7 @@ proptest! {
         let edge_sort = SortId(1);
         let src_key = InputKey::Field(edge_sort, intern("src"));
         let dst_key = InputKey::Field(edge_sort, intern("dst"));
+        let id_key = InputKey::Identity(edge_sort);
         // Live edge entities: id -> (src, dst).
         let mut live: BTreeMap<u64, (u64, u64)> = BTreeMap::new();
 
@@ -827,10 +828,12 @@ proptest! {
                         continue; // entity ids are unique
                     }
                     live.insert(e, (u, v));
+                    tx.push(id_key, eid.clone(), eid.clone(), 1);
                     tx.push(src_key, eid.clone(), Value::Id(node_sort, u), 1);
                     tx.push(dst_key, eid, Value::Id(node_sort, v), 1);
                 } else if let Some((u, v)) = live.remove(&e) {
                     // Retract exactly the rows the entity holds.
+                    tx.push(id_key, eid.clone(), eid.clone(), -1);
                     tx.push(src_key, eid.clone(), Value::Id(node_sort, u), -1);
                     tx.push(dst_key, eid, Value::Id(node_sort, v), -1);
                 }

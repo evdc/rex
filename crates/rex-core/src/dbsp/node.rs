@@ -57,6 +57,12 @@ pub enum Node {
     /// A constant relation over an identity input: rewrite the right column to
     /// a fixed value, `(id, id, w) -> (id, value, w)`. Linear.
     MapConst(NodeId, Value),
+    /// A per-row scalar expression over one input: `(k, v, w) -> (k, f(k, v), w)`,
+    /// dropping the row where `f` yields nothing (a failed comparison). What
+    /// lowering fuses a chain of co-keyed ops against constants into (P-1):
+    /// `.num % 10 = 1` is one node rather than two `MapConst`s and two
+    /// `CoKeyed` joins. Linear.
+    FilterMap(NodeId, Scalar),
     /// `L . R` (§3.1): join L's right column against R's left, keep the outer
     /// columns. Bilinear: `δ(L·R) = δL·R' + I(L)·δR`, true O(Δ). `linv` is the
     /// node's private index of I(L) by *right* column (the probe side for the
@@ -167,24 +173,53 @@ pub enum CoKeyedFn {
 }
 
 impl CoKeyedFn {
+    /// The output value for key `k` with co-keyed values `(b, c)`, or `None`
+    /// for a failed comparison.
+    fn combine(&self, k: &Value, b: &Value, c: &Value) -> Option<Value> {
+        Some(match self {
+            CoKeyedFn::Fork => Value::Pair(Box::new(b.clone()), Box::new(c.clone())),
+            CoKeyedFn::Mul { money } => mul_values(b, c, *money),
+            CoKeyedFn::Concat => concat_values(b, c),
+            CoKeyedFn::Arith { kind, money } => crate::eval::interp::arith_values(*kind, b, c, *money),
+            CoKeyedFn::Compare(op) => return compare_values(*op, b, c).then(|| k.clone()),
+        })
+    }
+
     /// Emit the output row for key `k` with co-keyed values `(b, c)` at
     /// combined weight `w` (zero-weight and failed comparisons emit nothing).
     fn apply(&self, out: &mut BTreeRelation, k: &Value, b: &Value, c: &Value, w: i64) {
-        match self {
-            CoKeyedFn::Fork => {
-                out.add(k.clone(), Value::Pair(Box::new(b.clone()), Box::new(c.clone())), w)
-            }
-            CoKeyedFn::Mul { money } => out.add(k.clone(), mul_values(b, c, *money), w),
-            CoKeyedFn::Concat => out.add(k.clone(), concat_values(b, c), w),
-            CoKeyedFn::Arith { kind, money } => {
-                out.add(k.clone(), crate::eval::interp::arith_values(*kind, b, c, *money), w)
-            }
-            CoKeyedFn::Compare(op) => {
-                if compare_values(*op, b, c) {
-                    out.add(k.clone(), k.clone(), w);
-                }
-            }
+        if let Some(v) = self.combine(k, b, c) {
+            out.add(k.clone(), v, w);
         }
+    }
+}
+
+/// The expression of a [`Node::FilterMap`]: a tree of co-keyed ops whose
+/// leaves are the input row's value or constants, evaluated on one row.
+#[derive(Clone, Debug)]
+pub enum Scalar {
+    /// The input row's right column.
+    Val,
+    Const(Value),
+    /// A co-keyed op applied pointwise — exactly what a `CoKeyed` node would
+    /// emit for this key, since both sides have one value here.
+    Bin(CoKeyedFn, Box<Scalar>, Box<Scalar>),
+}
+
+impl Scalar {
+    /// Evaluate on the row `(k, v)`; `None` drops the row.
+    pub fn eval(&self, k: &Value, v: &Value) -> Option<Value> {
+        match self {
+            Scalar::Val => Some(v.clone()),
+            Scalar::Const(c) => Some(c.clone()),
+            Scalar::Bin(f, a, b) => f.combine(k, &a.eval(k, v)?, &b.eval(k, v)?),
+        }
+    }
+
+    /// Whether every row this yields is `(k, k)`: the outermost op is a
+    /// comparison, which emits the key itself.
+    pub fn is_coreflexive(&self) -> bool {
+        matches!(self, Scalar::Bin(CoKeyedFn::Compare(_), _, _))
     }
 }
 
@@ -198,6 +233,7 @@ impl Node {
             | Node::Filter(a, _)
             | Node::InRel(a, _)
             | Node::MapConst(a, _)
+            | Node::FilterMap(a, _)
             | Node::Proj(a, _) => {
                 vec![*a]
             }
@@ -284,6 +320,15 @@ impl Node {
                 let mut out = BTreeRelation::new();
                 for (l, _, w) in ctx.delta(*a).triples() {
                     out.add(l.clone(), value.clone(), w);
+                }
+                out
+            }
+            Node::FilterMap(a, f) => {
+                let mut out = BTreeRelation::new();
+                for (l, r, w) in ctx.delta(*a).triples() {
+                    if let Some(v) = f.eval(l, r) {
+                        out.add(l.clone(), v, w);
+                    }
                 }
                 out
             }

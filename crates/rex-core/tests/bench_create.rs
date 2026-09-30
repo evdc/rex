@@ -31,6 +31,8 @@ fn engine_cost_of_each_operation() {
     for stmt in &prog.stmts {
         engine.apply_typed_stmt(stmt, &mut values);
     }
+    let c = &engine.circuit;
+    println!("circuit: {} nodes, {} inputs", c.node_count(), c.input_keys().count());
     let mut run = |label: &str, name: &str, a: Vec<(&str, ArgValue)>| {
         let t = Instant::now();
         let (_, step) = dispatch_event(&mut engine, &checked.env, &checked.shapes.events, name, &args(a))

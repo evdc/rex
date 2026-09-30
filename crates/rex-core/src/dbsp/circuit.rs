@@ -259,7 +259,9 @@ impl Circuit {
         deltas
     }
 
-    /// Register `node` as the producer of the named view.
+    /// Register `node` as the producer of the named view. Any node may be
+    /// named, including an input or another view's node: lowering's rewrites
+    /// (P-1) can reduce a view to a node that already exists.
     pub fn set_output(&mut self, name: &str, node: NodeId) {
         self.outputs.insert(name.to_string(), node);
     }
@@ -276,6 +278,12 @@ impl Circuit {
     /// Every registered view name (for a full snapshot at boot).
     pub fn output_names(&self) -> impl Iterator<Item = &String> {
         self.outputs.keys()
+    }
+
+    /// A node of the arena (lowering inspects already-built nodes to decide
+    /// its rewrites).
+    pub fn node(&self, id: NodeId) -> &Node {
+        &self.nodes[id.0]
     }
 
     /// The integrated output of any node (tests, backfill, retraction reads).
@@ -330,20 +338,31 @@ impl Circuit {
     }
 
     /// Evaluate the freshly appended node suffix `from..` over the data already
-    /// in the circuit (a new `let` over existing base tables). Every node below
-    /// `from` presents its full integral as one first delta — and reads as an
-    /// *empty* integral, so the history is seen exactly once. Because every
-    /// delta rule is exact, δ-from-empty equals batch evaluation by
-    /// construction. Pre-existing nodes are neither recomputed nor recommitted;
-    /// their integrals are presented as deltas by reference (`Ctx::delta`
-    /// redirects below-floor reads), so nothing is cloned.
-    pub fn backfill(&mut self, from: usize) -> StepResult {
-        self.run(from, vec![BTreeRelation::new(); self.nodes.len()], true)
+    /// in the circuit (a new `let` over existing base tables), and report the
+    /// full contents of `views` — the lets being added — as their first delta.
+    /// Every node below `from` presents its full integral as one first delta —
+    /// and reads as an *empty* integral, so the history is seen exactly once.
+    /// Because every delta rule is exact, δ-from-empty equals batch evaluation
+    /// by construction. Pre-existing nodes are neither recomputed nor
+    /// recommitted; their integrals are presented as deltas by reference
+    /// (`Ctx::delta` redirects below-floor reads), so nothing is cloned.
+    ///
+    /// `views` is named explicitly because a view may alias a node below
+    /// `from` (P-1: `.num` at a row level *is* the `num` input), which
+    /// the suffix alone would not reveal.
+    pub fn backfill(&mut self, from: usize, views: &[&str]) -> StepResult {
+        self.run(from, vec![BTreeRelation::new(); self.nodes.len()], false);
+        let mut result = StepResult::default();
+        for name in views {
+            let id = self.outputs[*name];
+            result.view_deltas.insert(name.to_string(), self.integrals[id.0].clone());
+        }
+        result
     }
 
     /// The shared driver: compute nodes `floor..` in topological order, commit
-    /// their deltas, and — when `collect` — report deltas for views produced
-    /// at or above `floor`. `collect: false` (S-21's silent replay path)
+    /// their deltas, and — when `collect` — report every view's delta.
+    /// `collect: false` (S-21's silent replay path)
     /// skips only that final per-view clone; every node still computes and
     /// commits, so state after a silent step is identical to a normal one.
     fn run(&mut self, floor: usize, mut deltas: Vec<BTreeRelation>, collect: bool) -> StepResult {
@@ -398,9 +417,7 @@ impl Circuit {
         let mut result = StepResult::default();
         if collect {
             for (name, id) in &self.outputs {
-                if id.0 >= floor {
-                    result.view_deltas.insert(name.clone(), deltas[id.0].clone());
-                }
+                result.view_deltas.insert(name.clone(), deltas[id.0].clone());
             }
         }
         result

@@ -55,6 +55,7 @@ impl Engine {
     pub fn apply_new(&mut self, sort: SortId, fields: &[(String, Value)]) -> (Value, StepResult) {
         let mut tx = Transaction::new();
         let id = self.push_new(&mut tx, sort, fields);
+        self.debug_assert_base_invariant(&tx);
         (id, self.circuit.step(&tx))
     }
 
@@ -65,6 +66,7 @@ impl Engine {
     pub(crate) fn apply_new_silent(&mut self, sort: SortId, fields: &[(String, Value)]) -> Value {
         let mut tx = Transaction::new();
         let id = self.push_new(&mut tx, sort, fields);
+        self.debug_assert_base_invariant(&tx);
         self.circuit.step_silent(&tx);
         id
     }
@@ -118,7 +120,62 @@ impl Engine {
                 DispatchOp::Retract { id } => self.push_retract(&mut tx, id),
             }
         }
+        self.debug_assert_base_invariant(&tx);
         (tx, ids)
+    }
+
+    /// The base invariant lowering's rewrites rely on (P-1, `dbsp/lower.rs`),
+    /// checked for every id `tx` touches as it will stand after the step:
+    /// the identity row is `(id, id)` at weight 1 or absent, and each field
+    /// holds at most one row, at weight 1, and none once the identity is gone.
+    /// `push_new` writes identity and fields together, `push_set` refuses
+    /// dead ids and replaces rather than adds, and `push_retract` negates
+    /// everything, so no write path can break it. O(|tx|); debug builds only.
+    fn debug_assert_base_invariant(&self, tx: &Transaction) {
+        if !cfg!(debug_assertions) {
+            return;
+        }
+        // Net pending weight per (table, id, value).
+        let mut pending: HashMap<(InputKey, &Value), HashMap<&Value, i64>> = HashMap::new();
+        for (key, l, r, w) in &tx.deltas {
+            *pending.entry((*key, l)).or_default().entry(r).or_default() += w;
+        }
+        let after = |key: InputKey, id: &Value| -> Vec<(Value, i64)> {
+            let mut rows: HashMap<Value, i64> = self
+                .circuit
+                .input_integral(&key)
+                .map(|rel| rel.row(id).collect())
+                .unwrap_or_default();
+            for (v, w) in pending.get(&(key, id)).into_iter().flatten() {
+                *rows.entry((*v).clone()).or_default() += w;
+            }
+            rows.into_iter().filter(|(_, w)| *w != 0).collect()
+        };
+        let ids: std::collections::HashSet<&Value> = pending.keys().map(|(_, id)| *id).collect();
+        for id in ids {
+            let Value::Id(sort, _) = id else { panic!("base row keyed by non-id {id}") };
+            let identity = after(InputKey::Identity(*sort), id);
+            let alive = match identity.as_slice() {
+                [] => false,
+                [(v, 1)] if v == id => true,
+                rows => panic!("identity of {id} would hold {rows:?}"),
+            };
+            let fields = self
+                .circuit
+                .input_keys()
+                .copied()
+                .chain(pending.keys().map(|(k, _)| *k))
+                .filter(|k| matches!(k, InputKey::Field(s, _) if s == sort))
+                .collect::<std::collections::HashSet<_>>();
+            for key in fields {
+                let rows = after(key, id);
+                assert!(
+                    rows.is_empty() || (alive && matches!(rows.as_slice(), [(_, 1)])),
+                    "{key:?} of {} {id} would hold {rows:?}",
+                    if alive { "live" } else { "dead" },
+                );
+            }
+        }
     }
 
     /// Run `ops` as one transaction and append `name`/`args` to the log
@@ -190,6 +247,7 @@ impl Engine {
     pub fn retract_entity(&mut self, id: &Value) -> StepResult {
         let mut tx = Transaction::new();
         self.push_retract(&mut tx, id);
+        self.debug_assert_base_invariant(&tx);
         self.circuit.step(&tx)
     }
 
@@ -274,6 +332,7 @@ impl Engine {
     pub fn update_fields(&mut self, id: &Value, updates: &[(String, Value)]) -> StepResult {
         let mut tx = Transaction::new();
         self.push_set(&mut tx, id, updates);
+        self.debug_assert_base_invariant(&tx);
         self.circuit.step(&tx)
     }
 
@@ -359,7 +418,7 @@ impl Engine {
         let mark = self.circuit.node_count();
         let node = lower(&mut self.circuit, body, values);
         self.circuit.set_output(name, node);
-        self.circuit.backfill(mark)
+        self.circuit.backfill(mark, &[name])
     }
 
     /// Apply one recursion group (`let recursive …`, §8): lower the group's
@@ -375,7 +434,8 @@ impl Engine {
         for ((name, _), node) in bindings.iter().zip(outs) {
             self.circuit.set_output(name, node);
         }
-        self.circuit.backfill(mark)
+        let names: Vec<&str> = bindings.iter().map(|(n, _)| n.as_str()).collect();
+        self.circuit.backfill(mark, &names)
     }
 
     /// Re-space one manual-order level's keys as ONE atomic transaction

@@ -22,4 +22,4 @@ pub use circuit::{Circuit, StepResult, Transaction};
 pub use engine::{BaseSnapshot, DispatchOp, Engine};
 pub use log::{ArgValue, Event, GENESIS, GENESIS_SORT, REBALANCE, REBALANCE_FIELD, REBALANCE_ROWS};
 pub use lower::lower;
-pub use node::{CoKeyedFn, InputKey, KeyAgg, Node, NodeId, Updated};
+pub use node::{CoKeyedFn, InputKey, KeyAgg, Node, NodeId, Scalar, Updated};
