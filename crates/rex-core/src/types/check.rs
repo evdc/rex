@@ -163,6 +163,15 @@ impl Checker {
                         self.env.add_field(sort, &field.name, ty);
                     }
                 }
+                // (The key's fields were checked when it was desugared.)
+                if !e.key.is_empty() {
+                    let key = super::env::EntityKey {
+                        entity: e.name.clone(),
+                        fields: e.key.clone(),
+                        view: super::shape_ir::key_view(&e.name),
+                    };
+                    self.env.set_key(sort, key);
+                }
             }
         }
         // Pass 3: check & elaborate `let`s in order. Consecutive recursive
@@ -471,8 +480,7 @@ impl Checker {
                 let Some(d) = dom else {
                     return self.error(span, "`id` needs a known domain (add a type annotation)");
                 };
-                let sort = self.as_sort(span, &d, "`id`")?;
-                Ok(TExpr::new(TExprKind::Identity(sort), RelTy::coreflexive(d), span))
+                self.identity_at(&d, span, "`id`")
             }
 
             // `unit : X -> Unit` (S-50): the constant relation onto the one
@@ -641,18 +649,13 @@ impl Checker {
                 let Some(d) = dom.clone() else {
                     return self.error(span, "`not` needs a known domain (add a type annotation)");
                 };
-                let sort = self.as_sort(span, &d, "`not`")?;
+                let ident = self.identity_at(&d, span, "`not`")?;
                 let tp = self.check_rel(p, dom)?;
                 let tp = self.as_predicate(tp, span)?;
                 // The complement is only the complement if `P` ranges over
                 // the same keys: without this, `not (Other where …)` would
                 // antijoin against a foreign sort and quietly keep every row.
                 self.expect_join(span, &d, &tp.ty.from, "`not`")?;
-                let ident = TExpr::new(
-                    TExprKind::Identity(sort),
-                    RelTy::coreflexive(d.clone()),
-                    span,
-                );
                 Ok(TExpr::new(
                     TExprKind::Antijoin(Box::new(ident), Box::new(tp)),
                     RelTy::coreflexive(d),
@@ -687,16 +690,18 @@ impl Checker {
         }
     }
 
-    /// Coerce an expression used in predicate position to a coreflexive.
+    /// Coerce `not`'s operand to something whose rows mean "holds here".
     ///
-    /// A `Bool`-valued expression standing alone as a filter means "the ones
-    /// where it holds": `where .completed` is `where .completed = True`
-    /// (SYNTAX §4). Anything already coreflexive passes through untouched,
-    /// and anything else is an error here rather than at the join.
+    /// A `Bool`-valued expression means "where it is True" (SYNTAX §4), and a
+    /// comparison is already a coreflexive. A relation into an **entity** is
+    /// read as "has a related row" — so `not current` is "the state `current`
+    /// has no value" and `not ~owner` "owns nothing". A relation into a plain
+    /// scalar (`not .text`) is almost always a mistake for a comparison, and
+    /// stays an error.
     fn as_predicate(&mut self, t: TExpr, span: Span) -> TResult<TExpr> {
         let ty = t.ty.clone();
         let t = self.coerce_bool_filter(t, span);
-        if t.ty.from == t.ty.to {
+        if t.ty.from == t.ty.to || matches!(t.ty.to, ValueTy::Id(_)) {
             return Ok(t);
         }
         self.error(
@@ -725,15 +730,16 @@ impl Checker {
         if !is_bool {
             return t;
         }
-        let ValueTy::Id(sort) = t.ty.from else {
-            return t;
-        };
+        // The constant `True` over the same keys: every row of an entity,
+        // or the one point at the `Unit` level (a `Bool` state used as a
+        // root-level condition must mean its value, not that it has one).
         let from = t.ty.from.clone();
-        let yes = TExpr::new(
-            TExprKind::Const { lit: Lit::Atom(TRUE.to_string()), dom: sort },
-            RelTy::new(from.clone(), ValueTy::Atom(TRUE.to_string())),
-            span,
-        );
+        let truth = match &from {
+            ValueTy::Id(sort) => TExprKind::Const { lit: Lit::Atom(TRUE.to_string()), dom: *sort },
+            ValueTy::Unit => TExprKind::UnitConst(Lit::Atom(TRUE.to_string())),
+            _ => return t,
+        };
+        let yes = TExpr::new(truth, RelTy::new(from.clone(), ValueTy::Atom(TRUE.to_string())), span);
         TExpr::new(
             TExprKind::BinCompare(CmpOp::Eq, Box::new(t), Box::new(yes)),
             RelTy::coreflexive(from),
@@ -982,12 +988,49 @@ impl Checker {
         span: Span,
     ) -> TResult<TExpr> {
         let ta = self.check_rel(a, dom)?;
-        let tb = self.check_rel(b, Some(ta.ty.to.clone()))?;
+        // `where p & q`: conjuncts of one type are one relation, intersected
+        // (`.sender & current` — the sender *is* the current user). Conjuncts
+        // of different types cannot be intersected, but each is a condition
+        // in its own right, and "both hold" is one restriction after the
+        // other: `current & not m.liked` — there is a current user, and `m`
+        // is not liked.
+        let mut conjuncts = Vec::new();
+        flatten_intersect(b, &mut conjuncts);
+        let on = ta.ty.to.clone();
+        let mut acc = ta;
+        let mut group: Option<TExpr> = None;
+        for c in conjuncts {
+            let tc = self.check_rel(c, Some(on.clone()))?;
+            group = Some(match group.take() {
+                None => tc,
+                Some(g) if self.same_shape(&g.ty, &tc.ty) => self.additive(g, tc, b.span, false)?,
+                Some(g) => {
+                    acc = self.restrict(acc, g, span)?;
+                    tc
+                }
+            });
+        }
+        match group {
+            Some(g) => self.restrict(acc, g, span),
+            None => Ok(acc),
+        }
+    }
+
+    /// Whether two conjuncts of a filter are the same kind of relation, and
+    /// so are intersected rather than applied one after the other.
+    fn same_shape(&self, a: &RelTy, b: &RelTy) -> bool {
+        let agree = |x: &ValueTy, y: &ValueTy| x == y || self.assignable(x, y) || self.assignable(y, x);
+        agree(&a.from, &b.from) && agree(&a.to, &b.to)
+    }
+
+    /// `ta` narrowed to the rows where `tb` holds.
+    fn restrict(&mut self, ta: TExpr, tb: TExpr, span: Span) -> TResult<TExpr> {
         // `where .completed` is `where .completed = True` (S-52): a
         // `Bool`-valued filter standing alone means the ones where it holds.
         // A semijoin against the raw `Todo -> Bool` would instead keep every
         // row that has *any* value there.
-        let tb = self.coerce_bool_filter(tb, b.span);
+        let bspan = tb.span;
+        let tb = self.coerce_bool_filter(tb, bspan);
         self.expect_join(span, &ta.ty.to, &tb.ty.from, "restriction `[]`/`where`")?;
         let ty = ta.ty.clone();
         // Ground a coreflexive built-in on the value column into a Filter (§9).
@@ -1008,6 +1051,10 @@ impl Checker {
     ) -> TResult<TExpr> {
         let ta = self.check_rel(a, dom.clone())?;
         let tb = self.check_rel(b, dom)?;
+        self.additive(ta, tb, span, is_union)
+    }
+
+    fn additive(&mut self, ta: TExpr, tb: TExpr, span: Span, is_union: bool) -> TResult<TExpr> {
         let from = self.join(span, &ta.ty.from, &tb.ty.from)?;
         let to = self.join(span, &ta.ty.to, &tb.ty.to)?;
         let ty = RelTy::new(from, to);
@@ -1240,14 +1287,18 @@ impl Checker {
             }
         };
         let ty = RelTy::new(image.ty.from.clone(), to);
-        // `X by unit` regroups everything under the single `Unit` point, so
-        // the group key is there whether or not `X` has rows: the aggregate
-        // is over a total domain and must emit its identity when empty.
-        let total = match &image.kind {
-            TExprKind::By(_, g) if matches!(&g.kind, TExprKind::Const { lit: Lit::Unit, .. }) => {
-                Total::Unit
-            }
-            _ => Total::No,
+        // Which keys exist whatever the image holds is read off the key's
+        // type: the `Unit` point, an entity's live rows, an enum's
+        // constructors. Over those the aggregate is total and yields its
+        // identity for an empty group (`count`/`sum`: 0); over a scalar key
+        // there is no domain to range over, and it stays partial.
+        let total = match &image.ty.from {
+            ValueTy::Unit => Total::Unit,
+            ValueTy::Id(sort) => Total::Entity(*sort),
+            from => match from.atoms() {
+                Some(atoms) => Total::Atoms(atoms.into_iter().map(str::to_string).collect()),
+                None => Total::No,
+            },
         };
         Ok(TExpr::new(TExprKind::Agg(agg, Box::new(image), total), ty, span))
     }
@@ -1268,6 +1319,17 @@ impl Checker {
             RelTy::new(d, to),
             expr.span,
         ))
+    }
+
+    /// The identity relation on the ambient domain `d`: an entity's
+    /// diagonal, or — at the `Unit` level, where whole-app conditions live
+    /// (a root view's `if`, a handler's guard) — the one point `{unit ↦ unit}`.
+    fn identity_at(&mut self, d: &ValueTy, span: Span, what: &str) -> TResult<TExpr> {
+        let kind = match d {
+            ValueTy::Unit => TExprKind::UnitPoint,
+            _ => TExprKind::Identity(self.as_sort(span, d, what)?),
+        };
+        Ok(TExpr::new(kind, RelTy::coreflexive(d.clone()), span))
     }
 
     fn as_sort(&mut self, span: Span, ty: &ValueTy, what: &str) -> TResult<SortId> {
@@ -1506,5 +1568,16 @@ fn collect_lits(expr: &Expr, is_ctor: &dyn Fn(&str) -> bool) -> Option<Vec<Lit>>
         }
         ExprKind::Ident(name) if is_ctor(name) => Some(vec![Lit::Atom(name.clone())]),
         _ => Some(vec![lit_of(expr)?]),
+    }
+}
+
+/// The top-level conjuncts of `a & b & …`.
+fn flatten_intersect<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
+    match &e.kind {
+        ExprKind::Intersect(a, b) => {
+            flatten_intersect(a, out);
+            flatten_intersect(b, out);
+        }
+        _ => out.push(e),
     }
 }

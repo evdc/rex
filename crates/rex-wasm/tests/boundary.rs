@@ -83,7 +83,7 @@ fn drive(src: &str, picks: &[(usize, usize)]) -> App {
     let schema = Schema::of(src);
     for (which, n) in picks {
         let (name, args) = schema.call(*which, *n);
-        // Refusals (a toggle of a row that is gone) are fine; panics are not.
+        // Rejections and invalid calls are fine; panics are not.
         let _ = app.dispatch(name, &args);
     }
     app
@@ -157,7 +157,8 @@ proptest! {
         // log it was restored from.
         let schema = Schema::of(src);
         let (name, args) = schema.call(0, 1);
-        if restored.dispatch(name, &args).is_ok() {
+        // (An invalid or rejected call logs nothing, so there is nothing to number.)
+        if restored.dispatch(name, &args).is_ok_and(|out| !out.starts_with(r#"{"rejected""#)) {
             let tail: Json = serde_json::from_str(&restored.log_since(0)).unwrap();
             let full: Json = serde_json::from_str(&live.log_since(0)).unwrap();
             prop_assert_eq!(tail[0]["seq"].as_u64(), Some(full.as_array().unwrap().len() as u64));
@@ -171,6 +172,11 @@ fn refuses_cleanly(app: &mut App, what: &str, f: impl FnOnce(&mut App) -> Result
     match catch_unwind(AssertUnwindSafe(|| f(app))) {
         Err(_) => panic!("{what}: panicked"),
         Ok(Err(_)) => assert_eq!((observe(app), app.log_since(0)), before, "{what}: failed, but changed state"),
+        // Rejected: an outcome with a reason, and likewise nothing moved.
+        Ok(Ok(out)) if out.starts_with(r#"{"rejected":"#) => {
+            serde_json::from_str::<Json>(&out).expect("a rejection is JSON");
+            assert_eq!((observe(app), app.log_since(0)), before, "{what}: rejected, but changed state");
+        }
         Ok(Ok(_)) => {}
     }
 }
@@ -439,4 +445,23 @@ fn a_damaged_log_is_refused_and_never_panics() {
             }
         }
     }
+}
+
+#[test]
+fn a_rejected_event_is_a_result_and_an_invalid_call_is_an_error() {
+    let src = "entity T { x: Int }\nevent Add(x: Int)\non Add(x) where (x > 0) else \"x must be positive, got \\\"that\\\"\" => new T { x: x }\nlet xs : T -> Int = .x\n";
+    let mut app = App::new(src).unwrap();
+    let before = (observe(&app), app.log_since(0));
+    // Rejected: Ok, with the reason as JSON (quotes and all).
+    let out: Json = serde_json::from_str(&app.dispatch("Add", r#"{"x":"i:-1"}"#).unwrap()).unwrap();
+    assert_eq!(out, json!({ "rejected": "x must be positive, got \"that\"" }));
+    assert_eq!((observe(&app), app.log_since(0)), before);
+    // Invalid: an error.
+    assert!(app.dispatch("Add", r#"{"x":"t:one"}"#).is_err());
+    assert!(app.dispatch("Nope", "{}").is_err());
+    // Accepted: ids and deltas, and one logged event.
+    let out: Json = serde_json::from_str(&app.dispatch("Add", r#"{"x":"i:2"}"#).unwrap()).unwrap();
+    assert_eq!(out["ids"].as_array().unwrap().len(), 1);
+    assert!(out.get("rejected").is_none());
+    assert_eq!(serde_json::from_str::<Json>(&app.log_since(0)).unwrap().as_array().unwrap().len(), 1);
 }

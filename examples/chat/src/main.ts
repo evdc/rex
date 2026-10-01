@@ -22,8 +22,12 @@ function dispatch(name: string, args: Record<string, EventArg>): readonly string
   let res;
   try {
     res = engine.dispatch(name, args);
-  } catch (refused) {
-    console.warn(`[rex] event ${name} was refused:`, refused);
+  } catch (invalid) {
+    console.error(`[rex] dispatch of ${name} failed:`, invalid);
+    return null;
+  }
+  if (res.rejected !== undefined) {
+    console.info(`[rex] ${name} rejected: ${res.rejected}`);
     return null;
   }
   if (prof) prof.shaper(() => shaper.applyStep(res.deltas));
@@ -126,6 +130,33 @@ const shape_main_unit_message_if4: ShapeNode<HTMLElement> = {
 
 let proto_shape_main_unit_message_if5: HTMLElement | undefined;
 function build_shape_main_unit_message_if5(d: DomDriver<HTMLElement>): HTMLElement {
+  const e0 = d.createElement("button");
+  e0.className = "unlike";
+  e0.appendChild(document.createTextNode("Unlike"));
+  return e0;
+}
+
+const shape_main_unit_message_if5: ShapeNode<HTMLElement> = {
+  name: "main#unit#message#if5",
+  membershipView: "main#unit#message#if5",
+  slot: (root) => (root.childNodes[3] as HTMLElement),
+  slotKey: "3",
+  template: (d, key, ancestors) => {
+    const e0 = d.clone(proto_shape_main_unit_message_if5 ??= build_shape_main_unit_message_if5(d));
+    e0.dataset.key = key;
+    (e0).addEventListener("click", (ev) => {
+      const _ids: string[] = [];
+      { const _r = dispatch("MessageLiked", { "msg": ancestors[0]! }); if (_r === null) return; _ids.push(..._r); }
+    });
+    return e0;
+  },
+  attrs: [
+  ],
+  children: [],
+};
+
+let proto_shape_main_unit_message_if6: HTMLElement | undefined;
+function build_shape_main_unit_message_if6(d: DomDriver<HTMLElement>): HTMLElement {
   const e0 = d.createElement("td");
   const e1 = d.createElement("button");
   e1.appendChild(document.createTextNode("Delete"));
@@ -133,11 +164,11 @@ function build_shape_main_unit_message_if5(d: DomDriver<HTMLElement>): HTMLEleme
   return e0;
 }
 
-const shape_main_unit_message_if5: ShapeNode<HTMLElement> = {
-  name: "main#unit#message#if5",
-  membershipView: "main#unit#message#if5",
+const shape_main_unit_message_if6: ShapeNode<HTMLElement> = {
+  name: "main#unit#message#if6",
+  membershipView: "main#unit#message#if6",
   template: (d, key, ancestors) => {
-    const e0 = d.clone(proto_shape_main_unit_message_if5 ??= build_shape_main_unit_message_if5(d));
+    const e0 = d.clone(proto_shape_main_unit_message_if6 ??= build_shape_main_unit_message_if6(d));
     e0.dataset.key = key;
     ((e0.childNodes[0] as HTMLElement)).addEventListener("click", (ev) => {
       const _ids: string[] = [];
@@ -191,22 +222,22 @@ const shape_main_unit_message: ShapeNode<HTMLElement> = {
       },
     },
   ],
-  children: [shape_main_unit_message_like, shape_main_unit_message_if4, shape_main_unit_message_if5],
+  children: [shape_main_unit_message_like, shape_main_unit_message_if4, shape_main_unit_message_if5, shape_main_unit_message_if6],
 };
 
-let proto_shape_main_unit_if6: HTMLElement | undefined;
-function build_shape_main_unit_if6(d: DomDriver<HTMLElement>): HTMLElement {
+let proto_shape_main_unit_if7: HTMLElement | undefined;
+function build_shape_main_unit_if7(d: DomDriver<HTMLElement>): HTMLElement {
   const e0 = d.createElement("input");
   e0.className = "send-message";
   e0.setAttribute("placeholder", "Say something ...");
   return e0;
 }
 
-const shape_main_unit_if6: ShapeNode<HTMLElement> = {
-  name: "main#unit#if6",
-  membershipView: "main#unit#if6",
+const shape_main_unit_if7: ShapeNode<HTMLElement> = {
+  name: "main#unit#if7",
+  membershipView: "main#unit#if7",
   template: (d, key) => {
-    const e0 = d.clone(proto_shape_main_unit_if6 ??= build_shape_main_unit_if6(d));
+    const e0 = d.clone(proto_shape_main_unit_if7 ??= build_shape_main_unit_if7(d));
     e0.dataset.key = key;
     (e0).addEventListener("keydown", (ev) => {
       if (!["Enter"].includes((ev as KeyboardEvent).key)) return;
@@ -231,17 +262,14 @@ function build_shape_main_unit(d: DomDriver<HTMLElement>): HTMLElement {
   e0.appendChild(e1);
   const e2 = d.createElement("div");
   e2.className = "toolbar";
-  const e3 = d.createElement("button");
-  e3.appendChild(document.createTextNode("Load Synthetic Data"));
+  const e3 = d.createElement("span");
   e2.appendChild(e3);
-  const e4 = d.createElement("span");
-  e2.appendChild(e4);
   e0.appendChild(e2);
-  const e5 = d.createElement("div");
-  e5.className = "users";
+  const e4 = d.createElement("div");
+  e4.className = "users";
+  e0.appendChild(e4);
+  const e5 = d.createElement("table");
   e0.appendChild(e5);
-  const e6 = d.createElement("table");
-  e0.appendChild(e6);
   return e0;
 }
 
@@ -251,21 +279,17 @@ const shape_main_unit: ShapeNode<HTMLElement> = {
   template: (d, key) => {
     const e0 = d.clone(proto_shape_main_unit ??= build_shape_main_unit(d));
     e0.dataset.key = key;
-    (((e0.childNodes[1] as HTMLElement).childNodes[0] as HTMLElement)).addEventListener("click", (ev) => {
-      const _ids: string[] = [];
-      { const _r = dispatch("SeedSynthetic", {  }); if (_r === null) return; _ids.push(..._r); }
-    });
     return e0;
   },
   attrs: [
     {
       view: "main#unit#bind1",
       apply: (_d, el, v) => {
-        (((el.childNodes[1] as HTMLElement).childNodes[1] as HTMLElement)).textContent = String(decodeText(v));
+        (((el.childNodes[1] as HTMLElement).childNodes[0] as HTMLElement)).textContent = String(decodeText(v));
       },
     },
   ],
-  children: [shape_main_unit_user, shape_main_unit_message, shape_main_unit_if6],
+  children: [shape_main_unit_user, shape_main_unit_message, shape_main_unit_if7],
 };
 
 const shaper = new Shaper<HTMLElement>(driver, container, [shape_main_unit]);

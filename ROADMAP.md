@@ -451,7 +451,9 @@ In rough order of how much they block real use:
    compiled ahead of time.
 3. **The rest of the handler language** — `*`/`if`/`match` in values, scalar
    component arguments. (`let x = new …` landed 2026-10-01, and with it the `chat`
-   example.)
+   example; handler guards, `reject`, statement-level `if`, total aggregates and
+   entity keys the same day.) Next: `rel` sugar for a many-to-many over a keyed
+   link entity, and a way for a view to show a rejection.
 4. **M4, the effects membrane** — its substrate (logged events with reserved
    `cause`/`intent` fields, MVP-PLAN §5 decision 2) is in place; nothing else is.
 5. **Manual order as a language concept** — `order manual` and `move x before y`,

@@ -115,6 +115,7 @@ impl Names {
         match h {
             HStmt::New { entity, fields, .. } => self.fields(fields, &format!("`new {entity}`")),
             HStmt::Update { sets, .. } => self.fields(sets, "this `update`"),
+            HStmt::If { then, els, .. } => then.iter().chain(els).for_each(|h| self.hstmt(h)),
             _ => {}
         }
     }

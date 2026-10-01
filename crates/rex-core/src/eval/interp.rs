@@ -340,11 +340,16 @@ pub fn eval_expr_with(store: &dyn Store, te: &TExpr) -> BTreeRelation {
             // (S-50). `Min`/`Max`/`Avg` have no identity and stay absent —
             // the incremental backend's `Node::Aggregate` matches this arm
             // exactly, and `tests/dbsp.rs` holds the two to each other.
-            if *total == Total::Unit
-                && out.row_ref(&Value::Unit).next().is_none()
-                && let Some(id) = agg_identity(*kind, money)
-            {
-                out.add(Value::Unit, id, 1);
+            if let Some(id) = agg_identity(*kind, money) {
+                let mut keys = total.static_keys();
+                if let Total::Entity(sort) = total {
+                    keys.extend(store.identity_rel(*sort).triples().filter(|(_, _, w)| *w > 0).map(|(k, _, _)| k.clone()));
+                }
+                for k in keys {
+                    if out.row_ref(&k).next().is_none() {
+                        out.add(k, id.clone(), 1);
+                    }
+                }
             }
             out
         }

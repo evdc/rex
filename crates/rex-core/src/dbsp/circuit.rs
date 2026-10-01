@@ -525,7 +525,7 @@ impl Circuit {
             // with no todos there is no delta to wake it with.
             let quiescent = match &self.nodes[i] {
                 Node::ConstSingleton { fired: false, .. } => false,
-                Node::Aggregate { total: Total::Unit, seeded: false, .. } => false,
+                Node::Aggregate { total: Total::Unit | Total::Atoms(_), seeded: false, .. } => false,
                 Node::FixOutput { region, .. } if !self.fixes[*region].fired => false,
                 node => node.children().iter().all(|c| ctx.delta(*c).is_empty()),
             };

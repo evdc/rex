@@ -81,7 +81,7 @@ fn a_refused_event_ends_the_listener_without_throwing() {
     );
     // `dispatch` reports a refusal as null instead of letting it escape…
     assert!(out.contains("): readonly string[] | null {"), "{out}");
-    assert!(out.contains("} catch (refused) {") && out.contains("return null;"), "{out}");
+    assert!(out.contains("if (res.rejected !== undefined) {") && out.contains("return null;"), "{out}");
     // …and each `do` stops the handler on one, before a later `do` or `clear`.
     assert_eq!(out.matches("if (_r === null) return;").count(), 2, "{out}");
     let listener = &out[out.find("addEventListener(\"change\"").unwrap()..];

@@ -120,6 +120,9 @@ pub enum Node {
     /// image — the recompute-per-group tier, never the whole DB.
     Aggregate {
         input: NodeId,
+        /// For a group per live row of an entity ([`Total::Entity`]): that
+        /// entity's identity input, whose rows are keys in their own right.
+        keys: Option<NodeId>,
         kind: AggKind,
         /// Tag numeric results `Money` vs `Int` (from the argument's type).
         money: bool,
@@ -241,7 +244,7 @@ impl Node {
             }
             Node::Union(a, b) | Node::Intersect(a, b) => vec![*a, *b],
             Node::Distinct(a) => vec![*a],
-            Node::Aggregate { input, .. } => vec![*input],
+            Node::Aggregate { input, keys, .. } => std::iter::once(*input).chain(*keys).collect(),
             Node::Compose { l, r, .. }
             | Node::CoKeyed { l, r, .. }
             | Node::Semijoin { l, r, .. }
@@ -259,7 +262,7 @@ impl Node {
             Node::Compose { r, .. } | Node::Semijoin { r, .. } | Node::Antijoin { r, .. } => vec![*r],
             Node::CoKeyed { l, r, .. } | Node::Intersect(l, r) => vec![*l, *r],
             Node::Distinct(a) => vec![*a],
-            Node::Aggregate { input, .. } => vec![*input],
+            Node::Aggregate { input, keys, .. } => std::iter::once(*input).chain(*keys).collect(),
             // Enter presents each import's full post-step value.
             Node::FixOutput { imports, .. } => imports.clone(),
             Node::Input(_)
@@ -459,21 +462,27 @@ impl Node {
                     out.push(l.clone(), r.clone(), clamp(before + dw) - clamp(before));
                 }
             }
-            Node::Aggregate { input, kind, money, total, seeded, st } => {
+            Node::Aggregate { input, keys, kind, money, total, seeded, st } => {
                 let delta = ctx.delta(*input);
                 let upd = Updated { old: ctx.integral(*input), delta };
                 // A total group's key belongs to the output whether or not any
-                // delta mentions it (S-50), so visit it once at the first step
-                // in addition to the keys the delta carries. `Value::Unit`
-                // sorts first, so this stays in key order.
-                let total_key = match total {
-                    Total::Unit if !*seeded && !delta.has_left(&Value::Unit) => Some(Value::Unit),
-                    _ => None,
-                };
+                // delta of the image mentions it (S-50). Keys that exist by
+                // construction (`Unit`, an enum's atoms) are visited once, at
+                // the first step; a key that is a live row is visited when the
+                // row comes or goes.
+                let fixed = total.static_keys();
+                let live = keys.map(|k| Updated { old: ctx.integral(k), delta: ctx.delta(k) });
+                let mut extra: Vec<&Value> = Vec::new();
+                if !*seeded {
+                    extra.extend(fixed.iter().filter(|k| !delta.has_left(k)));
+                }
+                if let Some(live) = &live {
+                    extra.extend(live.delta.keys().filter(|k| !delta.has_left(k)));
+                }
                 *seeded = true;
                 let none: &[Row] = &[];
-                let keys = total_key.iter().map(|k| (k, none)).chain(delta.runs());
-                for (k, drow) in keys {
+                let visit = extra.into_iter().map(|k| (k, none)).chain(delta.runs());
+                for (k, drow) in visit {
                     let prev = st.get(k).cloned().unwrap_or_default();
                     // Group tier: fold the delta into the running (sum, count).
                     let mut sum = prev.sum;
@@ -485,7 +494,12 @@ impl Node {
                     // Presence must match batch exactly: a key is emitted iff
                     // its merged image has any nonzero-weight entry (mixed-sign
                     // groups can be present with count == 0).
-                    let present = upd.has_left(k) || (*total == Total::Unit && *k == Value::Unit);
+                    // …or it is a key in its own right, and then the folds
+                    // below give the identity for free: a sum and a count of
+                    // nothing are 0, and min/max/avg of nothing are absent.
+                    let present = upd.has_left(k)
+                        || fixed.binary_search(k).is_ok()
+                        || live.as_ref().is_some_and(|live| live.has_left(k));
                     let new_out = if !present {
                         None
                     } else {

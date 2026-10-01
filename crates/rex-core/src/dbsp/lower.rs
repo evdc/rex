@@ -368,11 +368,17 @@ fn lower_plain(
         TExprKind::Agg(kind, arg, total) => {
             let money = arg.ty.to == ValueTy::Money;
             let input = lower_in(circuit, scope, arg, values);
+            // A group per live row needs to hear rows come and go.
+            let keys = match total {
+                crate::types::typed::Total::Entity(sort) => Some(input_node(circuit, scope, InputKey::Identity(*sort))),
+                _ => None,
+            };
             circuit.add_node(Node::Aggregate {
                 input,
+                keys,
                 kind: *kind,
                 money,
-                total: *total,
+                total: total.clone(),
                 seeded: false,
                 st: Default::default(),
             })

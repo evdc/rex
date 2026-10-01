@@ -74,7 +74,19 @@ pub struct OnDecl {
     pub event: String,
     /// Parameter names, positionally matched to the event's declared params.
     pub params: Vec<String>,
+    /// `where (cond) [else "reason"]`: the event's precondition.
+    pub guard: Option<Guard>,
     pub body: Vec<HStmt>,
+    pub span: Span,
+}
+
+/// A handler's precondition (`on E(p) where (cond) else "reason" { … }`): if
+/// `cond` does not hold in the state before the event, the event is rejected
+/// — nothing is written or logged — with `reason`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Guard {
+    pub cond: Expr,
+    pub reason: Option<String>,
     pub span: Span,
 }
 
@@ -122,6 +134,17 @@ pub enum HStmt {
     Delete { target: Expr, span: Span },
     /// `set s = e` — write a `state` or a component `local`.
     Set { name: String, value: Expr, span: Span },
+    /// `if (cond) { … } [else { … }]` — choose what the event does. Unlike a
+    /// guard, the event is accepted either way.
+    If {
+        cond: Expr,
+        then: Vec<HStmt>,
+        els: Vec<HStmt>,
+        span: Span,
+    },
+    /// `reject ["reason"]` — the event does not apply: nothing it wrote is
+    /// kept and nothing is logged. A guard is sugar for one.
+    Reject { reason: Option<String>, span: Span },
     /// `do E(args)` — dispatch a named event.
     Do {
         event: String,
@@ -144,6 +167,8 @@ impl HStmt {
             | HStmt::Update { span, .. }
             | HStmt::Delete { span, .. }
             | HStmt::Set { span, .. }
+            | HStmt::If { span, .. }
+            | HStmt::Reject { span, .. }
             | HStmt::Do { span, .. }
             | HStmt::Clear { span }
             | HStmt::Revert { span }
@@ -331,6 +356,11 @@ pub enum Extractor {
 pub struct EntityDecl {
     pub name: String,
     pub fields: Vec<FieldDecl>,
+    /// `key (f, g)`: no two live rows agree on all of these fields. Empty
+    /// when the entity declares no key (a row is then identified by its id
+    /// alone).
+    pub key: Vec<String>,
+    pub key_span: Option<Span>,
     pub span: Span,
 }
 

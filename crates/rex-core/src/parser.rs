@@ -304,13 +304,71 @@ impl Parser {
             }
         }
         self.expect(&TokenKind::RParen, "to close the parameter list")?;
+        let guard = if matches!(self.peek(), TokenKind::KwWhere) { Some(self.parse_guard()?) } else { None };
         let body = self.parse_handler_body()?;
         Ok(OnDecl {
             event,
             params,
+            guard,
             body,
             span: start.to(self.prev_span()),
         })
+    }
+
+    /// `where (cond) [else "reason"]`. The parentheses are required, as on a
+    /// view's `if (cond)`: the condition is followed by a `{`.
+    fn parse_guard(&mut self) -> PResult<Guard> {
+        let start = self.span();
+        self.bump(); // `where`
+        self.expect(&TokenKind::LParen, "after `where`: a handler's guard is written `where (condition)`")?;
+        let cond = self.parse_expr(0)?;
+        self.expect(&TokenKind::RParen, "to close the guard's condition")?;
+        let reason = if self.eat(&TokenKind::KwElse) {
+            match self.peek().clone() {
+                TokenKind::Str(s) => {
+                    self.bump();
+                    Some(s)
+                }
+                _ => return self.error("expected a string after `else`: the reason given when the guard rejects the event"),
+            }
+        } else {
+            None
+        };
+        Ok(Guard { cond, reason, span: start.to(self.prev_span()) })
+    }
+
+    /// `if (cond) { stmt* } [else { stmt* } | else if …]`.
+    fn parse_if_stmt(&mut self) -> PResult<HStmt> {
+        let start = self.span();
+        self.bump(); // `if`
+        self.expect(&TokenKind::LParen, "after `if`")?;
+        let cond = self.parse_expr(0)?;
+        self.expect(&TokenKind::RParen, "to close the `if` condition")?;
+        let outer = self.depth;
+        self.descend(1)?;
+        let then = self.parse_block()?;
+        let els = if self.eat(&TokenKind::KwElse) {
+            if matches!(self.peek(), TokenKind::KwIf) { vec![self.parse_if_stmt()?] } else { self.parse_block()? }
+        } else {
+            Vec::new()
+        };
+        self.depth = outer;
+        Ok(HStmt::If { cond, then, els, span: start.to(self.prev_span()) })
+    }
+
+    /// `{ stmt* }`.
+    fn parse_block(&mut self) -> PResult<Vec<HStmt>> {
+        self.expect(&TokenKind::LBrace, "to open the block")?;
+        let mut body = Vec::new();
+        loop {
+            while self.eat(&TokenKind::Semi) {}
+            if matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
+                break;
+            }
+            body.push(self.parse_hstmt()?);
+        }
+        self.expect(&TokenKind::RBrace, "to close the block")?;
+        Ok(body)
     }
 
     /// `{ stmt* }` or `=> stmt`.
@@ -379,6 +437,7 @@ impl Parser {
     fn parse_hstmt(&mut self) -> PResult<HStmt> {
         let start = self.span();
         match self.peek().clone() {
+            TokenKind::KwIf => self.parse_if_stmt(),
             TokenKind::KwLet => {
                 self.bump();
                 let (bind, _) = self.expect_ident("a binding name after `let`")?;
@@ -428,6 +487,18 @@ impl Parser {
                     args,
                     span: start.to(self.prev_span()),
                 })
+            }
+            // `reject` or `reject "reason"`.
+            TokenKind::Ident(w) if w == "reject" => {
+                self.bump();
+                let reason = match self.peek().clone() {
+                    TokenKind::Str(s) => {
+                        self.bump();
+                        Some(s)
+                    }
+                    _ => None,
+                };
+                Ok(HStmt::Reject { reason, span: start.to(self.prev_span()) })
             }
             TokenKind::Ident(w) if w == "clear" => {
                 self.bump();
@@ -1013,8 +1084,29 @@ impl Parser {
         self.expect(&TokenKind::LBrace, "to open the entity body")?;
 
         let mut fields = Vec::new();
+        let mut key = Vec::new();
+        let mut key_span = None;
         while !matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
             let field_start = self.span();
+            // `key (f, g)` — `key` is a word only here, before a `(`; a field
+            // called `key` is `key: T`.
+            if matches!(self.peek(), TokenKind::Ident(w) if w == "key") && matches!(self.peek_at(1), TokenKind::LParen) {
+                self.bump();
+                self.bump();
+                if key_span.is_some() {
+                    return self.error("an entity has one `key`; list every field of it in the one clause");
+                }
+                loop {
+                    key.push(self.expect_ident("a field name in `key (…)`")?.0);
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+                self.expect(&TokenKind::RParen, "to close `key (…)`")?;
+                key_span = Some(field_start.to(self.prev_span()));
+                self.eat(&TokenKind::Comma);
+                continue;
+            }
             let (fname, _) = self.expect_ident("a field name")?;
             self.expect(&TokenKind::Colon, "after the field name")?;
             let ty = self.parse_type()?;
@@ -1030,6 +1122,8 @@ impl Parser {
         Ok(EntityDecl {
             name,
             fields,
+            key,
+            key_span,
             span: start.to(end.span),
         })
     }

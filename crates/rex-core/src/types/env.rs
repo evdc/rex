@@ -33,6 +33,17 @@ pub struct Env {
     /// `type Filter = All | ...` makes `All` mean `@All`. This table is what
     /// lets a bare `All` in expression position resolve.
     ctor_type: HashMap<String, String>,
+    /// Sort index -> its declared key (`entity E { …, key (f, g) }`).
+    keys: HashMap<usize, EntityKey>,
+}
+
+/// An entity's uniqueness constraint: no two live rows agree on `fields`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EntityKey {
+    pub entity: String,
+    pub fields: Vec<String>,
+    /// The hidden view indexing rows by key value (`shape_ir::key_view`).
+    pub view: String,
 }
 
 impl Env {
@@ -120,6 +131,15 @@ impl Env {
             .entry(sort.0)
             .or_default()
             .push(field.to_string());
+    }
+
+    pub fn set_key(&mut self, sort: SortId, key: EntityKey) {
+        self.keys.insert(sort.0, key);
+    }
+
+    /// The key `sort` declares, if it declares one.
+    pub fn key(&self, sort: SortId) -> Option<&EntityKey> {
+        self.keys.get(&sort.0)
     }
 
     pub fn field_ty(&self, sort: SortId, field: &str) -> Option<&ValueTy> {

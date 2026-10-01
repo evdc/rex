@@ -23,8 +23,12 @@ function dispatch(name: string, args: Record<string, EventArg>): readonly string
   let res;
   try {
     res = engine.dispatch(name, args);
-  } catch (refused) {
-    console.warn(`[rex] event ${name} was refused:`, refused);
+  } catch (invalid) {
+    console.error(`[rex] dispatch of ${name} failed:`, invalid);
+    return null;
+  }
+  if (res.rejected !== undefined) {
+    console.info(`[rex] ${name} rejected: ${res.rejected}`);
     return null;
   }
   if (prof) prof.shaper(() => shaper.applyStep(res.deltas));

@@ -30,7 +30,7 @@ fn antijoin_node(l: NodeId, r: NodeId) -> Node {
 }
 
 fn agg_node(kind: AggKind) -> impl Fn(NodeId) -> Node {
-    move |input| Node::Aggregate { input, kind, money: false, total: Total::No, seeded: false, st: BTreeMap::new() }
+    move |input| Node::Aggregate { keys: None, input, kind, money: false, total: Total::No, seeded: false, st: BTreeMap::new() }
 }
 
 /// Batch antijoin oracle, mirroring interp.rs: `A − A[B]`.
@@ -288,7 +288,7 @@ proptest! {
         let pred = Pred::Cmp(CmpOp::Gt, Lit::Int(2));
         let mut circuit = Circuit::new();
         let input = circuit.input(key_a());
-        let agg = circuit.add_node(Node::Aggregate {
+        let agg = circuit.add_node(Node::Aggregate { keys: None,
             input,
             kind: AggKind::Sum,
             money: false,
@@ -635,7 +635,7 @@ fn distinct_weight_transitions() {
 fn agg_circuit(kind: AggKind) -> (Circuit, NodeId) {
     let mut circuit = Circuit::new();
     let input = circuit.input(key_a());
-    let out = circuit.add_node(Node::Aggregate { input, kind, money: false, total: Total::No, seeded: false, st: BTreeMap::new() });
+    let out = circuit.add_node(Node::Aggregate { keys: None, input, kind, money: false, total: Total::No, seeded: false, st: BTreeMap::new() });
     circuit.set_output("out", out);
     (circuit, out)
 }
@@ -703,7 +703,7 @@ fn sum_crossing_downstream_threshold_both_directions() {
     // spec12's `custspend where > 30` shape, minimal: Sum feeding Filter(> 2).
     let mut circuit = Circuit::new();
     let input = circuit.input(key_a());
-    let agg = circuit.add_node(Node::Aggregate {
+    let agg = circuit.add_node(Node::Aggregate { keys: None,
         input,
         kind: AggKind::Sum,
         money: false,
@@ -953,7 +953,7 @@ fn stateful_nodes_are_replayed_with_their_state() {
     let a = circuit.input(key_a());
     let b = circuit.input(key_b());
     let ab = circuit.add_node(compose_node(a, b));
-    let count = |ab| Node::Aggregate {
+    let count = |ab| Node::Aggregate { keys: None,
         input: ab,
         kind: AggKind::Count,
         money: false,

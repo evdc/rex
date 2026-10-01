@@ -80,7 +80,7 @@ impl App {
     fn dispatch(&mut self, name: &str, args: &[(&str, Value)]) -> Result<(Vec<Value>, rex::dbsp::StepResult), String> {
         let args: HashMap<String, rex::dbsp::ArgValue> =
             args.iter().map(|(k, v)| (k.to_string(), rex::dbsp::ArgValue::Value(v.clone()))).collect();
-        dispatch_event(&mut self.engine, &self.env, &self.events, name, &args)
+        dispatch_event(&mut self.engine, &self.env, &self.events, name, &args).map_err(|e| e.to_string())
     }
 
     /// Like [`dispatch`](Self::dispatch), but for an event with a
@@ -98,7 +98,7 @@ impl App {
             rel_param.to_string(),
             rex::dbsp::ArgValue::Rel(rel.iter().map(|(k, v)| (k.clone(), v.clone(), 1)).collect()),
         );
-        dispatch_event(&mut self.engine, &self.env, &self.events, name, &args)
+        dispatch_event(&mut self.engine, &self.env, &self.events, name, &args).map_err(|e| e.to_string())
     }
 }
 

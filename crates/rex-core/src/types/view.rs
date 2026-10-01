@@ -98,6 +98,15 @@ pub fn desugar(program: &Program) -> Desugared {
         shapes: ShapeProgram::default(),
         diagnostics: Vec::new(),
         attr_seq: 0,
+        entity_keys: program
+            .stmts
+            .iter()
+            .filter_map(|s| match s {
+                Stmt::Entity(e) if !e.key.is_empty() => Some((e.name.clone(), e.key.clone())),
+                _ => None,
+            })
+            .collect(),
+        seed_keys: Default::default(),
         entity_fields,
         type_ctors,
         ctor_type,
@@ -198,13 +207,20 @@ pub fn desugar(program: &Program) -> Desugared {
                     e.fields.extend(extra.iter().cloned());
                 }
                 let name = e.name.clone();
+                d.entity_key(&e);
                 d.stmts.push(Stmt::Entity(e));
                 // A local's read view needs its entity declared first.
                 if let Some(lets) = local_lets.get(&name) {
                     d.stmts.extend(lets.iter().cloned());
                 }
             }
-            other => d.stmts.push(other.clone()),
+            other => {
+                // A seed row: `let x = new E { … }` at the top level.
+                if let Stmt::Let(LetDecl { body: Expr { kind: ExprKind::New { entity, fields }, span }, .. }) = other {
+                    d.seed_key(entity, fields, *span);
+                }
+                d.stmts.push(other.clone())
+            }
         }
     }
     // Hidden bulk-target keyset views (S-41) go last: every entity they
@@ -217,42 +233,61 @@ pub fn desugar(program: &Program) -> Desugared {
     // from an empty engine reproduces it (S-21 subtask 3).
     if !states.is_empty() {
         let span = states[0].span;
-        let mut head = vec![
-            Stmt::Entity(EntityDecl {
-                name: STATE_ENTITY.to_string(),
-                fields: states
-                    .iter()
-                    .map(|d| FieldDecl { name: d.name.clone(), ty: d.ty.clone(), span: d.span })
-                    .collect(),
-                span,
-            }),
-            Stmt::Let(LetDecl {
-                name: Some(STATE_ROW.to_string()),
-                ty: None,
-                body: Expr {
-                    kind: ExprKind::New {
-                        entity: STATE_ENTITY.to_string(),
-                        // Only defaulted states get a field row; a defaultless
-                        // one starts genuinely empty (0 rows for that field),
-                        // which is how "no current user" is said without an
-                        // option type.
-                        fields: states
-                            .iter()
-                            .filter_map(|d| {
-                                d.default.as_ref().map(|v| FieldInit {
-                                    name: d.name.clone(),
-                                    value: v.clone(),
-                                    span: d.span,
-                                })
+        let entity = Stmt::Entity(EntityDecl {
+            name: STATE_ENTITY.to_string(),
+            fields: states
+                .iter()
+                .map(|d| FieldDecl { name: d.name.clone(), ty: d.ty.clone(), span: d.span })
+                .collect(),
+            key: Vec::new(),
+            key_span: None,
+            span,
+        });
+        let row = Stmt::Let(LetDecl {
+            name: Some(STATE_ROW.to_string()),
+            ty: None,
+            body: Expr {
+                kind: ExprKind::New {
+                    entity: STATE_ENTITY.to_string(),
+                    // Only defaulted states get a field row; a defaultless
+                    // one starts genuinely empty (0 rows for that field),
+                    // which is how "no current user" is said without an
+                    // option type.
+                    fields: states
+                        .iter()
+                        .filter_map(|d| {
+                            d.default.as_ref().map(|v| FieldInit {
+                                name: d.name.clone(),
+                                value: v.clone(),
+                                span: d.span,
                             })
-                            .collect(),
-                    },
-                    span,
+                        })
+                        .collect(),
                 },
-                recursive: false,
                 span,
-            }),
-        ];
+            },
+            recursive: false,
+            span,
+        });
+        // A default may name a seed row (`state current : User = alice`), and
+        // a `new` can only refer to rows created before it: the state row
+        // then goes right after the last one it names, wherever in the source
+        // the `state` was written. With no such default it stays first.
+        let named: Vec<&str> = states
+            .iter()
+            .filter_map(|d| match d.default.as_ref().map(|e| &e.kind) {
+                Some(ExprKind::Ident(n)) => Some(n.as_str()),
+                _ => None,
+            })
+            .collect();
+        let after = d.stmts.iter().rposition(|st| {
+            matches!(st, Stmt::Let(LetDecl { name: Some(n), body: Expr { kind: ExprKind::New { .. }, .. }, .. }) if named.contains(&n.as_str()))
+        });
+        let mut head = vec![entity];
+        match after {
+            Some(at) => d.stmts.insert(at + 1, row),
+            None => head.push(row),
+        }
         head.append(&mut d.stmts);
         d.stmts = head;
     }
@@ -278,6 +313,12 @@ struct Desugar {
     /// field but was meant as a bind (`{ cnt }` instead of `{ :cnt }`), and
     /// (b) pick the wire `Encoding` for a `:field` bind.
     entity_fields: std::collections::HashMap<String, std::collections::HashMap<String, Type>>,
+    /// Entity name -> the fields of its `key (…)`, for the entities that
+    /// declare one.
+    entity_keys: std::collections::HashMap<String, Vec<String>>,
+    /// The key of every seed row seen so far (entity, printed key values),
+    /// to catch two seed rows with one key before anything runs.
+    seed_keys: std::collections::HashSet<(String, String)>,
     /// `type Name` -> its constructors, and the reverse map. Mirrors `Env`'s
     /// tables; desugaring runs before the checker builds those (S-50).
     type_ctors: TypeTable,
@@ -448,6 +489,8 @@ fn rewrite_row_refs(e: &Expr, row: &str) -> Expr {
         ExprKind::Div(a, b) => ExprKind::Div(Box::new(rewrite_row_refs(a, row)), Box::new(rewrite_row_refs(b, row))),
         ExprKind::Mod(a, b) => ExprKind::Mod(Box::new(rewrite_row_refs(a, row)), Box::new(rewrite_row_refs(b, row))),
         ExprKind::Concat(a, b) => ExprKind::Concat(Box::new(rewrite_row_refs(a, row)), Box::new(rewrite_row_refs(b, row))),
+        ExprKind::Intersect(a, b) => ExprKind::Intersect(Box::new(rewrite_row_refs(a, row)), Box::new(rewrite_row_refs(b, row))),
+        ExprKind::Union(a, b) => ExprKind::Union(Box::new(rewrite_row_refs(a, row)), Box::new(rewrite_row_refs(b, row))),
         ExprKind::Compose(a, b) => {
             ExprKind::Compose(Box::new(rewrite_row_refs(a, row)), Box::new(rewrite_row_refs(b, row)))
         }
@@ -461,14 +504,51 @@ fn rewrite_row_refs(e: &Expr, row: &str) -> Expr {
     Expr { kind, span: e.span }
 }
 
-/// Whether a value of type `got` may be written where `want` is declared:
-/// exact match, `Int` widening to `Money`, or an atom subset.
+/// `E where p & q` parses as `(E where p) & q` — a keyset narrowed twice,
+/// which is the same rows. As a mutation target it is read as
+/// `E where (p & q)`: the entity and one predicate.
+fn where_target(e: &Expr) -> Option<(&Expr, Expr)> {
+    match &e.kind {
+        ExprKind::Where(base, pred) => Some((base, (**pred).clone())),
+        ExprKind::Intersect(a, b) => {
+            let (base, pred) = where_target(a)?;
+            Some((base, Expr { kind: ExprKind::Intersect(Box::new(pred), b.clone()), span: e.span }))
+        }
+        _ => None,
+    }
+}
+
+/// Whether `e` refers to the name `name` (as a value, not as a field after a
+/// `.`). Exact, unlike `expr_refs_scope`: it reuses the renamer's exhaustive
+/// walk and asks whether renaming `name` would change anything.
+fn mentions(e: &Expr, name: &str) -> bool {
+    let probe = Expr { kind: ExprKind::Ident(format!("{name}#")), span: e.span };
+    let map = std::collections::HashMap::from([(name.to_string(), probe)]);
+    super::component::Renamer { map: &map, sets: None }.expr(e) != *e
+}
+
+/// Every event a handler body may `do`, in any branch.
+fn collect_dos(body: &[MutationIR], out: &mut Vec<String>) {
+    for m in body {
+        match m {
+            MutationIR::Do { event, .. } => out.push(event.clone()),
+            MutationIR::If { then, els, .. } => {
+                collect_dos(then, out);
+                collect_dos(els, out);
+            }
+            _ => {}
+        }
+    }
+}
+
 /// The mutation-value type of the predeclared `Bool` — what a comparison
 /// yields, and what a `Bool`-typed field holds.
 fn bool_val_ty() -> ValTy {
     ValTy::Atoms(vec![TRUE.to_string(), FALSE.to_string()])
 }
 
+/// Whether a value of type `got` may be written where `want` is declared:
+/// exact match, `Int` widening to `Money`, or an atom subset.
 fn valty_assignable(want: &ValTy, got: &ValTy) -> bool {
     if want == got {
         return true;
@@ -483,6 +563,90 @@ fn valty_assignable(want: &ValTy, got: &ValTy) -> bool {
 impl Desugar {
     fn error(&mut self, span: Span, msg: impl Into<String>) {
         self.diagnostics.push(Diagnostic::error(span, msg.into()));
+    }
+
+    // --- keys -------------------------------------------------------------
+
+    /// Check `entity E { …, key (f, g) }` and emit its index view: key value
+    /// → row, `~(E . (.f, (.g, …)))`. A hidden `let` like a bulk target's, so
+    /// it lands after every entity it could mention.
+    fn entity_key(&mut self, e: &EntityDecl) {
+        let Some(span) = e.key_span else { return };
+        let mut ok = true;
+        for (i, f) in e.key.iter().enumerate() {
+            if !self.entity_fields.get(&e.name).is_some_and(|fs| fs.contains_key(f)) {
+                self.error(span, format!("`key` names `{f}`, which is not a field of `{}`", e.name));
+                ok = false;
+            } else if e.key[..i].contains(f) {
+                self.error(span, format!("`key` names `{f}` twice"));
+                ok = false;
+            }
+        }
+        if !ok {
+            return;
+        }
+        let path = |f: &String| field_path(std::slice::from_ref(f), span);
+        let (last, init) = e.key.split_last().expect("a parsed key has a field");
+        let tuple = init.iter().rev().fold(path(last), |acc, f| Expr {
+            kind: ExprKind::Fork(Box::new(path(f)), Box::new(acc)),
+            span,
+        });
+        let body = Expr { kind: ExprKind::Inverse(Box::new(compose(ident(&e.name, span), tuple, span))), span };
+        self.hidden_lets.push(Stmt::Let(LetDecl { name: Some(key_view(&e.name)), ty: None, body, recursive: false, span }));
+    }
+
+    /// A row of a keyed entity is created with its whole key: a row with
+    /// part of a key missing could never be found by it, or collide.
+    fn new_gives_key(&mut self, entity: &str, fields: &[FieldInit], span: Span) -> Option<()> {
+        let Some(key) = self.entity_keys.get(entity) else { return Some(()) };
+        if let Some(missing) = key.iter().find(|k| !fields.iter().any(|f| f.name == **k)) {
+            let msg = format!("`new {entity}` must give `{missing}`: it is part of the entity's key");
+            self.error(span, msg);
+            return None;
+        }
+        Some(())
+    }
+
+    /// A key does not change once the row exists (re-keying a row is
+    /// `delete` and `new`).
+    fn not_a_key_field(&mut self, entity: &str, field: &str, span: Span) -> Option<()> {
+        if self.entity_keys.get(entity).is_some_and(|key| key.iter().any(|k| k == field)) {
+            let msg = format!(
+                "`{field}` is part of the key of `{entity}` and cannot be changed: delete the row and create another"
+            );
+            self.error(span, msg);
+            return None;
+        }
+        Some(())
+    }
+
+    /// Two seed rows may not share a key. Seed values are literals and the
+    /// names of other seed rows, so comparing them as written is exact.
+    fn seed_key(&mut self, entity: &str, fields: &[FieldInit], span: Span) {
+        if self.new_gives_key(entity, fields, span).is_none() {
+            return;
+        }
+        let Some(key) = self.entity_keys.get(entity) else { return };
+        let printed: Vec<String> = key
+            .iter()
+            .filter_map(|k| fields.iter().find(|f| f.name == *k))
+            .map(|f| match &f.value.kind {
+                // Span-free, and kind-tagged so `"1"` and `1` differ. (Not the
+                // printer: it is otherwise unused at run time, and large.)
+                ExprKind::Ident(n) => format!("n:{n}"),
+                ExprKind::Atom(a) => format!("@:{a}"),
+                ExprKind::Int(n) => format!("i:{n}"),
+                ExprKind::Decimal(d) => format!("d:{d}"),
+                ExprKind::Str(t) => format!("s:{t}"),
+                ExprKind::Date { year, month, day } => format!("t:{year}-{month}-{day}"),
+                // Anything else is not a value two seeds can share by spelling.
+                _ => format!("?:{}:{}", f.value.span.start, f.value.span.end),
+            })
+            .collect();
+        let shown = key.join("`, `");
+        if !self.seed_keys.insert((entity.to_string(), printed.join(" "))) {
+            self.error(span, format!("another seed `{entity}` already has this `{shown}`: its key must be unique"));
+        }
     }
 
     // --- events -----------------------------------------------------------
@@ -547,25 +711,135 @@ impl Desugar {
             };
             scope.push((n.clone(), p.ty.clone(), vty));
         }
-        let mut body = Vec::new();
         self.fresh_rows.clear();
-        for m in &o.body {
-            match self.mutation(m, &scope, None, &o.event) {
-                Some(ir) => body.push(ir),
-                None => return,
+        // A guard is an `if` around the whole body whose `else` rejects:
+        // `if (c) { body } else { reject r }`. (Not `if (not c) { reject }`:
+        // a condition on a row that does not exist is neither true nor
+        // complemented-true, and such an event must be rejected.)
+        let guard = match &o.guard {
+            Some(g) => {
+                let Some(conds) = self.condition(&g.cond, &scope, &o.event, "guard") else { return };
+                let reason = g.reason.clone().unwrap_or_else(|| format!("the guard of `{}` does not hold", o.event));
+                Some((conds, reason))
             }
-            // `let x = new E { … }`: `x` is the new row's id from here on.
+            None => None,
+        };
+        let Some(body) = self.handler_block(&o.body, &mut scope, &o.event) else { return };
+        self.fresh_rows.clear();
+        self.shapes.events[idx].body = match guard {
+            Some((conds, reason)) => vec![MutationIR::If { conds, then: body, els: vec![MutationIR::Reject { reason }] }],
+            None => body,
+        };
+    }
+
+    /// Lower a handler's statements in order. `let x = new E { … }` adds `x`
+    /// to `scope` for the statements after it; a nested block (an `if`
+    /// branch) gets a copy of the scope, so what it binds ends with it.
+    fn handler_block(&mut self, stmts: &[HStmt], scope: &mut Scope, event: &str) -> Option<Vec<MutationIR>> {
+        let mut body = Vec::new();
+        for (i, m) in stmts.iter().enumerate() {
+            // Nothing after a `reject` can run. (Before it, statements are
+            // merely discarded — which is what rejecting means.)
+            if let (HStmt::Reject { .. }, Some(next)) = (m, stmts.get(i + 1)) {
+                self.error(next.span(), "this statement can never run: the `reject` before it ends the event");
+                return None;
+            }
+            body.push(self.mutation(m, scope, None, event)?);
             if let HStmt::New { bind: Some(name), entity, span, .. } = m {
                 if scope.iter().any(|(n, _, _)| n == name) {
                     self.error(*span, format!("`{name}` is already a parameter or binding of this handler"));
-                    return;
+                    return None;
                 }
                 scope.push((name.clone(), ParamTy::Id(entity.clone()), ValTy::Id(entity.clone())));
                 self.fresh_rows.insert(name.clone());
             }
         }
-        self.fresh_rows.clear();
-        self.shapes.events[idx].body = body;
+        Some(body)
+    }
+
+    /// Check a guard's or an `if`'s condition and decide how each conjunct
+    /// is tested at dispatch (see [`Cond`]).
+    ///
+    /// A condition is a filter at a key, as a view's `if (c)` is, with the
+    /// handler's params as the keys. The rule is the one mutation targets
+    /// follow: a conjunct that mentions no param is a hidden view at the
+    /// `Unit` point; one that mentions a single entity param is a hidden
+    /// keyset view over that entity (the param becomes `id`, as a view
+    /// level's binder does); both are ordinary maintained views, so they may
+    /// use the whole query language and cost one lookup. Only a conjunct that
+    /// depends on a scalar argument, or on several params together, is
+    /// evaluated at dispatch, in the mutation-value language.
+    fn condition(&mut self, cond: &Expr, scope: &Scope, event: &str, what: &str) -> Option<Vec<Cond>> {
+        let mut conjuncts = Vec::new();
+        self.flatten_cond(cond, &mut conjuncts);
+        let mut out = Vec::new();
+        for c in conjuncts {
+            // A row test: `Entity where predicate`, or `not` one. It is a
+            // mutation target, asked only whether it has any rows — the one
+            // kind of condition with a row of its own to say `.field` of.
+            let (test, negate) = match &c.kind {
+                ExprKind::Not(inner) => (&**inner, true),
+                _ => (c, false),
+            };
+            if self.is_row_test(test) {
+                let (target, _) = self.mutation_target(test, scope, event)?;
+                out.push(Cond::Exists { target, negate });
+                continue;
+            }
+            if rewrite_row_refs(c, ROW_SELF) != *c {
+                self.error(c.span, format!("a {what} has no row of its own: write `t.field` for a parameter `t`, not `.field`"));
+                return None;
+            }
+            let mentioned: Vec<&(String, ParamTy, ValTy)> = scope.iter().filter(|(n, _, _)| mentions(c, n)).collect();
+            if let Some((fresh, _, _)) = mentioned.iter().find(|(n, _, _)| self.fresh_rows.contains(n)) {
+                self.error(c.span, format!("`{fresh}` was created by this handler, and a condition reads the state before the event: it cannot depend on `{fresh}`"));
+                return None;
+            }
+            let hidden = |this: &mut Self, body: Expr| {
+                this.hidden_seq += 1;
+                let view = format!("on#{event}#{}", this.hidden_seq);
+                this.hidden_lets.push(Stmt::Let(LetDecl { name: Some(view.clone()), ty: None, body, recursive: false, span: c.span }));
+                view
+            };
+            match mentioned.as_slice() {
+                [] => {
+                    let body = Expr { kind: ExprKind::Where(Box::new(ident(UNIT_ROOT, c.span)), Box::new(c.clone())), span: c.span };
+                    out.push(Cond::Holds { view: hidden(self, body) });
+                }
+                [(param, ParamTy::Id(entity), _)] => {
+                    let map = std::collections::HashMap::from([(param.clone(), Expr { kind: ExprKind::Id, span: c.span })]);
+                    let at_row = super::component::Renamer { map: &map, sets: None }.expr(c);
+                    let body = Expr { kind: ExprKind::Where(Box::new(ident(entity, c.span)), Box::new(at_row)), span: c.span };
+                    out.push(Cond::HoldsAt { view: hidden(self, body), param: param.clone() });
+                }
+                _ => {
+                    let (ve, ty) = self.val_expr(c, scope)?;
+                    if ty != bool_val_ty() {
+                        self.error(c.span, format!("a {what} must be a comparison or a `Bool`, found `{}`", show_valty(&ty)));
+                        return None;
+                    }
+                    out.push(Cond::Eval(ve));
+                }
+            }
+        }
+        Some(out)
+    }
+
+    /// Whether `e` is `Entity where predicate` (with any further `& q`).
+    fn is_row_test(&self, e: &Expr) -> bool {
+        where_target(e).is_some_and(|(base, _)| matches!(&base.kind, ExprKind::Ident(n) if self.entity_fields.contains_key(n)))
+    }
+
+    /// The top-level conjuncts of a condition. A row test keeps its own
+    /// `&`s: they are part of its predicate.
+    fn flatten_cond<'e>(&self, e: &'e Expr, out: &mut Vec<&'e Expr>) {
+        match &e.kind {
+            ExprKind::Intersect(a, b) if !self.is_row_test(e) => {
+                self.flatten_cond(a, out);
+                self.flatten_cond(b, out);
+            }
+            _ => out.push(e),
+        }
     }
 
     /// Reject a cycle in the static synchronous-`do` graph (§5 decision 2:
@@ -585,19 +859,20 @@ impl Desugar {
 
     fn find_cycle(&self, at: &str, stack: &mut Vec<String>) -> Option<Vec<String>> {
         let def = self.shapes.events.iter().find(|e| e.name == at)?;
-        for m in &def.body {
-            if let MutationIR::Do { event, .. } = m {
-                if let Some(pos) = stack.iter().position(|s| s == event) {
-                    let mut cycle = stack[pos..].to_vec();
-                    cycle.push(event.clone());
-                    return Some(cycle);
-                }
-                stack.push(event.clone());
-                if let Some(c) = self.find_cycle(event, stack) {
-                    return Some(c);
-                }
-                stack.pop();
+        // Every `do` the body can reach, whichever branch it sits in.
+        let mut callees = Vec::new();
+        collect_dos(&def.body, &mut callees);
+        for event in callees {
+            if let Some(pos) = stack.iter().position(|s| *s == event) {
+                let mut cycle = stack[pos..].to_vec();
+                cycle.push(event.clone());
+                return Some(cycle);
             }
+            stack.push(event.clone());
+            if let Some(c) = self.find_cycle(&event, stack) {
+                return Some(c);
+            }
+            stack.pop();
         }
         None
     }
@@ -649,6 +924,7 @@ impl Desugar {
                     return None;
                 };
                 let entity = self.target_entity(&target_name, scope, span)?;
+                self.not_a_key_field(&entity, field, span)?;
                 let (val, ty) = self.val(value, scope)?;
                 self.check_field_value(&entity, field, &ty, value.span)?;
                 Some(MutationIR::Set {
@@ -670,6 +946,7 @@ impl Desugar {
                 }
                 let scope = &vscope;
                 for f in sets {
+                    self.not_a_key_field(&entity, &f.name, f.span)?;
                     let value = if bulk { rewrite_row_refs(&f.value, ROW_SELF) } else { f.value.clone() };
                     let (v, ty) = self.val(&value, scope)?;
                     self.check_field_value(&entity, &f.name, &ty, f.value.span)?;
@@ -690,6 +967,7 @@ impl Desugar {
                     self.error(span, format!("unknown entity `{entity}`"));
                     return None;
                 }
+                self.new_gives_key(entity, fields, span)?;
                 match from {
                     None => {
                         let mut fs = Vec::new();
@@ -702,6 +980,16 @@ impl Desugar {
                     }
                     Some(from) => self.new_from(entity, from, fields, scope, span),
                 }
+            }
+            HStmt::Reject { reason, .. } => Some(MutationIR::Reject {
+                reason: reason.clone().unwrap_or_else(|| format!("`{event}` was rejected")),
+            }),
+            HStmt::If { cond, then, els, .. } => {
+                let conds = self.condition(cond, scope, event, "condition")?;
+                // What a branch binds (`let x = new …`) is the branch's own.
+                let then = self.handler_block(then, &mut scope.clone(), event)?;
+                let els = self.handler_block(els, &mut scope.clone(), event)?;
+                Some(MutationIR::If { conds, then, els })
             }
             HStmt::Do { event, args, .. } => {
                 let params = self.event_params(event, args.len(), span)?;
@@ -760,7 +1048,9 @@ impl Desugar {
                 let entity = self.target_entity(name, scope, target.span)?;
                 Some((Target::One(Ref(name.clone())), entity))
             }
-            ExprKind::Where(base, pred) => {
+            ExprKind::Where(..) | ExprKind::Intersect(..) if where_target(target).is_some() => {
+                let (base, pred) = where_target(target)?;
+                let pred = &pred;
                 let ExprKind::Ident(entity) = &base.kind else {
                     self.error(base.span, "a bulk mutation target must be `Entity where predicate`");
                     return None;
@@ -1095,6 +1385,20 @@ impl Desugar {
                 let pair = [atoms[0].clone(), atoms[1].clone()];
                 Some((ValExpr::Not(Box::new(vi), pair), ti))
             }
+            // `&` / `|` between `Bool`s: in a condition, conjunction and
+            // disjunction (in a query they are intersect and union of
+            // coreflexives, which is the same thing).
+            ExprKind::Intersect(a, b) | ExprKind::Union(a, b) => {
+                let (va, ta) = self.val_expr(a, scope)?;
+                let (vb, tb) = self.val_expr(b, scope)?;
+                if ta != bool_val_ty() || tb != bool_val_ty() {
+                    self.error(e.span, format!("`&`/`|` here need `Bool` operands, got `{}` and `{}`", show_valty(&ta), show_valty(&tb)));
+                    return None;
+                }
+                let (va, vb) = (Box::new(va), Box::new(vb));
+                let both = matches!(e.kind, ExprKind::Intersect(..));
+                Some((if both { ValExpr::And(va, vb) } else { ValExpr::Or(va, vb) }, bool_val_ty()))
+            }
             ExprKind::Concat(a, b) => {
                 let (va, ta) = self.val_expr(a, scope)?;
                 let (vb, tb) = self.val_expr(b, scope)?;
@@ -1111,7 +1415,14 @@ impl Desugar {
             ExprKind::Compare { op, lhs: Some(lhs), rhs } => {
                 let (va, ta) = self.val_expr(lhs, scope)?;
                 let (vb, tb) = self.val_expr(rhs, scope)?;
-                if !(ta.is_numeric() && tb.is_numeric()) && ta != tb {
+                // As in a query: equal types, two numbers, or one side
+                // assignable to the other (`c = Red`, a constructor against
+                // the type it belongs to).
+                let comparable = ta == tb
+                    || (ta.is_numeric() && tb.is_numeric())
+                    || valty_assignable(&ta, &tb)
+                    || valty_assignable(&tb, &ta);
+                if !comparable {
                     self.error(e.span, format!("cannot compare `{}` with `{}`", show_valty(&ta), show_valty(&tb)));
                     return None;
                 }
@@ -1894,7 +2205,7 @@ impl LevelWalk<'_> {
                     self.d.error(span, "`set` needs a `state` or a component `local` in scope; a `state` is set from an `on` handler, not a DOM handler");
                     return None;
                 }
-                HStmt::New { .. } | HStmt::Assign { .. } | HStmt::Update { .. } | HStmt::Delete { .. } => {
+                HStmt::New { .. } | HStmt::Assign { .. } | HStmt::Update { .. } | HStmt::Delete { .. } | HStmt::If { .. } | HStmt::Reject { .. } => {
                     self.d.error(span, "a DOM handler may not mutate directly: declare an `event` with an `on` body and `do` it");
                     return None;
                 }

@@ -42,14 +42,39 @@ pub const UNIT_ROOT: &str = "unit#root";
 pub const TRUE: &str = "True";
 pub const FALSE: &str = "False";
 
-/// Whether an aggregate's group-key domain is statically non-empty; see
-/// [`TExprKind::Agg`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The keys an aggregate has whether or not its image has rows for them; see
+/// [`TExprKind::Agg`]. An aggregate is a fold, and a fold over nothing is its
+/// initial value — but only where there is a key to hold it, and which keys
+/// exist is decided by the key's *type*: the one `Unit` point, the live rows
+/// of an entity, the constructors of an enum. A scalar key (`Int`, `Text`)
+/// has no such domain, and its groups exist only as the image produces them.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Total {
     /// Keys appear only as the image produces them.
     No,
     /// The `Unit` point is always a key.
     Unit,
+    /// Every live row of this entity is a key.
+    Entity(SortId),
+    /// Every one of these atoms is a key.
+    Atoms(Vec<String>),
+}
+
+impl Total {
+    /// The keys that are there by construction, in order.
+    pub fn static_keys(&self) -> Vec<crate::eval::Value> {
+        use crate::eval::Value;
+        match self {
+            Total::Unit => vec![Value::Unit],
+            Total::Atoms(atoms) => {
+                let mut keys: Vec<Value> = atoms.iter().map(|a| Value::atom(a)).collect();
+                keys.sort();
+                keys.dedup();
+                keys
+            }
+            Total::No | Total::Entity(_) => Vec::new(),
+        }
+    }
 }
 
 /// A grounded coreflexive built-in used in filter position.

@@ -102,9 +102,10 @@ impl Emit {
         self.line("(window as unknown as { __rexApp: typeof engine }).__rexApp = engine;");
         self.line("const driver = new BrowserDriver();");
         self.line("const container = document.getElementById(\"app\")!;");
-        // An event the engine refuses — a row it names is gone, a state it
-        // reads has no value — changes nothing and is not logged. That is an
-        // ordinary outcome, not a crash: say so and let the listener stop.
+        // An event the engine rejects — its guard does not hold, a row it
+        // reads is gone — changes nothing and is not logged. That is an
+        // ordinary outcome: note the reason and let the listener stop. Only a
+        // call that is itself wrong throws, and that is a bug to report.
         self.line("function dispatch(name: string, args: Record<string, EventArg>): readonly string[] | null {");
         if self.debug {
             self.line("  console.debug(\"[rex] dispatch\", name, args);");
@@ -112,8 +113,12 @@ impl Emit {
         self.line("  let res;");
         self.line("  try {");
         self.line("    res = engine.dispatch(name, args);");
-        self.line("  } catch (refused) {");
-        self.line("    console.warn(`[rex] event ${name} was refused:`, refused);");
+        self.line("  } catch (invalid) {");
+        self.line("    console.error(`[rex] dispatch of ${name} failed:`, invalid);");
+        self.line("    return null;");
+        self.line("  }");
+        self.line("  if (res.rejected !== undefined) {");
+        self.line("    console.info(`[rex] ${name} rejected: ${res.rejected}`);");
         self.line("    return null;");
         self.line("  }");
         if self.debug {

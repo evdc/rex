@@ -558,11 +558,10 @@ fn stock_agrees(app: &App, m: &StockModel) -> Result<(), String> {
     }
 }
 
-// --- chat: rows that name rows created in the same event ----------------------------
+// --- chat: guards, a link entity, a state with no default -----------------------------
 
 #[derive(Clone, Debug)]
 enum ChatOp {
-    Seed,
     Send(String),
     Like(u64),
     Delete(u64),
@@ -571,17 +570,14 @@ enum ChatOp {
 
 fn chat_op() -> impl Strategy<Value = ChatOp> {
     prop_oneof![
-        2 => Just(ChatOp::Seed),
         3 => text().prop_map(ChatOp::Send),
         3 => (0u64..8).prop_map(ChatOp::Like),
         2 => (0u64..8).prop_map(ChatOp::Delete),
-        // Users 0..3 exist after one seed; nothing checks that a selected
-        // user does.
-        2 => (0u64..8).prop_map(ChatOp::Select),
+        // Users 0..3 exist; the others never do.
+        3 => (0u64..5).prop_map(ChatOp::Select),
     ]
 }
 
-#[derive(Default)]
 struct ChatModel {
     users: Vec<(u64, String)>,
     /// `(id, text, sender)`.
@@ -589,59 +585,67 @@ struct ChatModel {
     /// `(id, msg, user)`.
     likes: Vec<(u64, u64, u64)>,
     current: Option<u64>,
-    next: [u64; 3],
+    next_msg: u64,
+    next_like: u64,
 }
 
 impl ChatModel {
-    fn mint(&mut self, sort: usize) -> u64 {
-        self.next[sort] += 1;
-        self.next[sort] - 1
+    /// The program's seed data.
+    fn seeded() -> ChatModel {
+        ChatModel {
+            users: vec![(0, "Alice".into()), (1, "Bob".into()), (2, "Chloe".into())],
+            messages: vec![(0, "Welcome to Rex chat".into(), 0), (1, "Like messages to test many-to-many joins".into(), 1)],
+            likes: vec![(0, 0, 1), (1, 0, 2)],
+            current: None,
+            next_msg: 2,
+            next_like: 2,
+        }
     }
 
-    /// Apply `op`; `false` if the app must refuse it.
-    fn apply(&mut self, op: &ChatOp) -> bool {
+    /// Apply `op`, or the reason its guard rejects it.
+    fn apply(&mut self, op: &ChatOp) -> Result<(), &'static str> {
         match op {
-            ChatOp::Seed => {
-                let [alice, bob, chloe] = ["Alice", "Bob", "Chloe"].map(|n| {
-                    let id = self.mint(0);
-                    self.users.push((id, n.to_string()));
-                    id
-                });
-                let m1 = self.mint(1);
-                self.messages.push((m1, "Welcome to Rex chat".into(), alice));
-                let m2 = self.mint(1);
-                self.messages.push((m2, "Like messages to test many-to-many joins".into(), bob));
-                for user in [bob, chloe] {
-                    let id = self.mint(2);
-                    self.likes.push((id, m1, user));
-                }
-                self.current = Some(alice);
-            }
-            // Both read `current`: with no user selected there is no event.
             ChatOp::Send(text) => {
-                let Some(user) = self.current else { return false };
-                let id = self.mint(1);
-                self.messages.push((id, text.clone(), user));
+                let (Some(user), false) = (self.current, text.is_empty()) else {
+                    return Err("pick a user and type something");
+                };
+                self.messages.push((self.next_msg, text.clone(), user));
+                self.next_msg += 1;
             }
-            // A like of a message that is gone is still a like row.
             ChatOp::Like(msg) => {
-                let Some(user) = self.current else { return false };
-                let id = self.mint(2);
-                self.likes.push((id, *msg, user));
+                let (Some(user), true) = (self.current, self.messages.iter().any(|m| m.0 == *msg)) else {
+                    return Err("pick a user first");
+                };
+                // One like per user per message: liking again takes it back.
+                if self.likes.iter().any(|l| l.1 == *msg && l.2 == user) {
+                    self.likes.retain(|l| !(l.1 == *msg && l.2 == user));
+                } else {
+                    self.likes.push((self.next_like, *msg, user));
+                    self.next_like += 1;
+                }
             }
+            // Only the sender, so only a message that exists and a user who is selected.
             ChatOp::Delete(msg) => {
+                let sender = self.messages.iter().find(|m| m.0 == *msg).map(|m| m.2);
+                if sender.is_none() || sender != self.current {
+                    return Err("only the sender can delete a message");
+                }
                 self.likes.retain(|l| l.1 != *msg);
                 self.messages.retain(|m| m.0 != *msg);
             }
-            ChatOp::Select(user) => self.current = Some(*user),
+            ChatOp::Select(user) => {
+                if !self.users.iter().any(|u| u.0 == *user) {
+                    return Err("the guard of `UserSelected` does not hold");
+                }
+                self.current = Some(*user);
+            }
         }
-        true
+        Ok(())
     }
 }
 
 fn chat_dispatch(app: &mut App, op: &ChatOp) -> Result<(), String> {
     let r = match op {
-        ChatOp::Seed => app.dispatch("SeedSynthetic", &[]),
         ChatOp::Send(text) => app.dispatch("MessageSent", &[("text", Value::text(text))]),
         ChatOp::Like(m) => app.dispatch("MessageLiked", &[("msg", id(app, "Message", *m))]),
         ChatOp::Delete(m) => app.dispatch("MessageDeleted", &[("msg", id(app, "Message", *m))]),
@@ -731,17 +735,18 @@ proptest! {
     }
 
     #[test]
-    fn chat_matches_its_model(ops in prop::collection::vec(chat_op(), 0..30)) {
+    fn chat_matches_its_model(ops in prop::collection::vec(chat_op(), 0..40)) {
         let src = example("chat/src/app.rex");
         let mut app = App::build(&src);
-        let mut model = ChatModel::default();
+        let mut model = ChatModel::seeded();
         chat_agrees(&app, &model).map_err(fail)?;
         for (i, op) in ops.iter().enumerate() {
             let cursor = app.engine.cursor();
-            let accepted = model.apply(op);
+            let want = model.apply(op);
             let got = chat_dispatch(&mut app, op);
-            prop_assert_eq!(got.is_ok(), accepted, "step {} {:?}: {:?}", i, op, got);
-            prop_assert_eq!(app.engine.cursor(), cursor + accepted as u64, "step {}: log", i);
+            // Accepted, or rejected by the guard for the reason it gives.
+            prop_assert_eq!(got.clone().err(), want.err().map(str::to_string), "step {} {:?}", i, op);
+            prop_assert_eq!(app.engine.cursor(), cursor + want.is_ok() as u64, "step {}: log", i);
             chat_agrees(&app, &model).map_err(|e| fail(format!("after step {i} {op:?}: {e}")))?;
             check_base_invariant(&app.engine).map_err(fail)?;
         }

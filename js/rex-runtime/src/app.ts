@@ -50,7 +50,8 @@ export class Engine implements EnginePort {
       return raw;
     };
     const parse = (raw: string): DispatchResult => {
-      const r = JSON.parse(raw) as { ids: string[]; deltas: { views: StepDeltas } };
+      const r = JSON.parse(raw) as { ids: string[]; deltas: { views: StepDeltas } } | { rejected: string };
+      if ("rejected" in r) return { ids: [], deltas: {}, rejected: r.rejected };
       return { ids: r.ids, deltas: r.deltas.views };
     };
     const p = this.hooks.profiler;

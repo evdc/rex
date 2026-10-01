@@ -106,7 +106,26 @@ impl App {
         name: &str,
         args: &HashMap<String, ArgValue>,
     ) -> Result<(Vec<Value>, StepResult), String> {
+        self.try_dispatch(name, args).map_err(|e| e.to_string())
+    }
+
+    /// Dispatch, keeping *why* a refused dispatch was refused: rejected (the
+    /// event does not apply to this state) or invalid (the call is wrong).
+    pub fn try_dispatch(
+        &mut self,
+        name: &str,
+        args: &HashMap<String, ArgValue>,
+    ) -> Result<(Vec<Value>, StepResult), rex::events::Refusal> {
         dispatch_event(&mut self.engine, &self.env, &self.events, name, args)
+    }
+
+    /// The reason `name(args)` is rejected; panics if it is accepted or invalid.
+    pub fn rejected(&mut self, name: &str, args: &[(&str, Value)]) -> String {
+        let args = args.iter().map(|(k, v)| (k.to_string(), ArgValue::Value(v.clone()))).collect();
+        match self.try_dispatch(name, &args) {
+            Err(rex::events::Refusal::Rejected(reason)) => reason,
+            other => panic!("`{name}` should be rejected, got {:?}", other.map(|(ids, _)| ids)),
+        }
     }
 
     /// A base table's rows, sorted.

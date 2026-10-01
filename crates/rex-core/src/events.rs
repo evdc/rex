@@ -16,11 +16,47 @@ use crate::eval::intern::intern;
 use crate::eval::relation::BinaryRelation;
 use crate::eval::{encode_value, Value};
 use crate::types::shape_ir::{
-    EventDef, FromField, MutationIR, ParamTy, Target, ValExpr, ValRef, ROW_SELF, STATE_ENTITY,
+    Cond, EventDef, FromField, MutationIR, ParamTy, Target, ValExpr, ValRef, ROW_SELF, STATE_ENTITY,
 };
 use crate::types::typed::{FALSE, TRUE};
+use crate::types::env::EntityKey;
 use crate::types::{Env, SortId, ValueTy};
 use std::collections::HashMap;
+
+/// Why a dispatch did not happen. Either way nothing was written and
+/// nothing was logged.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Refusal {
+    /// The event does not apply to the state it met: its guard (or the guard
+    /// of an event it `do`es) does not hold, or a value reads something that
+    /// is not there — a row that is gone, a state that was never set. An
+    /// ordinary outcome, with the reason to show for it.
+    Rejected(String),
+    /// The call itself is wrong: no such event, a missing or mistyped
+    /// argument. A bug in the host, not something a user did.
+    Invalid(String),
+}
+
+impl Refusal {
+    pub fn message(&self) -> &str {
+        match self {
+            Refusal::Rejected(m) | Refusal::Invalid(m) => m,
+        }
+    }
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+/// Errors raised as plain strings are about the call, not the state.
+impl From<String> for Refusal {
+    fn from(message: String) -> Refusal {
+        Refusal::Invalid(message)
+    }
+}
 
 /// One relation-typed event arg's rows, keyed by param name (S-42): `new
 /// Entity from param as (k, v) { … }` reads its rows here rather than from
@@ -38,7 +74,7 @@ pub fn dispatch_event(
     events: &[EventDef],
     name: &str,
     args: &HashMap<String, ArgValue>,
-) -> Result<(Vec<Value>, StepResult), String> {
+) -> Result<(Vec<Value>, StepResult), Refusal> {
     let def = find(events, name)?;
     // Bind the outer call's args by declared name, checking each.
     let mut bound = HashMap::new();
@@ -59,8 +95,7 @@ pub fn dispatch_event(
         }
         logged.push((p.name.clone(), v.clone()));
     }
-    let mut ops = Vec::new();
-    expand(env, engine, events, def, &bound, &rel_bound, &mut ops)?;
+    let ops = build_ops(env, engine, events, def, &bound, &rel_bound)?;
     Ok(engine.apply_event(name, &ops, logged))
 }
 
@@ -99,7 +134,10 @@ pub fn replay(
         } else if event.name == REBALANCE {
             replay_rebalance(engine, env, event, silent)?;
         } else {
-            let ops = ops_for_event(env, engine, events, event)?;
+            // Nothing rejected is ever logged, so a logged event that is
+            // rejected on replay means the log does not belong to this state.
+            let ops = ops_for_event(env, engine, events, event)
+                .map_err(|e| format!("logged event `{}` (seq {}) cannot be replayed: {e}", event.name, event.seq))?;
             if silent {
                 engine.dispatch_silent(&ops);
             } else {
@@ -135,6 +173,15 @@ fn replay_genesis(engine: &mut Engine, env: &Env, event: &Event, silent: bool) -
         check_field(env, sort, field, value)?;
         if fields[..i].iter().any(|(f, _)| f == field) {
             return Err(format!("genesis event sets `{field}` twice"));
+        }
+    }
+    // A seed row holds its key like any other. (The program's own seeds are
+    // checked when it is compiled; this is a log read back from storage.)
+    if let Some(key) = env.key(sort) {
+        let value = key_value(key, &fields)
+            .ok_or_else(|| format!("genesis event: a `{}` is missing part of its key", key.entity))?;
+        if key_taken(engine, key, &value, &Default::default()) {
+            return Err(format!("genesis event: {}", key_conflict(key)));
         }
     }
     if silent {
@@ -184,7 +231,7 @@ fn replay_rebalance(engine: &mut Engine, env: &Env, event: &Event, silent: bool)
 /// bind-check-[`expand`] `dispatch_event` runs. The check is not skipped: a
 /// log is read back from storage, and an argument of the wrong type would
 /// otherwise reach the engine's write path, which trusts its input.
-fn ops_for_event(env: &Env, engine: &Engine, events: &[EventDef], event: &Event) -> Result<Vec<DispatchOp>, String> {
+fn ops_for_event(env: &Env, engine: &Engine, events: &[EventDef], event: &Event) -> Result<Vec<DispatchOp>, Refusal> {
     let def = find(events, &event.name)?;
     let mut bound = HashMap::new();
     let mut rel_bound: RelArgs = HashMap::new();
@@ -193,7 +240,7 @@ fn ops_for_event(env: &Env, engine: &Engine, events: &[EventDef], event: &Event)
             .args
             .iter()
             .find(|(name, _)| *name == p.name)
-            .ok_or_else(|| format!("logged event `{}` (seq {}) is missing arg `{}`", event.name, event.seq, p.name))?;
+            .ok_or_else(|| format!("missing arg `{}`", p.name))?;
         check_param(env, &event.name, &p.name, &p.ty, arg)?;
         match arg {
             ArgValue::Value(v) => {
@@ -204,9 +251,80 @@ fn ops_for_event(env: &Env, engine: &Engine, events: &[EventDef], event: &Event)
             }
         }
     }
+    build_ops(env, engine, events, def, &bound, &rel_bound)
+}
+
+/// One event's whole transaction: its handler expanded, then checked against
+/// the keys its entities declare.
+fn build_ops(
+    env: &Env,
+    engine: &Engine,
+    events: &[EventDef],
+    def: &EventDef,
+    args: &HashMap<String, Value>,
+    rel_args: &RelArgs,
+) -> Result<Vec<DispatchOp>, Refusal> {
     let mut ops = Vec::new();
-    expand(env, engine, events, def, &bound, &rel_bound, &mut ops)?;
+    expand(env, engine, events, def, args, rel_args, &mut ops)?;
+    check_keys(env, engine, &ops)?;
     Ok(ops)
+}
+
+/// `fields`' value of `key`, as the index view holds it: the one value, or
+/// pairs nested to the right. `None` if a key field is not given.
+fn key_value(key: &EntityKey, fields: &[(String, Value)]) -> Option<Value> {
+    let mut parts = key
+        .fields
+        .iter()
+        .rev()
+        .map(|k| fields.iter().rev().find(|(f, _)| f == k).map(|(_, v)| v.clone()));
+    let mut acc = parts.next()??;
+    for part in parts {
+        acc = Value::Pair(Box::new(part?), Box::new(acc));
+    }
+    Some(acc)
+}
+
+/// Whether a live row other than the ones in `gone` already holds `key`.
+fn key_taken(engine: &Engine, key: &EntityKey, value: &Value, gone: &std::collections::BTreeSet<&Value>) -> bool {
+    engine
+        .circuit
+        .view(&key.view)
+        .is_some_and(|index| index.row_ref(value).any(|(id, w)| w > 0 && !gone.contains(id)))
+}
+
+fn key_conflict(key: &EntityKey) -> Refusal {
+    Refusal::Rejected(format!("a `{}` with this `{}` already exists", key.entity, key.fields.join("` and `")))
+}
+
+/// A key (`entity E { …, key (f, g) }`) is a constraint on the state: no two
+/// live rows agree on it. A transaction that would break it is rejected,
+/// whole, like any other event that does not apply. Rows are checked in
+/// statement order against the pre-event state and against the rows this
+/// transaction has already created; a row it has already deleted has given
+/// its key up.
+fn check_keys(env: &Env, engine: &Engine, ops: &[DispatchOp]) -> Result<(), Refusal> {
+    use std::collections::BTreeSet;
+    let mut gone: BTreeSet<&Value> = BTreeSet::new();
+    let mut made: BTreeSet<(SortId, Value)> = BTreeSet::new();
+    for op in ops {
+        match op {
+            DispatchOp::Retract { id } => {
+                gone.insert(id);
+            }
+            DispatchOp::New { sort, fields } => {
+                let Some(key) = env.key(*sort) else { continue };
+                let value = key_value(key, fields)
+                    .ok_or_else(|| format!("a new `{}` is missing part of its key", key.entity))?;
+                if key_taken(engine, key, &value, &gone) || !made.insert((*sort, value)) {
+                    return Err(key_conflict(key));
+                }
+            }
+            // Key fields are never assigned (the checker refuses it).
+            DispatchOp::Set { .. } => {}
+        }
+    }
+    Ok(())
 }
 
 fn find<'a>(events: &'a [EventDef], name: &str) -> Result<&'a EventDef, String> {
@@ -234,27 +352,67 @@ fn expand(
     args: &HashMap<String, Value>,
     rel_args: &RelArgs,
     ops: &mut Vec<DispatchOp>,
-) -> Result<(), String> {
-    let circuit = &engine.circuit;
+) -> Result<(), Refusal> {
     // The handler's params, plus each row it has created and named so far.
     let mut args = args.clone();
+    expand_body(env, engine, events, def, &def.body, &mut args, rel_args, ops)
+}
+
+/// Whether every condition holds in the pre-event state.
+fn holds(env: &Env, circuit: &Circuit, args: &HashMap<String, Value>, conds: &[Cond]) -> Result<bool, Refusal> {
+    for cond in conds {
+        let ok = match cond {
+            Cond::Holds { view } => circuit.view(view).is_some_and(|rows| !rows.is_empty()),
+            Cond::HoldsAt { view, param } => {
+                let id = args.get(param).ok_or_else(|| format!("unbound parameter `{param}`"))?;
+                circuit.view(view).is_some_and(|rows| rows.has_left(id))
+            }
+            Cond::Exists { target, negate } => resolve_target(env, circuit, args, target)?.is_empty() == *negate,
+            // A condition over something absent is simply not met.
+            Cond::Eval(e) => match eval_val_expr(env, circuit, args, e) {
+                Ok(v) => v == Value::atom(TRUE),
+                Err(Refusal::Rejected(_)) => false,
+                Err(invalid) => return Err(invalid),
+            },
+        };
+        if !ok {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Append one block of statements. `args` grows as the block names rows it
+/// creates; a nested block (an `if` branch) works on a copy.
+#[allow(clippy::too_many_arguments)]
+fn expand_body(
+    env: &Env,
+    engine: &Engine,
+    events: &[EventDef],
+    def: &EventDef,
+    body: &[MutationIR],
+    args: &mut HashMap<String, Value>,
+    rel_args: &RelArgs,
+    ops: &mut Vec<DispatchOp>,
+) -> Result<(), Refusal> {
+    let circuit = &engine.circuit;
     // `bound` is the event's args, plus per-row names (`ROW_SELF`, a
     // `new … from` binder) when resolving a value once per row.
-    let resolve_in = |v: &ValRef, bound: &HashMap<String, Value>| -> Result<Value, String> {
+    let resolve_in = |v: &ValRef, bound: &HashMap<String, Value>| -> Result<Value, Refusal> {
         match v {
             ValRef::Lit(lit) => Ok(lit_value(lit)),
-            ValRef::Arg(n) => bound
+            ValRef::Arg(n) => Ok(bound
                 .get(n)
                 .cloned()
-                .ok_or_else(|| format!("event `{}`: unbound parameter `{n}`", def.name)),
+                .ok_or_else(|| format!("event `{}`: unbound parameter `{n}`", def.name))?),
             ValRef::Expr(ve) => eval_val_expr(env, circuit, bound, ve),
         }
     };
-    for m in &def.body {
+    for m in body {
         // A row this statement creates and names, in scope from the next one.
         let mut bound: Option<(String, Value)> = None;
         {
-            let args = &args;
+            let args = &*args;
             let resolve = |v: &ValRef| resolve_in(v, args);
             match m {
                 MutationIR::Set { target, entity, updates } => {
@@ -316,6 +474,15 @@ fn expand(
                         ops.push(DispatchOp::New { sort, fields: resolved });
                     }
                 }
+                // Both branches are checked; the pre-event state picks one.
+                // What it binds is its own, so it runs on a copy of `args`.
+                MutationIR::If { conds, then, els } => {
+                    let branch = if holds(env, circuit, args, conds)? { then } else { els };
+                    expand_body(env, engine, events, def, branch, &mut args.clone(), rel_args, ops)?;
+                }
+                // Ends the whole event, whatever was expanded before it and
+                // whoever `do`es this handler: the ops are simply dropped.
+                MutationIR::Reject { reason } => return Err(Refusal::Rejected(reason.clone())),
                 MutationIR::Do { event, args: call_args } => {
                     let callee = find(events, event)?;
                     let mut inner = HashMap::new();
@@ -345,29 +512,29 @@ fn eval_val_expr(
     circuit: &Circuit,
     args: &HashMap<String, Value>,
     e: &ValExpr,
-) -> Result<Value, String> {
+) -> Result<Value, Refusal> {
     match e {
         ValExpr::Lit(lit) => Ok(lit_value(lit)),
         ValExpr::Param(name) => args
             .get(name)
             .cloned()
-            .ok_or_else(|| format!("unbound parameter `{name}`")),
+            .ok_or_else(|| Refusal::Invalid(format!("unbound parameter `{name}`"))),
         ValExpr::Field(base, field) => {
             let id = eval_val_expr(env, circuit, args, base)?;
             let Value::Id(sort, _) = &id else {
-                return Err(format!("`.{field}`: not an entity id"));
+                return Err(Refusal::Invalid(format!("`.{field}`: not an entity id")));
             };
             let key = InputKey::Field(*sort, intern(field));
             circuit
                 .input_integral(&key)
                 .and_then(|rel| rel.row(&id).next())
                 .map(|(v, _)| v)
-                .ok_or_else(|| format!("no live `{field}` value for this row"))
+                .ok_or_else(|| Refusal::Rejected(format!("the row {} has no `{field}` (it may be gone)", encode_value(&id))))
         }
         ValExpr::Not(inner, [a, b]) => {
             let v = eval_val_expr(env, circuit, args, inner)?;
             let Value::Atom(cur) = &v else {
-                return Err("`not` operand is not an atom".to_string());
+                return Err(Refusal::Invalid("`not` operand is not an atom".to_string()));
             };
             let cur = cur.as_str();
             if cur == a {
@@ -375,7 +542,7 @@ fn eval_val_expr(
             } else if cur == b {
                 Ok(Value::atom(a))
             } else {
-                Err(format!("`not`: value `{cur}` is not one of its declared alternatives"))
+                Err(Refusal::Invalid(format!("`not`: value `{cur}` is not one of its declared alternatives")))
             }
         }
         // The one `State#` row's field (S-51). Read like any other field,
@@ -387,14 +554,14 @@ fn eval_val_expr(
             circuit
                 .input_integral(&key)
                 .and_then(|rel| rel.triples().find(|(_, _, w)| *w > 0).map(|(_, v, _)| v.clone()))
-                .ok_or_else(|| format!("state `{name}` has no value yet"))
+                .ok_or_else(|| Refusal::Rejected(format!("state `{name}` has no value yet")))
         }
         ValExpr::Concat(a, b) => {
             let (Value::Text(x), Value::Text(y)) = (
                 eval_val_expr(env, circuit, args, a)?,
                 eval_val_expr(env, circuit, args, b)?,
             ) else {
-                return Err("`++` operand is not Text".to_string());
+                return Err(Refusal::Invalid("`++` operand is not Text".to_string()));
             };
             Ok(Value::text(&format!("{}{}", x.as_str(), y.as_str())))
         }
@@ -402,6 +569,12 @@ fn eval_val_expr(
             let va = eval_val_expr(env, circuit, args, a)?;
             let vb = eval_val_expr(env, circuit, args, b)?;
             Ok(arith_values(*kind, &va, &vb, *money))
+        }
+        ValExpr::And(a, b) | ValExpr::Or(a, b) => {
+            let yes = Value::atom(TRUE);
+            let (x, y) = (eval_val_expr(env, circuit, args, a)? == yes, eval_val_expr(env, circuit, args, b)? == yes);
+            let both = matches!(e, ValExpr::And(..));
+            Ok(Value::atom(if (both && x && y) || (!both && (x || y)) { TRUE } else { FALSE }))
         }
         ValExpr::Compare(op, a, b) => {
             let va = eval_val_expr(env, circuit, args, a)?;
@@ -419,7 +592,7 @@ fn eval_val_expr(
 /// every row of the entity whose predicate evaluates true, checked one at a
 /// time by binding [`ROW_SELF`] to each candidate in turn (O(N), the visible
 /// cost a static keyset view avoids).
-fn resolve_target(env: &Env, circuit: &Circuit, args: &HashMap<String, Value>, target: &Target) -> Result<Vec<Value>, String> {
+fn resolve_target(env: &Env, circuit: &Circuit, args: &HashMap<String, Value>, target: &Target) -> Result<Vec<Value>, Refusal> {
     match target {
         Target::One(r) => {
             let id = args.get(&r.0).cloned().ok_or_else(|| format!("unbound parameter `{}`", r.0))?;
@@ -447,8 +620,12 @@ fn resolve_target(env: &Env, circuit: &Circuit, args: &HashMap<String, Value>, t
             for id in rel.triples().filter(|(_, _, w)| *w > 0).map(|(l, _, _)| l.clone()) {
                 let mut row_args = args.clone();
                 row_args.insert(ROW_SELF.to_string(), id.clone());
-                if eval_val_expr(env, circuit, &row_args, pred)? == Value::atom(TRUE) {
-                    hit.push(id);
+                // A row with nothing where the predicate looks does not match;
+                // it does not make the whole event fail.
+                match eval_val_expr(env, circuit, &row_args, pred) {
+                    Ok(v) if v == Value::atom(TRUE) => hit.push(id),
+                    Ok(_) | Err(Refusal::Rejected(_)) => {}
+                    Err(invalid) => return Err(invalid),
                 }
             }
             Ok(hit)
@@ -574,7 +751,8 @@ pub fn restore(engine: &mut Engine, env: &Env, snap: &BaseSnapshot) -> Result<()
 /// The base invariant, checked on a snapshot before it is loaded: every table
 /// belongs to a sort and field the program declares; an identity row is
 /// `(id, id)` at weight 1 for an id already minted; a field holds at most one
-/// row per id, at weight 1, of the field's type, and only for a live id.
+/// row per id, at weight 1, of the field's type, and only for a live id; and
+/// the live rows of a keyed entity each hold a whole key that no other does.
 pub fn check_snapshot(env: &Env, snap: &BaseSnapshot) -> Result<(), String> {
     use std::collections::{HashMap as Map, HashSet};
     if snap.cursor >= MAX_SEQ {
@@ -628,6 +806,30 @@ pub fn check_snapshot(env: &Env, snap: &BaseSnapshot) -> Result<(), String> {
                     encode_value(r),
                     env.sort_name(*sort),
                     field.as_str()
+                ));
+            }
+        }
+    }
+    for (sort, ids) in &live {
+        let Some(key) = env.key(*sort) else { continue };
+        let mut rows: Map<&Value, Vec<(String, Value)>> = Map::new();
+        for (table, table_rows) in &snap.inputs {
+            let InputKey::Field(s, field) = table else { continue };
+            if s == sort && key.fields.iter().any(|k| k == field.as_str()) {
+                for (id, v, _) in table_rows {
+                    rows.entry(id).or_default().push((field.as_str().to_string(), v.clone()));
+                }
+            }
+        }
+        let mut held: std::collections::BTreeSet<Value> = Default::default();
+        for id in ids {
+            let whole = rows.get(*id).and_then(|fields| key_value(key, fields));
+            if !whole.is_some_and(|value| held.insert(value)) {
+                return Err(format!(
+                    "snapshot row {} of `{}` has no key of its own (`{}` must be whole and unique)",
+                    encode_value(id),
+                    key.entity,
+                    key.fields.join("`, `")
                 ));
             }
         }

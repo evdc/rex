@@ -1375,6 +1375,89 @@ they are offered only once a user is selected (with no user, `MessageSent` has
 no sender to read and is refused). Its comment claiming the checker warns
 about that was wrong and is corrected.
 
+#### After the MVP: guards and `if` — **done 2026-10-01** (`parser.rs`, `types/view.rs`'s `condition`, `events.rs`'s `holds`/`Refusal`; `crates/rex-core/tests/guards.rs` (23); chat reworked)
+*Goal:* say what an event requires. Prompted by chat: its seed button could be
+pressed twice, and a user could like a message any number of times.
+*Landed as:*
+- **`on E(p) where (cond) [else "reason"] { … }`** — a precondition on the
+  pre-event state. If it does not hold the event is *rejected*: not written,
+  not logged, reason returned. A guard goes with its handler: `do` into a
+  guarded event rejects the caller too (`do` is inline expansion in one
+  transaction — §5 decision 2 — so there is no later cycle to defer it to).
+- **`if (cond) { … } [else { … } | else if …]`** as a handler statement. The
+  event is accepted; the condition picks a block. Rows named in a block are
+  that block's own; `do` cycles are found through blocks.
+- **Conditions are filters at the handler's params**, compiled like targets:
+  no param → a hidden view at the `Unit` point; one entity param → a hidden
+  keyset view tested at the argument; otherwise evaluated at dispatch, with a
+  read of something absent counting as false. Conjuncts are tiered separately.
+- **Three outcomes** (`events::Refusal`): accepted; *rejected* (a guard, or a
+  value that reads something absent — previously an error); *invalid* (the call
+  is wrong — still an error). Across the wasm boundary a rejection is
+  `{"rejected": reason}`; `DispatchResult.rejected` in rex-dom; generated
+  listeners stop there and `console.info` the reason. Errors are strings for
+  now; a `Result`-like type is the open design.
+Found and fixed on the way, each a thing guards made natural to write:
+1. `not` and a `Bool` state did not work at the `Unit` level — a root
+   `if (open)` on a `False` state showed its content.
+2. `E where p & q` as a mutation target was rejected (it parses as
+   `(E where p) & q`), and `&` inside a scan predicate was unsupported.
+3. A filter's conjuncts had to have one type; `current & not m.liked` now
+   reads as two conditions.
+4. A handler value could not compare an argument with a constructor of its
+   type (`mood = Sad`).
+5. A `state` default could not name a seed row; the state row is now placed
+   after the row it names.
+6. A scan predicate that read something absent failed the whole event; such a
+   row now simply does not match.
+**`reject "reason"`** followed the same day and is what a guard now *is*: the
+header form lowers to `if (c) { body } else { reject r }`, `GuardIR` is gone,
+and `MutationIR::Reject` simply returns `Refusal::Rejected` from expansion —
+ops are collected before anything is applied, so a late `reject`, or one in a
+`do` callee, discards everything.
+`chat/app.rex`: seed data moved to genesis (top-level `new`s, like Kanban —
+no seed event to press twice); every handler has a guard; liking is a toggle,
+so a user likes a message at most once. *Not done:* showing a rejection in the
+page, and the keyed `rel` form. (`can E(args)` turned out to be unnecessary: a
+view shares a guard's condition by naming it in a `let`.)
+
+#### After the MVP: total aggregates — **done 2026-10-01** (`check.rs`'s `check_call`, `typed::Total`, `dbsp/node.rs`'s `Aggregate`, `eval/interp.rs`; `crates/rex-core/tests/totals.rs` (8))
+*Goal:* an empty group has a count. Guards made the old rule bite: "at most
+five cards" had to be `not cards >= 5`, because a list with no cards had no
+`cards` row and `cards < 5` rejected its first card.
+*Landed as:* S-50's total group, which existed only for `by unit`, now follows
+the **type of the key**: `Unit`, an entity (its live rows), an enum (its
+constructors). `count`/`sum` give `0` there. The circuit's `Aggregate` takes
+the entity's identity input as a second child and visits a key when its row
+comes or goes; enum keys are seeded once, as `Unit` was. The batch oracle
+implements the same rule independently, and the existing oracle suites hold
+the two together. `min`/`max`/`avg` stay absent on an empty group (no ∞ in
+`Int`/`Money`/`Date`; an `else d` form is open), as does any scalar-keyed
+group. Dead keys keep a non-empty group — deletion does not cascade.
+*Visible change:* Kanban's card count shows `0` for an empty list.
+
+#### After the MVP: entity keys — **done 2026-10-01** (`parser.rs`'s `parse_entity`, `types/view.rs` (`entity_key`, `seed_key`), `Env::key`, `events.rs`'s `check_keys`; `crates/rex-core/tests/keys.rs` (10))
+*Goal:* "a user likes a message at most once" as a property of the schema.
+*Landed as:* `entity Like { msg: Message, user: User, key (msg, user) }`. A key
+is a **constraint**: a `new` whose key a live row holds rejects the event. It
+is checked once per transaction, after expansion, over the ops in order — so
+`do` callees and bulk `new … from` rows are covered by one piece of code — 
+against a hidden index view `key#E = ~(E . (.f, .g))` and against the
+transaction's own rows; a row retracted earlier in the transaction has freed
+its key. Key fields must be given by every `new` and cannot be assigned. Seed
+rows are checked at compile time, genesis events on replay, snapshots in
+`check_snapshot`.
+Also: **a condition can be a row test** — `if (Like where .msg = m & .user =
+u)`, `where (not (…))` — a mutation target asked whether it has rows
+(`Cond::Exists`). Needed because the natural question about a keyed link
+entity ("is this pair there?") names two params, which no other condition
+tier could express.
+*Chose* rejection over set semantics (a duplicate `new` as a silent no-op):
+a key on an *entity* reads as a constraint, the user asked for a constraint,
+and the idempotent and toggling behaviours are one `if` away. Set semantics
+belong to the `rel` sugar, if it is built. *Not done:* that sugar; several
+keys; mutable key fields; an indexed row test (it scans; the index exists).
+
 ---
 
 ## 4. Sequencing and parallel tracks

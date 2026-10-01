@@ -27,10 +27,17 @@ export function parseStepJson(json: string): StepDeltas {
 export type EventArg = string | readonly (readonly [key: string, value: string, weight: number])[];
 
 /** What one dispatched event did: the ids its `new` mutations minted (in
- *  order, canonically encoded) and the resulting delta batch. */
+ *  order, canonically encoded) and the resulting delta batch.
+ *
+ *  An event can also be **rejected**: its guard did not hold, or it read
+ *  something that is not there. That is an outcome, not an error — nothing
+ *  was written or logged, `ids` and `deltas` are empty, and `rejected` is the
+ *  reason. (A call that is itself wrong — no such event, a mistyped argument
+ *  — throws.) */
 export interface DispatchResult {
   readonly ids: readonly string[];
   readonly deltas: StepDeltas;
+  readonly rejected?: string;
 }
 
 /**

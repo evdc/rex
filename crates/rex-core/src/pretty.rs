@@ -20,6 +20,7 @@ pub fn stmt_to_sexpr(stmt: &Stmt) -> String {
                 .fields
                 .iter()
                 .map(|f| format!("(field {} {})", f.name, type_to_sexpr(&f.ty)))
+                .chain((!e.key.is_empty()).then(|| format!("(key {})", e.key.join(" "))))
                 .collect::<Vec<_>>()
                 .join(" ");
             if fields.is_empty() {
@@ -62,9 +63,17 @@ pub fn stmt_to_sexpr(stmt: &Stmt) -> String {
         ),
         Stmt::Event(e) => format!("(event {} ({}))", e.name, params_to_sexpr(&e.params)),
         Stmt::On(o) => format!(
-            "(on {} ({}) ({}))",
+            "(on {} ({}){} ({}))",
             o.event,
             o.params.join(" "),
+            match &o.guard {
+                Some(g) => format!(
+                    " (where {}{})",
+                    expr_to_sexpr(&g.cond),
+                    g.reason.as_ref().map(|r| format!(" {r:?}")).unwrap_or_default()
+                ),
+                None => String::new(),
+            },
             hstmts_to_sexpr(&o.body)
         ),
         Stmt::Type(t) => format!("(type {} {})", t.name, t.ctors.join(" ")),
@@ -210,6 +219,18 @@ fn hstmt_to_sexpr(m: &HStmt) -> String {
             let args = args.iter().map(expr_to_sexpr).collect::<Vec<_>>().join(" ");
             format!("(do {event} {args})")
         }
+        HStmt::If { cond, then, els, .. } => {
+            let mut s = format!("(if {} ({})", expr_to_sexpr(cond), hstmts_to_sexpr(then));
+            if !els.is_empty() {
+                s.push_str(&format!(" ({})", hstmts_to_sexpr(els)));
+            }
+            s.push(')');
+            s
+        }
+        HStmt::Reject { reason, .. } => match reason {
+            Some(r) => format!("(reject {r:?})"),
+            None => "(reject)".into(),
+        },
         HStmt::Clear { .. } => "(clear)".into(),
         HStmt::Revert { .. } => "(revert)".into(),
         HStmt::Focus { target, .. } => match target {

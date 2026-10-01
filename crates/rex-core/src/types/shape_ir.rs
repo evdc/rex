@@ -195,6 +195,26 @@ pub struct EventDef {
     pub body: Vec<MutationIR>,
 }
 
+/// One conjunct of an `if`'s condition (a guard's too: a guard is an `if`). A condition is a filter at a key
+/// (the same thing a view's `if (c)` is), with the handler's params as the
+/// keys; which form it takes follows the rule for mutation targets — what
+/// is static is a maintained view, what depends on arguments is evaluated.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Cond {
+    /// No param is mentioned: a hidden view at the `Unit` point, which holds
+    /// iff it has its one row. Any query the language can write, O(1) to test.
+    Holds { view: String },
+    /// One entity param is mentioned: a hidden keyset view over that entity,
+    /// which holds iff the argument is one of its keys.
+    HoldsAt { view: String, param: String },
+    /// Anything else (scalar params, several params): evaluated at dispatch
+    /// like a mutation value. A read of something absent makes it false.
+    Eval(ValExpr),
+    /// A row test, written as a mutation target is (`Like where .msg = m &
+    /// .user = u`): holds iff the target has any row — or, negated, none.
+    Exists { target: Target, negate: bool },
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct EventParam {
     pub name: String,
@@ -254,6 +274,19 @@ pub enum MutationIR {
         value: String,
         fields: Vec<(String, FromField)>,
     },
+    /// `if (cond) { … } else { … }`: every condition is read from the
+    /// pre-event state, like any other read, and picks the branch to run.
+    If {
+        conds: Vec<Cond>,
+        then: Vec<MutationIR>,
+        els: Vec<MutationIR>,
+    },
+    /// `reject "reason"`: the event does not apply to the state it met. The
+    /// whole event — and any event that `do`es this one — is rejected:
+    /// nothing is written, whatever statements came before, and nothing is
+    /// logged. A guard `on E(p) where (c) else "r" { body }` is
+    /// `If { c, body, [Reject r] }`.
+    Reject { reason: String },
     /// Synchronous `do E(args)`: the callee's mutations join this
     /// transaction (same pre-event snapshot); only the outer event is logged.
     /// `args` are in the callee's declared param order.
@@ -281,6 +314,14 @@ pub struct Ref(pub String);
 /// `events.rs`'s per-dispatch scan binds it to each candidate row's id in
 /// turn. Not a legal Rex identifier, so it never collides with a real param.
 pub const ROW_SELF: &str = "#row";
+
+/// The hidden index view of a keyed entity `E` (`entity E { …, key (f, g) }`):
+/// key value → the row that holds it, i.e. `~(E . (.f, .g))`. An ordinary
+/// maintained view, so the uniqueness check at dispatch is a lookup, and a
+/// restore or a replay rebuilds it like any other.
+pub fn key_view(entity: &str) -> String {
+    format!("key#{entity}")
+}
 
 /// The hidden entity every `state` declaration becomes a field of (S-51). It
 /// has exactly one row, minted as a genesis `new` so replay reproduces it,
@@ -340,6 +381,9 @@ pub enum ValExpr {
     Concat(Box<ValExpr>, Box<ValExpr>),
     /// `a OP b`, decoded to the atom `@True`/`@False`.
     Compare(crate::ast::CmpOp, Box<ValExpr>, Box<ValExpr>),
+    /// `a & b` / `a | b` on `Bool`s (conditions only).
+    And(Box<ValExpr>, Box<ValExpr>),
+    Or(Box<ValExpr>, Box<ValExpr>),
     /// A bare `state` name (S-51): a point read of the one [`STATE_ENTITY`]
     /// row's field, against the pre-event snapshot like every other read
     /// here. A defaultless state that has never been `set` has no row, which

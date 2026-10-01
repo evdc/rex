@@ -68,7 +68,7 @@ Workspace layout:
 | `examples/kanban` | End-to-end app (Vite + Playwright). |
 | `examples/js-framework-benchmark` | The keyed benchmark on Rex: 10k-row bulk events, `import js` extractors (Vite + Playwright). |
 | `examples/todomvc` | TodoMVC, the S-02 program unchanged (Vite + Playwright). |
-| `examples/chat` | Chat: a many-to-many through a link entity, a state with no default, and one event that creates rows which refer to each other (Vite + Playwright). |
+| `examples/chat` | Chat: a many-to-many through a keyed link entity, a state with no default, and handlers with guards and an `if` (Vite + Playwright). |
 
 ```sh
 cargo build
@@ -262,9 +262,15 @@ incremental recursion, an LSP.
 ## What's left
 
 **Small, known, and worth doing next**
-- Handler values lack `*`, `if`, `match` and aggregates, and cannot write
-  through a path; component arguments must be row binders (SYNTAX.md lists
-  these where they come up).
+- Handler values lack `*`, `if`/`match` *expressions* and aggregates, and
+  cannot write through a path; component arguments must be row binders
+  (SYNTAX.md lists these where they come up).
+- Guards and `reject "reason"` reject an event with a reason, but the reason
+  only reaches the console: there is no way yet to show it in the page.
+- Entities can declare a `key (…)`, enforced by rejecting the event that
+  would break it. Not yet: more than one key, changing a key field, an indexed
+  lookup by key from a handler (a row test with params scans), and `rel`
+  sugar for a many-to-many (SYNTAX §9).
 - A `Money` text bind renders minor units (`250` for 2.50).
 - `docs/ordering.md` (MVP-PLAN S-72) — the design note for hiding fractional
   order keys behind `order manual` — is not written.
@@ -294,9 +300,10 @@ incremental recursion, an LSP.
 - **Coproduct runtime forms.** Coproducts of atoms exist (`type`, `Bool`);
   general `(V + W)` has no injection or case form, so "no NULL, use
   `V + Unit`" is not realizable — absence of a row is what stands in for it.
-- **Empty groups.** An aggregate has no row for a key with an empty image
-  (except `count`/`sum` `by unit`), so "customers with zero orders" needs an
-  `else`-style default form that does not exist yet (SYNTAX §9).
+- **Empty groups.** `count`/`sum` give `0` for an empty group when the key is
+  `Unit`, an entity or an enum ("customers with zero orders" is
+  `Customer where orders = 0`). `min`/`max`/`avg`, and any aggregate keyed by
+  a scalar, still have no row there and no way to give a default (SYNTAX §9).
 - **`min`/`max` under retraction** re-fold the affected group: correct, but
   O(group) rather than O(Δ).
 - **Top-N / engine-side ordering.** `order by` names an order relation; the
@@ -352,6 +359,9 @@ look (and add) when changing the language or the engine:
 | `rex-core/tests/gen_queries.rs` | Randomly **generated queries** from a typed grammar (~90% check); every accepted one must be maintained exactly under random histories. |
 | `rex-core/tests/fuzz_frontend.rs` | Mutants of real programs, token soup, arbitrary text, every construct nested far past the limit, very wide programs: no panic, no stack overflow (on a 1 MB stack in release), every diagnostic renders — and a mutant that still checks is driven through the engine oracle. |
 | `rex-core/tests/encode_props.rs` | The wire encoding round-trips any value and is injective; emitted JSON parses and says what it should. Writes `fixtures/encoding.json`, which `rex-dom` is tested against. |
+| `rex-core/tests/guards.rs` | Handler guards and `if`: rejection writes and logs nothing, a callee's guard rejects its caller, conditions read the pre-event state; a bank with preconditions checked against a model. |
+| `rex-core/tests/keys.rs` | Entity keys: a duplicate rejects the event, a transaction is checked against its own rows, damaged snapshots and logs are refused; keyed rows checked against a set. |
+| `rex-core/tests/totals.rs` | Total aggregates: `0` for an empty group over entity, enum and `Unit` keys, deltas when a key and its group arrive or leave together, a model. |
 | `rex-core/tests/adversarial.rs` | One named test per corner case the suites above found (see SPEC §2.1, SYNTAX §8a). |
 | `rex-wasm/tests/boundary.rs` | The wasm boundary, natively: sessions round-trip through their own JSON; hostile `dispatch`/`rebalance` calls fail cleanly; a damaged snapshot or log is refused. |
 | `rex-codegen/tests/hostile.rs` | Hostile text and names produce well-formed modules whose literals say the same thing; mutants never panic codegen. |

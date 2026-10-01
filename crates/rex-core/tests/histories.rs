@@ -34,13 +34,15 @@ fn history() -> impl Strategy<Value = (Vec<Op>, usize)> {
 const GRAPH: &str = r#"
 type Colour = Red | Green | Blue
 entity Node { name: Text, weight: Int, colour: Colour, cost: Money }
-entity Edge { src: Node, dst: Node }
+// A key: at most one edge between a pair, so a second `Link` is rejected.
+entity Edge { src: Node, dst: Node, key (src, dst) }
 state root : Node
 state total : Int = 0
 
 event AddNode(name: Text, weight: Int, colour: Colour, cost: Money)
 event Link(a: Node, b: Node)
 event Unlink(a: Node)
+event Flip(a: Node, b: Node)
 event Reweigh(n: Node, d: Int)
 event Paint(c: Colour)
 event Drop(n: Node)
@@ -56,8 +58,26 @@ on AddNode(name, weight, colour, cost) {
 }
 on Link(a, b)       => new Edge { src: a, dst: b }
 on Unlink(a)        => delete Edge where .src = a
-on Reweigh(n, d)    => n.weight := n.weight + d
-on Paint(c)         => update Node where .weight > 3 { colour: c }
+// A row test over two params, and a key given up and retaken in one event.
+on Flip(a, b) {
+  if (Edge where .src = a & .dst = b) {
+    delete Edge where .src = a & .dst = b
+    new Edge { src: a, dst: b }
+  } else if (not (Edge where .src = b & .dst = a)) {
+    new Edge { src: b, dst: a }
+  }
+}
+// A guard: a keyset view (`n` exists and is not too heavy) and an evaluated
+// conjunct (the argument alone).
+on Reweigh(n, d) where (n.weight < 1000 & d != 0) else "nothing to do" => n.weight := n.weight + d
+// A branch on an argument; one arm is a bulk update, the other a state write.
+on Paint(c) {
+  if (c = Red) { update Node where .weight > 3 { colour: c } }
+  else if (heavy_n > 1) { update Node where .weight > 3 { colour: c }; set total = total + 1 }
+  else { set total = total - 1 }
+  // A reject after the writes above: an argument and a view, in one condition.
+  if (c = Blue & heavy_n > 2) { reject "too blue" }
+}
 on Drop(n)          => delete n
 on DropHeavy(limit) => delete Node where .weight > limit
 on SetRoot(n)       => set root = n
@@ -73,6 +93,8 @@ on Both(n, d) {
   do Reweigh(n, d)
   do Rename(n, "+")
 }
+
+let heavy_n : Unit -> Int = count((Node where .weight > 3) by unit)
 
 let n0 = new Node { name: "a", weight: 1, colour: Red,   cost: 1.50 }
 let n1 = new Node { name: "b", weight: 5, colour: Green, cost: 0.25 }

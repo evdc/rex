@@ -193,7 +193,8 @@ let authors : Note -> User = .author
     let args: HashMap<String, ArgValue> = HashMap::new();
     let err = dispatch_event(&mut app.engine, &app.env, &app.events, "Write", &args)
         .expect_err("writing with no current user should fail");
-    assert!(err.contains("state `current` has no value yet"), "got {err}");
+    // Rejected, not invalid: the call is fine, the state does not allow it.
+    assert_eq!(err, rex::events::Refusal::Rejected("state `current` has no value yet".to_string()));
 
     let ada = app.engine.circuit
         .input_integral(&rex::dbsp::InputKey::Identity(app.env.entity_sort("User").unwrap()))
@@ -258,4 +259,25 @@ fn the_state_row_is_logged_as_genesis_so_replay_reproduces_it() {
     let replayed = App { engine: fresh, env: checked.env, events: checked.shapes.events };
     assert_eq!(values_of(&replayed, "current"), vec![Value::atom("Active")]);
     assert_eq!(values_of(&replayed, "current"), values_of(&app, "current"));
+}
+
+#[test]
+fn a_default_may_name_a_seed_row_wherever_the_state_is_declared() {
+    // The state row is a `new` like any other, and can only refer to rows
+    // created before it — so it is placed after the one its default names,
+    // not first, even when the `state` line comes before the `let`.
+    for src in [
+        "entity User { name: Text }\nlet ada = new User { name: \"Ada\" }\nstate current : User = ada\nlet who : Unit -> Text = current . .name\n",
+        "entity User { name: Text }\nstate current : User = ada\nstate n : Int = 3\nlet who : Unit -> Text = current . .name\nlet ada = new User { name: \"Ada\" }\n",
+    ] {
+        let app = build(src);
+        let who = app.engine.circuit.view("who").unwrap().to_sorted_vec();
+        assert_eq!(who, vec![(Value::Unit, Value::text("Ada"), 1)], "{src}");
+        // …and a restoring boot rebuilds it from the log.
+        let log = app.engine.log().to_vec();
+        assert_eq!(log.len(), 2, "one genesis event per `new`");
+    }
+    // A default that names nothing in scope is still an error.
+    let parsed = rex::parse("entity User { name: Text }\nstate current : User = nobody\n");
+    assert!(rex::check(&parsed.program).elaborated.is_none());
 }

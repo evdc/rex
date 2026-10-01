@@ -436,13 +436,19 @@ impl Renamer<'_> {
                 },
                 None => HStmt::Set { name: name.clone(), value: self.expr(value), span: *span },
             },
+            HStmt::If { cond, then, els, span } => HStmt::If {
+                cond: self.expr(cond),
+                then: then.iter().map(|s| self.stmt(s)).collect(),
+                els: els.iter().map(|s| self.stmt(s)).collect(),
+                span: *span,
+            },
             HStmt::Do { event, args, span } => {
                 HStmt::Do { event: event.clone(), args: args.iter().map(|a| self.expr(a)).collect(), span: *span }
             }
             HStmt::Focus { target: FocusTarget::Level(b), span } => {
                 HStmt::Focus { target: FocusTarget::Level(self.name(b)), span: *span }
             }
-            HStmt::Clear { .. } | HStmt::Revert { .. } | HStmt::Focus { .. } => s.clone(),
+            HStmt::Reject { .. } | HStmt::Clear { .. } | HStmt::Revert { .. } | HStmt::Focus { .. } => s.clone(),
         }
     }
 

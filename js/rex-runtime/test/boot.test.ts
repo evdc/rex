@@ -26,6 +26,8 @@ class FakeApp implements EngineApp {
     this.log.push({ seq: this.next++, name, args });
   }
   dispatch(name: string, argsJson: string): string {
+    // Like the engine: an event that does not apply is rejected, not thrown.
+    if (name === "Reject") return '{"rejected":"not now"}';
     this.apply(name, JSON.parse(argsJson));
     return '{"ids":[],"deltas":{"views":{}}}';
   }
@@ -330,6 +332,17 @@ describe("Engine", () => {
     const res = engine.dispatch("Add", { item: "x" });
     expect(res).toEqual({ ids: [], deltas: {} });
     expect(engine.snapshot()).toEqual({ items: [["seed1", "u", 1], ["seed2", "u", 1], ["x", "u", 1]] });
+  });
+
+  test("a rejected event is a result with a reason, and nothing is persisted for it", async () => {
+    const a = new MemoryAdapter();
+    const engine = await boot(opts(a));
+    await engine.flush();
+    const stored = a.events.size;
+    expect(engine.dispatch("Reject", {})).toEqual({ ids: [], deltas: {}, rejected: "not now" });
+    await engine.flush();
+    expect(a.events.size).toBe(stored);
+    expect(itemsOf(engine)).toEqual(["seed1", "seed2"]);
   });
 
   test("logSince reads the typed log", async () => {

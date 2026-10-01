@@ -8,7 +8,7 @@ use rex::eval::{
     base_snapshot_to_json, decode_value, encode_value, event_to_json, json_quote, rows_to_json,
     step_result_to_json, Value,
 };
-use rex::events::{check_rebalance, dispatch_event, replay, restore};
+use rex::events::{check_rebalance, dispatch_event, replay, restore, Refusal};
 use rex::types::shape_ir::EventDef;
 use rex::types::ty::SortId;
 use rex::types::typed::TStmt;
@@ -83,6 +83,11 @@ impl App {
     /// shape the shaper already speaks for a view delta.
     /// Returns `{"ids":[…],"deltas":{"views":{…}}}` — `ids` are the keys
     /// minted by any `new` mutations, in order.
+    ///
+    /// An event that is **rejected** — its guard does not hold, or it reads
+    /// something that is not there — returns `{"rejected":"<reason>"}`:
+    /// nothing was written or logged. A call that is itself wrong (no such
+    /// event, a mistyped argument) is an `Err`.
     pub fn dispatch(&mut self, name: &str, args_json: &str) -> Result<String, String> {
         let raw: HashMap<String, serde_json::Value> = serde_json::from_str(args_json)
             .map_err(|e| format!("bad event args: {e}"))?;
@@ -107,7 +112,13 @@ impl App {
                 _ => return Err(format!("bad value for arg `{k}`")),
             }
         }
-        let (ids, res) = dispatch_event(&mut self.engine, &self.env, &self.events, name, &args)?;
+        let (ids, res) = match dispatch_event(&mut self.engine, &self.env, &self.events, name, &args) {
+            Ok(done) => done,
+            // An event that does not apply to this state is an outcome, not
+            // an error: the host is told why, and nothing has changed.
+            Err(Refusal::Rejected(reason)) => return Ok(format!(r#"{{"rejected":{}}}"#, json_quote(&reason))),
+            Err(Refusal::Invalid(message)) => return Err(message),
+        };
         let ids_json: Vec<String> = ids.iter().map(|v| json_quote(&encode_value(v))).collect();
         Ok(format!(
             r#"{{"ids":[{}],"deltas":{}}}"#,
