@@ -1,5 +1,5 @@
 import type { DomDriver, ShapeNode, StepDeltas, Tuple } from "./types.js";
-import { OrderIndex } from "./order.js";
+import { OrderIndex, type OrderEntry } from "./order.js";
 
 /**
  * The shaper: turns one atomic delta batch into one atomic DOM transaction.
@@ -22,8 +22,10 @@ export class Shaper<El> {
   /** Flattened shape tree, depth ascending. */
   private readonly levels: Level<El>[] = [];
   private readonly levelByName = new Map<string, Level<El>>();
-  /** view name -> integrated Z-set rows (key -> value -> weight). */
-  private readonly mirror = new Map<string, Map<string, Map<string, number>>>();
+  /** view name -> integrated Z-set rows, per key: the value itself when the
+   *  key holds exactly one value at weight 1 (every functional view, nearly
+   *  always), else value -> weight (P-6). */
+  private readonly mirror = new Map<string, Map<string, MirrorCell>>();
   /** Views that participate in any mirror (everything the shape tree names). */
   private readonly mirroredViews = new Set<string>();
 
@@ -62,7 +64,7 @@ export class Shaper<El> {
   /** A parent's children in order, as (orderKey, childKey) — what an app
    *  needs to compute a drop position's fractional key, and what the
    *  rebalance helper consumes. */
-  orderedChildren(shapeName: string, parentKey: string): readonly [string, string][] {
+  orderedChildren(shapeName: string, parentKey: string): readonly OrderEntry[] {
     return this.levelByName.get(shapeName)?.order.childrenOf(parentKey) ?? [];
   }
 
@@ -82,15 +84,7 @@ export class Shaper<El> {
       const m = this.mirrorFor(view);
       const touched = new Set<string>();
       for (const [key, value, w] of rows) {
-        let byValue = m.get(key);
-        if (!byValue) {
-          byValue = new Map();
-          m.set(key, byValue);
-        }
-        const next = (byValue.get(value) ?? 0) + w;
-        if (next === 0) byValue.delete(value);
-        else byValue.set(value, next);
-        if (byValue.size === 0) m.delete(key);
+        addRow(m, key, value, w);
         touched.add(key);
       }
       touchedAttrs.set(view, touched);
@@ -129,17 +123,34 @@ export class Shaper<El> {
     // Phase 1: removes, top-down, subtree-coalesced. A removed child whose
     // ancestor is also being removed this batch cleans up its bookkeeping but
     // issues no DOM call — the ancestor's removeChild takes the subtree.
+    // Grouped by parent: one order-index pass per parent, and when a parent
+    // loses every child it has, one `clear` instead of a removeChild each.
     for (const level of this.levels) {
       const plan = plans.get(level)!;
+      if (plan.removes.size === 0) continue;
+      const byParent = new Map<string, { children: Set<string>; els: El[] }>();
       for (const child of plan.removes) {
         const el = level.nodes.get(child);
         const parentKey = level.parentOf.get(child)!;
         level.nodes.delete(child);
         level.parentOf.delete(child);
-        level.order.remove(parentKey, level.orderOf.get(child) ?? "", child);
         level.orderOf.delete(child);
-        if (el !== undefined && !this.ancestorRemoved(level, parentKey, plans)) {
-          this.driver.removeChild(this.parentEl(level, parentKey), el);
+        let group = byParent.get(parentKey);
+        if (!group) {
+          group = { children: new Set(), els: [] };
+          byParent.set(parentKey, group);
+        }
+        group.children.add(child);
+        if (el !== undefined) group.els.push(el);
+      }
+      for (const [parentKey, { children, els }] of byParent) {
+        level.order.removeMany(parentKey, children);
+        if (els.length === 0 || this.ancestorRemoved(level, parentKey, plans)) continue;
+        const parentEl = this.parentEl(level, parentKey);
+        if (els.length > 1 && this.driver.childCount(parentEl) === els.length) {
+          this.driver.clear(parentEl);
+        } else {
+          for (const el of els) this.driver.removeChild(parentEl, el);
         }
       }
     }
@@ -152,24 +163,48 @@ export class Shaper<El> {
       const plan = plans.get(level)!;
       const fresh = new Set<string>();
       mountedNow.set(level, fresh);
+      if (plan.mounts.size === 0) continue;
+      const byParent = new Map<string, [orderKey: string, child: string][]>();
       for (const [child, parentKey] of plan.mounts) {
         const orderKey = this.orderKeyOf(level, child);
         level.parentOf.set(child, parentKey);
         level.orderOf.set(child, orderKey);
-        level.order.insert(parentKey, orderKey, child);
-        const el = level.shape.template(this.driver, child, this.ancestorKeys(level, parentKey));
-        for (const attr of level.shape.attrs) {
-          const v = this.resolveOne(attr.view, child);
-          if (attr.presence) attr.apply(this.driver, el, v);
-          else if (v !== undefined) attr.apply(this.driver, el, v);
+        let items = byParent.get(parentKey);
+        if (!items) {
+          items = [];
+          byParent.set(parentKey, items);
         }
-        level.nodes.set(child, el);
-        this.driver.insertBefore(
-          this.parentEl(level, parentKey),
-          el,
-          this.mountedSuccessor(level, parentKey, orderKey, child),
-        );
-        fresh.add(child);
+        items.push([orderKey, child]);
+      }
+      for (const [parentKey, items] of byParent) {
+        const parentEl = this.parentEl(level, parentKey);
+        if (items.length <= SMALL_BATCH) {
+          // One at a time: each finds its reference by successor probes.
+          for (const [orderKey, child] of items) {
+            level.order.insert(parentKey, orderKey, child);
+            const el = this.build(level, child, parentKey);
+            this.driver.insertBefore(parentEl, el, this.mountedSuccessor(level, parentKey, orderKey, child));
+            fresh.add(child);
+          }
+          continue;
+        }
+        // In bulk: one merge into the order index, then walk the parent's
+        // children last to first, so each new element's reference is the
+        // element just placed after it.
+        level.order.insertMany(parentKey, items);
+        const list = level.order.childrenOf(parentKey);
+        let ref: El | null = null;
+        for (let i = list.length - 1; i >= 0; i--) {
+          const child = list[i]![1];
+          if (plan.mounts.has(child) && !fresh.has(child)) {
+            const el = this.build(level, child, parentKey);
+            this.driver.insertBefore(parentEl, el, ref);
+            fresh.add(child);
+            ref = el;
+          } else {
+            ref = level.nodes.get(child) ?? ref;
+          }
+        }
       }
     }
 
@@ -246,7 +281,20 @@ export class Shaper<El> {
 
   // --- internals ----------------------------------------------------------
 
-  private mirrorFor(view: string): Map<string, Map<string, number>> {
+  /** Create a child's element with every attribute applied from the mirrors,
+   *  and register it (not yet attached). */
+  private build(level: Level<El>, child: string, parentKey: string): El {
+    const el = level.shape.template(this.driver, child, this.ancestorKeys(level, parentKey));
+    for (const attr of level.shape.attrs) {
+      const v = this.resolveOne(attr.view, child);
+      if (attr.presence) attr.apply(this.driver, el, v);
+      else if (v !== undefined) attr.apply(this.driver, el, v);
+    }
+    level.nodes.set(child, el);
+    return el;
+  }
+
+  private mirrorFor(view: string): Map<string, MirrorCell> {
     let m = this.mirror.get(view);
     if (!m) {
       m = new Map();
@@ -257,9 +305,10 @@ export class Shaper<El> {
 
   /** The single present (weight > 0) value for a key in a functional view. */
   private resolveOne(view: string, key: string): string | undefined {
-    const byValue = this.mirror.get(view)?.get(key);
-    if (!byValue) return undefined;
-    for (const [value, w] of byValue) {
+    const cell = this.mirror.get(view)?.get(key);
+    if (cell === undefined) return undefined;
+    if (typeof cell === "string") return cell;
+    for (const [value, w] of cell) {
       if (w > 0) return value;
     }
     return undefined;
@@ -352,4 +401,41 @@ interface LevelPlan {
   mounts: Map<string, string>;
   removes: Set<string>;
   reparents: Map<string, { from: string; to: string }>;
+}
+
+/** A mirrored key's contents: its one value at weight 1, or value -> weight. */
+type MirrorCell = string | Map<string, number>;
+
+/** Batches up to this many mounts under one parent insert one at a time. */
+const SMALL_BATCH = 16;
+
+/** Add one delta row to a mirror, keeping a key with exactly one value at
+ *  weight 1 as the bare value. A −old/+new pair stays bare when the −old
+ *  comes first, and collapses back to bare when it comes second. */
+function addRow(m: Map<string, MirrorCell>, key: string, value: string, w: number): void {
+  const cur = m.get(key);
+  if (cur === undefined) {
+    m.set(key, w === 1 ? value : new Map([[value, w]]));
+    return;
+  }
+  let byValue: Map<string, number>;
+  if (typeof cur === "string") {
+    if (cur === value && w === -1) {
+      m.delete(key);
+      return;
+    }
+    byValue = new Map([[cur, 1]]);
+    m.set(key, byValue);
+  } else {
+    byValue = cur;
+  }
+  const next = (byValue.get(value) ?? 0) + w;
+  if (next === 0) byValue.delete(value);
+  else byValue.set(value, next);
+  if (byValue.size === 0) {
+    m.delete(key);
+  } else if (byValue.size === 1) {
+    const [only, weight] = byValue.entries().next().value!;
+    if (weight === 1) m.set(key, only);
+  }
 }

@@ -4,7 +4,7 @@ import {
   BrowserDriver, Shaper, parseStepJson, encodeText, decodeText, encodeAtom, encodeInt, encodeMoney, encodeRel,
   decodeInt, decodeMoney, decodeAtom,
   makeDraggable, makeDropTarget, dragValue, endOf, dropPos, maybeRebalance,
-  type ShapeNode,
+  type DomDriver, type ShapeNode,
 } from "rex-dom";
 import { boot, IndexedDbAdapter, MemoryAdapter, profiler, programKey } from "rex-runtime";
 import PROGRAM from "./board.rex?raw";
@@ -27,20 +27,26 @@ function dispatch(name: string, args: Record<string, unknown>): string[] {
   return res.ids as string[];
 }
 
+let proto_shape_board_list_card: HTMLElement | undefined;
+function build_shape_board_list_card(d: DomDriver<HTMLElement>): HTMLElement {
+  const e0 = d.createElement("div");
+  e0.className = "card";
+  const e1 = d.createElement("input");
+  e0.appendChild(e1);
+  const e2 = d.createElement("button");
+  e2.appendChild(document.createTextNode("x"));
+  e0.appendChild(e2);
+  return e0;
+}
+
 const shape_board_list_card: ShapeNode<HTMLElement> = {
   name: "board#list#card",
   membershipView: "board#list#card",
   orderView: "board#list#card#order",
   template: (d, key) => {
-    const e0 = d.createElement("div");
-    e0.className = "card";
-    makeDraggable(e0, key);
-    const e1 = d.createElement("input");
-    e0.appendChild(e1);
-    const e2 = d.createElement("button");
-    e2.appendChild(document.createTextNode("x"));
-    e0.appendChild(e2);
+    const e0 = d.clone(proto_shape_board_list_card ??= build_shape_board_list_card(d));
     e0.dataset.key = key;
+    makeDraggable(e0, key);
     ((e0.childNodes[0] as HTMLElement)).addEventListener("change", (ev) => {
       const v = encodeText((ev.currentTarget as HTMLInputElement).value);
       const _ids: string[] = [];
@@ -66,22 +72,28 @@ const shape_board_list_card: ShapeNode<HTMLElement> = {
   children: [],
 };
 
+let proto_shape_board_list: HTMLElement | undefined;
+function build_shape_board_list(d: DomDriver<HTMLElement>): HTMLElement {
+  const e0 = d.createElement("section");
+  e0.className = "list";
+  const e1 = d.createElement("header");
+  const e2 = d.createElement("span");
+  e1.appendChild(e2);
+  const e3 = d.createElement("button");
+  e3.appendChild(document.createTextNode("+ card"));
+  e1.appendChild(e3);
+  e0.appendChild(e1);
+  return e0;
+}
+
 const shape_board_list: ShapeNode<HTMLElement> = {
   name: "board#list",
   membershipView: "board#list",
   orderView: "board#list#order",
   template: (d, key) => {
-    const e0 = d.createElement("section");
-    e0.className = "list";
-    makeDropTarget(e0);
-    const e1 = d.createElement("header");
-    const e2 = d.createElement("span");
-    e1.appendChild(e2);
-    const e3 = d.createElement("button");
-    e3.appendChild(document.createTextNode("+ card"));
-    e1.appendChild(e3);
-    e0.appendChild(e1);
+    const e0 = d.clone(proto_shape_board_list ??= build_shape_board_list(d));
     e0.dataset.key = key;
+    makeDropTarget(e0);
     (e0).addEventListener("drop", (ev) => {
       const card = dragValue(ev);
       const pos = encodeText(dropPos(shaper, "board#list#card", key, (ev as DragEvent).clientY, card));

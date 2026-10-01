@@ -180,7 +180,7 @@ pub fn step_result_to_json(res: &StepResult) -> String {
         }
         json_string(&mut out, name);
         out.push(':');
-        append_rows_json(&mut out, &res.view_deltas[*name]);
+        write_rows_json(&mut out, res.view_deltas[*name].triples());
     }
     out.push_str("}}");
     out
@@ -207,20 +207,7 @@ pub fn event_to_json(e: &Event) -> String {
         out.push(':');
         match arg {
             ArgValue::Value(v) => json_string(&mut out, &encode_value(v)),
-            ArgValue::Rel(rows) => {
-                out.push('[');
-                for (ri, (l, r, w)) in rows.iter().enumerate() {
-                    if ri > 0 {
-                        out.push(',');
-                    }
-                    out.push('[');
-                    json_string(&mut out, &encode_value(l));
-                    out.push(',');
-                    json_string(&mut out, &encode_value(r));
-                    let _ = write!(out, ",{w}]");
-                }
-                out.push(']');
-            }
+            ArgValue::Rel(rows) => write_rows_json(&mut out, rows.iter().map(|(l, r, w)| (l, r, *w))),
         }
     }
     out.push_str("},\"cause\":");
@@ -263,18 +250,9 @@ pub fn base_snapshot_to_json(snap: &BaseSnapshot) -> String {
         }
         out.push_str("{\"key\":");
         json_string(&mut out, &input_key_to_string(key));
-        out.push_str(",\"rows\":[");
-        for (ri, (l, r, w)) in rows.iter().enumerate() {
-            if ri > 0 {
-                out.push(',');
-            }
-            out.push('[');
-            json_string(&mut out, &encode_value(l));
-            out.push(',');
-            json_string(&mut out, &encode_value(r));
-            let _ = write!(out, ",{w}]");
-        }
-        out.push_str("]}");
+        out.push_str(",\"rows\":");
+        write_rows_json(&mut out, rows.iter().map(|(l, r, w)| (l, r, *w)));
+        out.push('}');
     }
     out.push_str("]}");
     out
@@ -299,16 +277,37 @@ pub fn rows_to_json(rel: &dyn BinaryRelation) -> String {
 }
 
 fn append_rows_json(out: &mut String, rel: &dyn BinaryRelation) {
+    let rows: Vec<_> = rel.iter().collect();
+    write_rows_json(out, rows.iter().map(|(l, r, w)| (l, r, *w)));
+}
+
+/// The row array for borrowed triples: each value is encoded into one reused
+/// scratch buffer and quoted from there, so a row costs no allocation (P-6;
+/// a 10k-row step used to allocate two `String`s and clone two `Value`s
+/// per row).
+fn write_rows_json<'a>(out: &mut String, rows: impl Iterator<Item = (&'a Value, &'a Value, i64)>) {
+    let mut scratch = String::new();
+    let mut quoted = |out: &mut String, v: &Value| {
+        scratch.clear();
+        write_value(&mut scratch, v);
+        json_string(out, &scratch);
+    };
     out.push('[');
-    for (i, (l, r, w)) in rel.iter().enumerate() {
+    for (i, (l, r, w)) in rows.enumerate() {
         if i > 0 {
             out.push(',');
         }
         out.push('[');
-        json_string(out, &encode_value(&l));
+        quoted(out, l);
         out.push(',');
-        json_string(out, &encode_value(&r));
-        let _ = write!(out, ",{w}]");
+        quoted(out, r);
+        out.push(',');
+        if w == 1 {
+            out.push('1');
+        } else {
+            let _ = write!(out, "{w}");
+        }
+        out.push(']');
     }
     out.push(']');
 }
@@ -324,6 +323,11 @@ pub fn json_quote(s: &str) -> String {
 /// Append a JSON string literal (quotes, escapes) to `out`.
 fn json_string(out: &mut String, s: &str) {
     out.push('"');
+    if !s.bytes().any(|b| b == b'"' || b == b'\\' || b < 0x20) {
+        out.push_str(s);
+        out.push('"');
+        return;
+    }
     for ch in s.chars() {
         match ch {
             '"' => out.push_str("\\\""),

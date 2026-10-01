@@ -28,11 +28,19 @@ export function parseStepJson(json: string): StepDeltas {
  */
 export interface DomDriver<El> {
   createElement(tag: string): El;
+  /** A deep copy of `el` (no listeners): how a template stamps a row from
+   *  its prototype skeleton. */
+  clone(el: El): El;
   setText(el: El, text: string): void;
   setAttr(el: El, name: string, value: string): void;
   /** Insert (or move — the DOM treats attached-node insertion as a move). */
   insertBefore(parent: El, el: El, ref: El | null): void;
   removeChild(parent: El, el: El): void;
+  /** How many child nodes `parent` has (the bulk-clear test). */
+  childCount(parent: El): number;
+  /** Remove every child of `parent` at once — the shaper's bulk path when a
+   *  batch removes all of a parent's children (`tbody.textContent = ""`). */
+  clear(parent: El): void;
 }
 
 /**

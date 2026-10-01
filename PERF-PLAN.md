@@ -461,6 +461,80 @@ Trade-off: the shaper must still accept general (weighted) views for non-functio
 relations, so this adds a second delta form beside the first. The functional flag
 from phase 4 travels in `ShapeIR`, so codegen knows each view's form statically.
 
+**Measured first (2026-09-30, after P-4).** A CPU profile of one click in Chrome
+(`examples/js-framework-benchmark/e2e/profile.spec.ts`, run with `REX_PROFILE=1`),
+split by P-0's `?profile` hook. Create 10k's click handler took 180 ms:
+
+| Part | ms | What |
+|---|---|---|
+| wasm `dispatch` | 49 | arg JSON → `serde_json::Value`, the step, output JSON, then the persistence wrapper serializing and parsing the logged event (all 10k labels) **twice** |
+| `JSON.parse` | 5.6 | the step result |
+| shaper | 119 | DOM construction ~45 (8 `createElement` + `appendChild` per row), **order index ~27** (`compareEncoded` parsed a `BigInt` on every binary-search compare), mirrors and GC ~30, attribute applies ~11 |
+
+Clear 10k took 164 ms, 130 of it in the shaper: `OrderIndex.remove` spliced the front
+of a 10k array per row (O(n²), 52 ms), plus 10k separate `removeChild` calls (40 ms).
+
+So against elysium (all TS, a less advanced engine) **the gap was the shaper, not the
+boundary.** JSON parse is about 6 ms and the wasm engine step is well under half of
+`dispatch`. Elysium does the same DOM work, but it doesn't pay an order index, a
+second copy of the data in mirrors, or a double log read.
+
+**First P-6 cut (2026-09-30)**, in order of measured payoff. None of it changes the
+wire format:
+- *Order index* (`rex-dom/src/order.ts`): keys are decoded once per entry
+  (`sortKey`: a number when exact, a bigint otherwise, ids as pairs), and
+  `insertMany`/`removeMany` take one merge or filter pass per parent. The shaper
+  groups removes and mounts by parent. A bulk mount walks the parent's children last
+  to first, so each new element's `insertBefore` reference is the element just
+  placed; batches of 16 or fewer go one at a time.
+- *Bulk clear:* when a batch removes every child a parent element has (at least 2,
+  checked against `childNodes.length`), one `textContent = ""` replaces N
+  `removeChild` calls. `DomDriver` gains `childCount`, `clear` and `clone`.
+- *Single-value mirrors:* a mirror key holds its value directly when it has exactly
+  one at weight 1, and a value → weight map only otherwise; it collapses back
+  afterwards. This needs no functional flag, so the `ShapeIR` change can wait for
+  the change-record wire format.
+- *Template cloning* (codegen): each level builds a prototype skeleton once and
+  rows `cloneNode` it. Listeners, `draggable`/`dropTarget` and autofocus's `focus()`
+  are still applied per row, by child-index path.
+- *Engine side:* view rows and event-log rows are written straight from borrowed
+  triples into the output buffer, with one scratch `String` and no `Value` clones;
+  `json_string` copies escape-free strings whole; `seed_deltas` resolves each input
+  key once per transaction instead of with two hash lookups per row. The persistence
+  wrapper keeps events it has read but not yet confirmed, so each event is
+  serialized and parsed once rather than twice (a failed append still retries them).
+
+Result, same profile: create 10k click handler 180 → **121 ms** (`dispatch` 49 → 40,
+shaper 119 → 70); clear 10k 164 → **73 ms** (shaper 130 → 47, of which 30 ms is the
+browser's own `textContent = ""`); create 1k 13.4 → 10.6 ms.
+
+Official harness, CPU benchmarks only (Chrome, medians, ms, total / script, P-4 → this
+cut; vanillajs and elysium are §1's figures):
+
+| Benchmark | Rex after P-4 | Rex now | vanillajs | elysium |
+|---|---|---|---|---|
+| create 1,000 | 49.0 / 18.3 | 45.0 / 13.5 | 85.1 / 6.4 | 107.6 / 19.1 |
+| replace 1,000 | 61.5 / 31.2 | 53.7 / 21.3 | 99.9 / 18.0 | 124.7 / 31.5 |
+| update every 10th | 27.8 / 5.3 | 26.1 / 4.8 | 20.2 / 1.1 | 36.7 / 6.0 |
+| create 10,000 | 531.3 / 190.1 | **483.6 / 126.7** | 353.4 / 26.3 | 508.5 / 152.8 |
+| append 1,000 | 59.6 / 20.0 | 54.9 / 14.9 | 41.1 / 2.9 | 53.5 / 16.1 |
+| clear 1,000 (4× throttle) | 64.0 / 61.1 | 41.3 / 37.5 | 19.3 / 15.4 | 34.5 / 30.8 |
+
+Select, swap and remove-one are unchanged within noise. Rex's script time is now below
+elysium's everywhere except clear (37.5 vs 30.8).
+
+What is left, by size (create 10k): `template` self time 12 ms (child-index
+navigation, `dataset.key`, two listener closures per row; event delegation on the
+level's slot would remove the closures), `cloneNode` 11, mirrors plus `applyStep` about
+15, GC 10, attribute applies 9, output JSON about 8, and the engine step itself. Next:
+- **Event delegation** for row listeners: one listener per level slot, keyed by
+  `data-key`.
+- **Change records** for functional views (the plan above). They halve update
+  traffic but do nothing for create, which is all `+` rows.
+- **Engine:** SipHash still shows up (`Transaction::touched`, `HashMap<InputKey, _>`).
+  Interning takes a global mutex per text (P-5). Event args go through a
+  `serde_json::Value` tree.
+
 ### Phase 7: startup (first paint 1.58 s, 203 KB compressed)
 
 The browser downloads the parser, checker, desugarer and lowering, parses the `.rex`
@@ -511,5 +585,5 @@ That target is unmeasured.
 | P-4a | Multiplicity inference in lowering (landed); carried to `ShapeIR` (moved to P-6) | P-1 |
 | P-4b | Column integrals for entity-keyed relations (landed); packed ids (moved to P-5) | P-3, P-4a |
 | P-5 | `Value` shrink; thread-local interner | none |
-| P-6 | Functional change records across the boundary; `Map<key, value>` mirrors | P-4a, P-0 |
+| P-6 | Shaper bulk paths, single-value mirrors, template cloning (first cut landed); functional change records across the boundary | P-4a, P-0 |
 | P-7 | Startup measurement, then profile and streaming fixes | none |

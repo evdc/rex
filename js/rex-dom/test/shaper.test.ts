@@ -122,6 +122,7 @@ describe("the #1 rule: same-key −/+ fuses to ONE op", () => {
       setAttr: 0,
       insertBefore: 0,
       removeChild: 0,
+      clear: 0,
     });
   });
 

@@ -116,3 +116,72 @@ describe("shaper with typed order", () => {
     expect(ids[8]).toBe("#1:2");
   });
 });
+
+describe("bulk paths (P-6)", () => {
+  const keys = (root: SpyEl) => root.children.map((c) => c.attrs.key);
+
+  test("insertMany and removeMany keep the typed order", () => {
+    const ix = new OrderIndex();
+    ix.insertMany("p", [["i:5", "e"], ["i:1", "a"], ["i:3", "c"]]);
+    ix.insertMany("p", [["i:4", "d"], ["i:2", "b"], ["i:6", "f"]]); // interleaved merge
+    ix.insertMany("p", [["i:7", "g"], ["i:8", "h"]]); // append
+    expect(ix.childrenOf("p").map((e) => e[1])).toEqual(["a", "b", "c", "d", "e", "f", "g", "h"]);
+    ix.removeMany("p", new Set(["a", "d", "h"]));
+    expect(ix.childrenOf("p").map((e) => e[1])).toEqual(["b", "c", "e", "f", "g"]);
+    ix.removeMany("p", new Set(["b", "c", "e", "f", "g"]));
+    expect(ix.childrenOf("p")).toEqual([]);
+  });
+
+  test("a bulk mount interleaves with mounted rows, in order", () => {
+    // 10 odd-positioned rows mounted, then 40 more in shuffled delta order
+    // (some between, some past the end): one batch, bulk path.
+    const { driver, root, shaper } = rows(0);
+    shaper.applyStep({
+      row: Array.from({ length: 10 }, (_, i) => [`#1:${2 * i + 1}`, "u", 1] as const),
+      row_pos: Array.from({ length: 10 }, (_, i) => [`#1:${2 * i + 1}`, `i:${2 * i + 1}`, 1] as const),
+    });
+    const fresh = [...Array.from({ length: 10 }, (_, i) => 2 * i + 2), ...Array.from({ length: 30 }, (_, i) => 21 + i)];
+    fresh.sort((a, b) => ((a * 7919) % 97) - ((b * 7919) % 97));
+    driver.resetCounts();
+    shaper.applyStep({
+      row: fresh.map((n) => [`#1:${n}`, "u", 1] as const),
+      row_pos: fresh.map((n) => [`#1:${n}`, `i:${n}`, 1] as const),
+    });
+    expect(keys(root)).toEqual(Array.from({ length: 50 }, (_, i) => `#1:${i + 1}`));
+    expect(driver.counts.insertBefore).toBe(40);
+  });
+
+  test("removing every child of a parent is one clear", () => {
+    const { driver, root, shaper } = rows(30);
+    shaper.applyStep({
+      row: Array.from({ length: 30 }, (_, i) => [`#1:${i + 1}`, "u", -1] as const),
+      row_pos: Array.from({ length: 30 }, (_, i) => [`#1:${i + 1}`, `i:${i + 1}`, -1] as const),
+    });
+    expect(driver.counts).toMatchObject({ clear: 1, removeChild: 0 });
+    expect(root.children).toEqual([]);
+    expect(shaper.orderedChildren("row", "")).toEqual([]);
+    // ...and the level still works afterwards.
+    shaper.applyStep({ row: [["#1:99", "u", 1]], row_pos: [["#1:99", "i:1", 1]] });
+    expect(keys(root)).toEqual(["#1:99"]);
+  });
+
+  test("removing most children stays per-child removes", () => {
+    const { driver, root, shaper } = rows(30);
+    shaper.applyStep({
+      row: Array.from({ length: 29 }, (_, i) => [`#1:${i + 1}`, "u", -1] as const),
+      row_pos: Array.from({ length: 29 }, (_, i) => [`#1:${i + 1}`, `i:${i + 1}`, -1] as const),
+    });
+    expect(driver.counts).toMatchObject({ clear: 0, removeChild: 29 });
+    expect(keys(root)).toEqual(["#1:30"]);
+  });
+
+  test("a move whose +new row arrives before its −old row", () => {
+    // The mirror holds two values for a moment, then collapses to one.
+    const { driver, root, shaper } = rows(3);
+    shaper.applyStep({ row_pos: [["#1:1", "i:9", 1], ["#1:1", "i:1", -1]] });
+    expect(keys(root)).toEqual(["#1:2", "#1:3", "#1:1"]);
+    expect(driver.counts.insertBefore).toBe(1);
+    shaper.applyStep({ row_pos: [["#1:1", "i:9", -1], ["#1:1", "i:0", 1]] });
+    expect(keys(root)).toEqual(["#1:1", "#1:2", "#1:3"]);
+  });
+});

@@ -75,7 +75,7 @@ impl Emit {
         self.line("  BrowserDriver, Shaper, parseStepJson, encodeText, decodeText, encodeAtom, encodeInt, encodeMoney, encodeRel,");
         self.line("  decodeInt, decodeMoney, decodeAtom,");
         self.line("  makeDraggable, makeDropTarget, dragValue, endOf, dropPos, maybeRebalance,");
-        self.line("  type ShapeNode,");
+        self.line("  type DomDriver, type ShapeNode,");
         self.line("} from \"rex-dom\";");
         self.line("import { boot, IndexedDbAdapter, MemoryAdapter, profiler, programKey } from \"rex-runtime\";");
         self.line(&format!("import PROGRAM from \"{program_import}\";"));
@@ -124,6 +124,16 @@ impl Emit {
             self.level(child);
         }
         let var = var_name(&level.name);
+        // The level's prototype skeleton, built on first mount.
+        let b = TemplateBuilder::skeleton(&level.template);
+        self.line(&format!("let proto_{var}: HTMLElement | undefined;"));
+        self.line(&format!("function build_{var}(d: DomDriver<HTMLElement>): HTMLElement {{"));
+        for l in &b.emit_lines {
+            self.line(&format!("  {l}"));
+        }
+        self.line("  return e0;");
+        self.line("}");
+        self.line("");
         self.line(&format!(
             "const {var}: ShapeNode<HTMLElement> = {{"
         ));
@@ -156,13 +166,16 @@ impl Emit {
             "  template: (d, key{}) => {{",
             if uses_ancestors { ", ancestors" } else { "" }
         ));
-        // Build the DOM skeleton; e0 is the root.
-        let mut b = TemplateBuilder { emit_lines: Vec::new(), counter: 0 };
-        b.build(&level.template, None);
-        for l in &b.emit_lines {
+        // Each row clones a prototype skeleton built once (P-6): one
+        // `cloneNode` instead of a `createElement` per element. What a clone
+        // cannot carry — listeners, key-specific setup — is applied per row.
+        let var = var_name(&level.name);
+        let b = TemplateBuilder::skeleton(&level.template);
+        self.line(&format!("    const e0 = d.clone(proto_{var} ??= build_{var}(d));"));
+        self.line("    e0.dataset.key = key;");
+        for l in &b.instance_lines {
             self.line(&format!("    {l}"));
         }
-        self.line("    e0.dataset.key = key;");
         // Event listeners, navigated from e0 by child-index path.
         for ev in &level.events {
             self.event(level, ev);
@@ -346,19 +359,30 @@ impl Emit {
 }
 
 /// Builds a level's DOM skeleton into JS statement lines. `e0` is the root.
+/// `emit_lines` build the shared prototype; `instance_lines` run on each
+/// clone of it, against elements navigated from `e0` by child-index path.
 struct TemplateBuilder {
     emit_lines: Vec<String>,
+    instance_lines: Vec<String>,
     counter: usize,
 }
 
 impl TemplateBuilder {
-    /// Emit statements creating `tpl` as element `e{n}`; if `parent` is set,
-    /// append to it. Returns the var index used.
-    fn build(&mut self, tpl: &Tpl, parent: Option<usize>) -> usize {
+    fn skeleton(tpl: &Tpl) -> TemplateBuilder {
+        let mut b = TemplateBuilder { emit_lines: Vec::new(), instance_lines: Vec::new(), counter: 0 };
+        b.build(tpl, None, &[]);
+        b
+    }
+
+    /// Emit statements creating `tpl` as element `e{n}` at child-index
+    /// `path` from the root; if `parent` is set, append to it. Returns the
+    /// var index used.
+    fn build(&mut self, tpl: &Tpl, parent: Option<usize>, path: &[usize]) -> usize {
         match tpl {
             Tpl::Elem { tag, classes, modifiers, attrs, children } => {
                 let n = self.counter;
                 self.counter += 1;
+                let at = nav_expr("e0", path);
                 // Every element goes through the driver (`d`) so a template is
                 // driver-agnostic; only text nodes use the DOM directly (the
                 // driver models elements, not text nodes).
@@ -374,21 +398,24 @@ impl TemplateBuilder {
                 }
                 for m in modifiers {
                     match m.as_str() {
-                        "draggable" => self.emit_lines.push(format!("makeDraggable(e{n}, key);")),
-                        "dropTarget" => self.emit_lines.push(format!("makeDropTarget(e{n});")),
+                        // Listeners and the row key: per clone.
+                        "draggable" => self.instance_lines.push(format!("makeDraggable({at}, key);")),
+                        "dropTarget" => self.instance_lines.push(format!("makeDropTarget({at});")),
                         // A boolean attribute; a node inserted after load is
                         // not autofocused by the browser, so focus it too.
                         "autofocus" => {
                             self.emit_lines.push(format!("e{n}.setAttribute(\"autofocus\", \"\");"));
-                            self.emit_lines.push(format!("setTimeout(() => e{n}.focus(), 0);"));
+                            self.instance_lines.push(format!("{{ const el = {at}; setTimeout(() => el.focus(), 0); }}"));
                         }
                         other => self
                             .emit_lines
                             .push(format!("e{n}.classList.add({});", js_str(other))),
                     }
                 }
-                for child in children {
-                    self.build(child, Some(n));
+                for (i, child) in children.iter().enumerate() {
+                    let mut child_path = path.to_vec();
+                    child_path.push(i);
+                    self.build(child, Some(n), &child_path);
                 }
                 if let Some(p) = parent {
                     self.emit_lines.push(format!("e{p}.appendChild(e{n});"));

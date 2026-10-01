@@ -416,12 +416,23 @@ impl Circuit {
     /// any view that reads it is kept), then seed each input node's delta
     /// from the transaction.
     fn seed_deltas(&mut self, tx: &Transaction) -> Vec<Batch> {
-        for (key, _, _, _) in &tx.deltas {
-            self.input(*key);
-        }
         let mut rows: Vec<Vec<Row>> = vec![Vec::new(); self.nodes.len()];
+        // A transaction names a handful of tables, row after row: resolve
+        // each key once, not with two hash lookups per row.
+        let mut seen: Vec<(InputKey, NodeId)> = Vec::new();
         for (key, l, r, w) in &tx.deltas {
-            rows[self.inputs[key].0].push((l.clone(), r.clone(), *w));
+            let id = match seen.iter().find(|(k, _)| k == key) {
+                Some((_, id)) => *id,
+                None => {
+                    let id = self.input(*key);
+                    if rows.len() < self.nodes.len() {
+                        rows.resize(self.nodes.len(), Vec::new());
+                    }
+                    seen.push((*key, id));
+                    id
+                }
+            };
+            rows[id.0].push((l.clone(), r.clone(), *w));
         }
         rows.into_iter().map(Batch::from_rows).collect()
     }

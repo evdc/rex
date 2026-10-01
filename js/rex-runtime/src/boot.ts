@@ -88,19 +88,26 @@ export async function boot<A extends EngineApp>(opts: BootOptions<A>): Promise<P
   /** The next `seq` already handed to an append (for snapshot pacing only). */
   let queued = cursor;
 
-  /** Append everything from `cursor` on, read when the append *runs*: that
-   *  covers this call's events plus any a failed earlier append left behind. */
+  /** Events read from the log but not yet confirmed by the adapter, oldest
+   *  first. Each event is read (serialized and parsed) once, by
+   *  `persistTail`; a failed append leaves its events here for the next. */
+  let unconfirmed: LoggedEvent[] = [];
+
+  /** Append everything from `cursor` on, as it stands when the append *runs*:
+   *  this call's events plus any a failed earlier append left behind. */
   const appendUnconfirmed = (): Promise<void> =>
     enqueue(async () => {
-      const events = readLog(app, cursor);
+      const events = unconfirmed.filter((e) => e.seq >= cursor);
       if (events.length === 0) return;
       await adapter.appendEvents(events);
       cursor = Math.max(cursor, events[events.length - 1]!.seq + 1);
+      unconfirmed = unconfirmed.filter((e) => e.seq >= cursor);
     });
 
   const persistTail = () => {
     const fresh = readLog(app, queued);
     if (fresh.length === 0) return;
+    for (const e of fresh) unconfirmed.push(e);
     queued = fresh[fresh.length - 1]!.seq + 1;
     sinceSnapshot += fresh.length;
     void appendUnconfirmed();

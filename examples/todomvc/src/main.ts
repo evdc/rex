@@ -4,7 +4,7 @@ import {
   BrowserDriver, Shaper, parseStepJson, encodeText, decodeText, encodeAtom, encodeInt, encodeMoney, encodeRel,
   decodeInt, decodeMoney, decodeAtom,
   makeDraggable, makeDropTarget, dragValue, endOf, dropPos, maybeRebalance,
-  type ShapeNode,
+  type DomDriver, type ShapeNode,
 } from "rex-dom";
 import { boot, IndexedDbAdapter, MemoryAdapter, profiler, programKey } from "rex-runtime";
 import PROGRAM from "./app.rex?raw";
@@ -27,28 +27,34 @@ function dispatch(name: string, args: Record<string, unknown>): string[] {
   return res.ids as string[];
 }
 
+let proto_shape_main_unit_if1_visible: HTMLElement | undefined;
+function build_shape_main_unit_if1_visible(d: DomDriver<HTMLElement>): HTMLElement {
+  const e0 = d.createElement("li");
+  const e1 = d.createElement("div");
+  e1.className = "view";
+  const e2 = d.createElement("input");
+  e2.className = "toggle";
+  e2.setAttribute("type", "checkbox");
+  e1.appendChild(e2);
+  const e3 = d.createElement("label");
+  e1.appendChild(e3);
+  const e4 = d.createElement("button");
+  e4.className = "destroy";
+  e1.appendChild(e4);
+  e0.appendChild(e1);
+  const e5 = d.createElement("input");
+  e5.className = "edit";
+  e0.appendChild(e5);
+  return e0;
+}
+
 const shape_main_unit_if1_visible: ShapeNode<HTMLElement> = {
   name: "main#unit#if1#visible",
   membershipView: "main#unit#if1#visible",
   orderView: "main#unit#if1#visible#order",
   slot: (root) => (root.childNodes[2] as HTMLElement),
   template: (d, key) => {
-    const e0 = d.createElement("li");
-    const e1 = d.createElement("div");
-    e1.className = "view";
-    const e2 = d.createElement("input");
-    e2.className = "toggle";
-    e2.setAttribute("type", "checkbox");
-    e1.appendChild(e2);
-    const e3 = d.createElement("label");
-    e1.appendChild(e3);
-    const e4 = d.createElement("button");
-    e4.className = "destroy";
-    e1.appendChild(e4);
-    e0.appendChild(e1);
-    const e5 = d.createElement("input");
-    e5.className = "edit";
-    e0.appendChild(e5);
+    const e0 = d.clone(proto_shape_main_unit_if1_visible ??= build_shape_main_unit_if1_visible(d));
     e0.dataset.key = key;
     (((e0.childNodes[0] as HTMLElement).childNodes[0] as HTMLElement)).addEventListener("change", (ev) => {
       const _ids: string[] = [];
@@ -124,24 +130,30 @@ const shape_main_unit_if1_visible: ShapeNode<HTMLElement> = {
   children: [],
 };
 
+let proto_shape_main_unit_if1: HTMLElement | undefined;
+function build_shape_main_unit_if1(d: DomDriver<HTMLElement>): HTMLElement {
+  const e0 = d.createElement("section");
+  e0.className = "main";
+  const e1 = d.createElement("input");
+  e1.className = "toggle-all";
+  e1.setAttribute("id", "toggle-all");
+  e1.setAttribute("type", "checkbox");
+  e0.appendChild(e1);
+  const e2 = d.createElement("label");
+  e2.setAttribute("for", "toggle-all");
+  e2.appendChild(document.createTextNode("Mark all as complete"));
+  e0.appendChild(e2);
+  const e3 = d.createElement("ul");
+  e3.className = "todo-list";
+  e0.appendChild(e3);
+  return e0;
+}
+
 const shape_main_unit_if1: ShapeNode<HTMLElement> = {
   name: "main#unit#if1",
   membershipView: "main#unit#if1",
   template: (d, key) => {
-    const e0 = d.createElement("section");
-    e0.className = "main";
-    const e1 = d.createElement("input");
-    e1.className = "toggle-all";
-    e1.setAttribute("id", "toggle-all");
-    e1.setAttribute("type", "checkbox");
-    e0.appendChild(e1);
-    const e2 = d.createElement("label");
-    e2.setAttribute("for", "toggle-all");
-    e2.appendChild(document.createTextNode("Mark all as complete"));
-    e0.appendChild(e2);
-    const e3 = d.createElement("ul");
-    e3.className = "todo-list";
-    e0.appendChild(e3);
+    const e0 = d.clone(proto_shape_main_unit_if1 ??= build_shape_main_unit_if1(d));
     e0.dataset.key = key;
     ((e0.childNodes[0] as HTMLElement)).addEventListener("change", (ev) => {
       const done = ((ev.currentTarget as HTMLInputElement).checked ? encodeAtom("True") : encodeAtom("False"));
@@ -162,13 +174,19 @@ const shape_main_unit_if1: ShapeNode<HTMLElement> = {
   children: [shape_main_unit_if1_visible],
 };
 
+let proto_shape_main_unit_if5_if10: HTMLElement | undefined;
+function build_shape_main_unit_if5_if10(d: DomDriver<HTMLElement>): HTMLElement {
+  const e0 = d.createElement("button");
+  e0.className = "clear-completed";
+  e0.appendChild(document.createTextNode("Clear completed"));
+  return e0;
+}
+
 const shape_main_unit_if5_if10: ShapeNode<HTMLElement> = {
   name: "main#unit#if5#if10",
   membershipView: "main#unit#if5#if10",
   template: (d, key) => {
-    const e0 = d.createElement("button");
-    e0.className = "clear-completed";
-    e0.appendChild(document.createTextNode("Clear completed"));
+    const e0 = d.clone(proto_shape_main_unit_if5_if10 ??= build_shape_main_unit_if5_if10(d));
     e0.dataset.key = key;
     (e0).addEventListener("click", (ev) => {
       const _ids: string[] = [];
@@ -181,36 +199,42 @@ const shape_main_unit_if5_if10: ShapeNode<HTMLElement> = {
   children: [],
 };
 
+let proto_shape_main_unit_if5: HTMLElement | undefined;
+function build_shape_main_unit_if5(d: DomDriver<HTMLElement>): HTMLElement {
+  const e0 = d.createElement("footer");
+  e0.className = "footer";
+  const e1 = d.createElement("span");
+  e1.className = "todo-count";
+  const e2 = d.createElement("strong");
+  e1.appendChild(e2);
+  e1.appendChild(document.createTextNode(" items left"));
+  e0.appendChild(e1);
+  const e3 = d.createElement("ul");
+  e3.className = "filters";
+  const e4 = d.createElement("li");
+  const e5 = d.createElement("a");
+  e5.appendChild(document.createTextNode("All"));
+  e4.appendChild(e5);
+  e3.appendChild(e4);
+  const e6 = d.createElement("li");
+  const e7 = d.createElement("a");
+  e7.appendChild(document.createTextNode("Active"));
+  e6.appendChild(e7);
+  e3.appendChild(e6);
+  const e8 = d.createElement("li");
+  const e9 = d.createElement("a");
+  e9.appendChild(document.createTextNode("Completed"));
+  e8.appendChild(e9);
+  e3.appendChild(e8);
+  e0.appendChild(e3);
+  return e0;
+}
+
 const shape_main_unit_if5: ShapeNode<HTMLElement> = {
   name: "main#unit#if5",
   membershipView: "main#unit#if5",
   template: (d, key) => {
-    const e0 = d.createElement("footer");
-    e0.className = "footer";
-    const e1 = d.createElement("span");
-    e1.className = "todo-count";
-    const e2 = d.createElement("strong");
-    e1.appendChild(e2);
-    e1.appendChild(document.createTextNode(" items left"));
-    e0.appendChild(e1);
-    const e3 = d.createElement("ul");
-    e3.className = "filters";
-    const e4 = d.createElement("li");
-    const e5 = d.createElement("a");
-    e5.appendChild(document.createTextNode("All"));
-    e4.appendChild(e5);
-    e3.appendChild(e4);
-    const e6 = d.createElement("li");
-    const e7 = d.createElement("a");
-    e7.appendChild(document.createTextNode("Active"));
-    e6.appendChild(e7);
-    e3.appendChild(e6);
-    const e8 = d.createElement("li");
-    const e9 = d.createElement("a");
-    e9.appendChild(document.createTextNode("Completed"));
-    e8.appendChild(e9);
-    e3.appendChild(e8);
-    e0.appendChild(e3);
+    const e0 = d.clone(proto_shape_main_unit_if5 ??= build_shape_main_unit_if5(d));
     e0.dataset.key = key;
     ((((e0.childNodes[1] as HTMLElement).childNodes[0] as HTMLElement).childNodes[0] as HTMLElement)).addEventListener("click", (ev) => {
       const _ids: string[] = [];
@@ -258,25 +282,31 @@ const shape_main_unit_if5: ShapeNode<HTMLElement> = {
   children: [shape_main_unit_if5_if10],
 };
 
+let proto_shape_main_unit: HTMLElement | undefined;
+function build_shape_main_unit(d: DomDriver<HTMLElement>): HTMLElement {
+  const e0 = d.createElement("section");
+  e0.className = "todoapp";
+  const e1 = d.createElement("header");
+  e1.className = "header";
+  const e2 = d.createElement("h1");
+  e2.appendChild(document.createTextNode("todos"));
+  e1.appendChild(e2);
+  const e3 = d.createElement("input");
+  e3.className = "new-todo";
+  e3.setAttribute("placeholder", "What needs to be done?");
+  e3.setAttribute("autofocus", "");
+  e1.appendChild(e3);
+  e0.appendChild(e1);
+  return e0;
+}
+
 const shape_main_unit: ShapeNode<HTMLElement> = {
   name: "main#unit",
   membershipView: "main#unit",
   template: (d, key) => {
-    const e0 = d.createElement("section");
-    e0.className = "todoapp";
-    const e1 = d.createElement("header");
-    e1.className = "header";
-    const e2 = d.createElement("h1");
-    e2.appendChild(document.createTextNode("todos"));
-    e1.appendChild(e2);
-    const e3 = d.createElement("input");
-    e3.className = "new-todo";
-    e3.setAttribute("placeholder", "What needs to be done?");
-    e3.setAttribute("autofocus", "");
-    setTimeout(() => e3.focus(), 0);
-    e1.appendChild(e3);
-    e0.appendChild(e1);
+    const e0 = d.clone(proto_shape_main_unit ??= build_shape_main_unit(d));
     e0.dataset.key = key;
+    { const el = ((e0.childNodes[0] as HTMLElement).childNodes[1] as HTMLElement); setTimeout(() => el.focus(), 0); }
     (((e0.childNodes[0] as HTMLElement).childNodes[1] as HTMLElement)).addEventListener("keydown", (ev) => {
       if (!["Enter"].includes((ev as KeyboardEvent).key)) return;
       const text = encodeText((ev.currentTarget as HTMLInputElement).value);

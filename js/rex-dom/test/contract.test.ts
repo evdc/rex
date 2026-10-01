@@ -69,7 +69,7 @@ describe("contract fixtures (real engine deltas through the real shaper)", () =>
     shaper.applyStep(loadStep("01-rename"));
     expect(shaper.el("board#list#card", "#1:0")).toBe(before);
     expect(before!.text).toBe("Design the schema");
-    expect(driver.counts).toEqual({ createElement: 0, setText: 1, setAttr: 0, insertBefore: 0, removeChild: 0 });
+    expect(driver.counts).toEqual({ createElement: 0, setText: 1, setAttr: 0, insertBefore: 0, removeChild: 0, clear: 0 });
   });
 
   test("02-reorder: exactly one insertBefore, no create/remove", () => {
@@ -96,7 +96,7 @@ describe("contract fixtures (real engine deltas through the real shaper)", () =>
     const { driver, shaper } = setup();
     shaper.applyStep(loadStep("04-delete"));
     expect(shaper.el("board#list#card", "#1:1")).toBeUndefined();
-    expect(driver.counts).toEqual({ createElement: 0, setText: 0, setAttr: 0, insertBefore: 0, removeChild: 1 });
+    expect(driver.counts).toEqual({ createElement: 0, setText: 0, setAttr: 0, insertBefore: 0, removeChild: 1, clear: 0 });
   });
 
   test("05-insert: a fresh mount, no removals", () => {

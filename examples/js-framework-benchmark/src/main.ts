@@ -4,7 +4,7 @@ import {
   BrowserDriver, Shaper, parseStepJson, encodeText, decodeText, encodeAtom, encodeInt, encodeMoney, encodeRel,
   decodeInt, decodeMoney, decodeAtom,
   makeDraggable, makeDropTarget, dragValue, endOf, dropPos, maybeRebalance,
-  type ShapeNode,
+  type DomDriver, type ShapeNode,
 } from "rex-dom";
 import { boot, IndexedDbAdapter, MemoryAdapter, profiler, programKey } from "rex-runtime";
 import PROGRAM from "./app.rex?raw";
@@ -28,33 +28,39 @@ function dispatch(name: string, args: Record<string, unknown>): string[] {
   return res.ids as string[];
 }
 
+let proto_shape_main_unit_row: HTMLElement | undefined;
+function build_shape_main_unit_row(d: DomDriver<HTMLElement>): HTMLElement {
+  const e0 = d.createElement("tr");
+  const e1 = d.createElement("td");
+  e1.className = "col-md-1";
+  e0.appendChild(e1);
+  const e2 = d.createElement("td");
+  e2.className = "col-md-4";
+  const e3 = d.createElement("a");
+  e2.appendChild(e3);
+  e0.appendChild(e2);
+  const e4 = d.createElement("td");
+  e4.className = "col-md-1";
+  const e5 = d.createElement("a");
+  const e6 = d.createElement("span");
+  e6.className = "glyphicon glyphicon-remove remove";
+  e6.setAttribute("aria-hidden", "true");
+  e5.appendChild(e6);
+  e4.appendChild(e5);
+  e0.appendChild(e4);
+  const e7 = d.createElement("td");
+  e7.className = "col-md-6";
+  e0.appendChild(e7);
+  return e0;
+}
+
 const shape_main_unit_row: ShapeNode<HTMLElement> = {
   name: "main#unit#row",
   membershipView: "main#unit#row",
   orderView: "main#unit#row#order",
   slot: (root) => ((root.childNodes[1] as HTMLElement).childNodes[0] as HTMLElement),
   template: (d, key) => {
-    const e0 = d.createElement("tr");
-    const e1 = d.createElement("td");
-    e1.className = "col-md-1";
-    e0.appendChild(e1);
-    const e2 = d.createElement("td");
-    e2.className = "col-md-4";
-    const e3 = d.createElement("a");
-    e2.appendChild(e3);
-    e0.appendChild(e2);
-    const e4 = d.createElement("td");
-    e4.className = "col-md-1";
-    const e5 = d.createElement("a");
-    const e6 = d.createElement("span");
-    e6.className = "glyphicon glyphicon-remove remove";
-    e6.setAttribute("aria-hidden", "true");
-    e5.appendChild(e6);
-    e4.appendChild(e5);
-    e0.appendChild(e4);
-    const e7 = d.createElement("td");
-    e7.className = "col-md-6";
-    e0.appendChild(e7);
+    const e0 = d.clone(proto_shape_main_unit_row ??= build_shape_main_unit_row(d));
     e0.dataset.key = key;
     (((e0.childNodes[1] as HTMLElement).childNodes[0] as HTMLElement)).addEventListener("click", (ev) => {
       const _ids: string[] = [];
@@ -90,94 +96,100 @@ const shape_main_unit_row: ShapeNode<HTMLElement> = {
   children: [],
 };
 
+let proto_shape_main_unit: HTMLElement | undefined;
+function build_shape_main_unit(d: DomDriver<HTMLElement>): HTMLElement {
+  const e0 = d.createElement("div");
+  e0.className = "container";
+  const e1 = d.createElement("div");
+  e1.className = "jumbotron";
+  const e2 = d.createElement("div");
+  e2.className = "row";
+  const e3 = d.createElement("div");
+  e3.className = "col-md-6";
+  const e4 = d.createElement("h1");
+  e4.appendChild(document.createTextNode("Rex (keyed)"));
+  e3.appendChild(e4);
+  e2.appendChild(e3);
+  const e5 = d.createElement("div");
+  e5.className = "col-md-6";
+  const e6 = d.createElement("div");
+  e6.className = "row";
+  const e7 = d.createElement("div");
+  e7.className = "col-sm-6 smallpad";
+  const e8 = d.createElement("button");
+  e8.className = "btn btn-primary btn-block";
+  e8.setAttribute("id", "run");
+  e8.setAttribute("type", "button");
+  e8.appendChild(document.createTextNode("Create 1,000 rows"));
+  e7.appendChild(e8);
+  e6.appendChild(e7);
+  const e9 = d.createElement("div");
+  e9.className = "col-sm-6 smallpad";
+  const e10 = d.createElement("button");
+  e10.className = "btn btn-primary btn-block";
+  e10.setAttribute("id", "runlots");
+  e10.setAttribute("type", "button");
+  e10.appendChild(document.createTextNode("Create 10,000 rows"));
+  e9.appendChild(e10);
+  e6.appendChild(e9);
+  const e11 = d.createElement("div");
+  e11.className = "col-sm-6 smallpad";
+  const e12 = d.createElement("button");
+  e12.className = "btn btn-primary btn-block";
+  e12.setAttribute("id", "add");
+  e12.setAttribute("type", "button");
+  e12.appendChild(document.createTextNode("Append 1,000 rows"));
+  e11.appendChild(e12);
+  e6.appendChild(e11);
+  const e13 = d.createElement("div");
+  e13.className = "col-sm-6 smallpad";
+  const e14 = d.createElement("button");
+  e14.className = "btn btn-primary btn-block";
+  e14.setAttribute("id", "update");
+  e14.setAttribute("type", "button");
+  e14.appendChild(document.createTextNode("Update every 10th row"));
+  e13.appendChild(e14);
+  e6.appendChild(e13);
+  const e15 = d.createElement("div");
+  e15.className = "col-sm-6 smallpad";
+  const e16 = d.createElement("button");
+  e16.className = "btn btn-primary btn-block";
+  e16.setAttribute("id", "clear");
+  e16.setAttribute("type", "button");
+  e16.appendChild(document.createTextNode("Clear"));
+  e15.appendChild(e16);
+  e6.appendChild(e15);
+  const e17 = d.createElement("div");
+  e17.className = "col-sm-6 smallpad";
+  const e18 = d.createElement("button");
+  e18.className = "btn btn-primary btn-block";
+  e18.setAttribute("id", "swaprows");
+  e18.setAttribute("type", "button");
+  e18.appendChild(document.createTextNode("Swap Rows"));
+  e17.appendChild(e18);
+  e6.appendChild(e17);
+  e5.appendChild(e6);
+  e2.appendChild(e5);
+  e1.appendChild(e2);
+  e0.appendChild(e1);
+  const e19 = d.createElement("table");
+  e19.className = "table table-hover table-striped test-data";
+  const e20 = d.createElement("tbody");
+  e20.setAttribute("id", "tbody");
+  e19.appendChild(e20);
+  e0.appendChild(e19);
+  const e21 = d.createElement("span");
+  e21.className = "preloadicon glyphicon glyphicon-remove";
+  e21.setAttribute("aria-hidden", "true");
+  e0.appendChild(e21);
+  return e0;
+}
+
 const shape_main_unit: ShapeNode<HTMLElement> = {
   name: "main#unit",
   membershipView: "main#unit",
   template: (d, key) => {
-    const e0 = d.createElement("div");
-    e0.className = "container";
-    const e1 = d.createElement("div");
-    e1.className = "jumbotron";
-    const e2 = d.createElement("div");
-    e2.className = "row";
-    const e3 = d.createElement("div");
-    e3.className = "col-md-6";
-    const e4 = d.createElement("h1");
-    e4.appendChild(document.createTextNode("Rex (keyed)"));
-    e3.appendChild(e4);
-    e2.appendChild(e3);
-    const e5 = d.createElement("div");
-    e5.className = "col-md-6";
-    const e6 = d.createElement("div");
-    e6.className = "row";
-    const e7 = d.createElement("div");
-    e7.className = "col-sm-6 smallpad";
-    const e8 = d.createElement("button");
-    e8.className = "btn btn-primary btn-block";
-    e8.setAttribute("id", "run");
-    e8.setAttribute("type", "button");
-    e8.appendChild(document.createTextNode("Create 1,000 rows"));
-    e7.appendChild(e8);
-    e6.appendChild(e7);
-    const e9 = d.createElement("div");
-    e9.className = "col-sm-6 smallpad";
-    const e10 = d.createElement("button");
-    e10.className = "btn btn-primary btn-block";
-    e10.setAttribute("id", "runlots");
-    e10.setAttribute("type", "button");
-    e10.appendChild(document.createTextNode("Create 10,000 rows"));
-    e9.appendChild(e10);
-    e6.appendChild(e9);
-    const e11 = d.createElement("div");
-    e11.className = "col-sm-6 smallpad";
-    const e12 = d.createElement("button");
-    e12.className = "btn btn-primary btn-block";
-    e12.setAttribute("id", "add");
-    e12.setAttribute("type", "button");
-    e12.appendChild(document.createTextNode("Append 1,000 rows"));
-    e11.appendChild(e12);
-    e6.appendChild(e11);
-    const e13 = d.createElement("div");
-    e13.className = "col-sm-6 smallpad";
-    const e14 = d.createElement("button");
-    e14.className = "btn btn-primary btn-block";
-    e14.setAttribute("id", "update");
-    e14.setAttribute("type", "button");
-    e14.appendChild(document.createTextNode("Update every 10th row"));
-    e13.appendChild(e14);
-    e6.appendChild(e13);
-    const e15 = d.createElement("div");
-    e15.className = "col-sm-6 smallpad";
-    const e16 = d.createElement("button");
-    e16.className = "btn btn-primary btn-block";
-    e16.setAttribute("id", "clear");
-    e16.setAttribute("type", "button");
-    e16.appendChild(document.createTextNode("Clear"));
-    e15.appendChild(e16);
-    e6.appendChild(e15);
-    const e17 = d.createElement("div");
-    e17.className = "col-sm-6 smallpad";
-    const e18 = d.createElement("button");
-    e18.className = "btn btn-primary btn-block";
-    e18.setAttribute("id", "swaprows");
-    e18.setAttribute("type", "button");
-    e18.appendChild(document.createTextNode("Swap Rows"));
-    e17.appendChild(e18);
-    e6.appendChild(e17);
-    e5.appendChild(e6);
-    e2.appendChild(e5);
-    e1.appendChild(e2);
-    e0.appendChild(e1);
-    const e19 = d.createElement("table");
-    e19.className = "table table-hover table-striped test-data";
-    const e20 = d.createElement("tbody");
-    e20.setAttribute("id", "tbody");
-    e19.appendChild(e20);
-    e0.appendChild(e19);
-    const e21 = d.createElement("span");
-    e21.className = "preloadicon glyphicon glyphicon-remove";
-    e21.setAttribute("aria-hidden", "true");
-    e0.appendChild(e21);
+    const e0 = d.clone(proto_shape_main_unit ??= build_shape_main_unit(d));
     e0.dataset.key = key;
     (((((((e0.childNodes[0] as HTMLElement).childNodes[0] as HTMLElement).childNodes[1] as HTMLElement).childNodes[0] as HTMLElement).childNodes[0] as HTMLElement).childNodes[0] as HTMLElement)).addEventListener("click", (ev) => {
       const labels = encodeRel(utils.randomLabels(1000), encodeText);
