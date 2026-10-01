@@ -1,6 +1,7 @@
-//! S-02 acceptance programs (MVP-PLAN.md): the three MVP apps in the v1
-//! surface. They do not parse yet; each test is un-ignored by the story that
-//! makes it pass (S-10 for parsing, S-20+ for checking).
+//! The S-02 acceptance programs (MVP-PLAN.md): the example apps, written in
+//! the v1 surface before the grammar existed. All four parse; the three MVP
+//! apps check. `chat` is the one left: it needs `let x = new …` inside a
+//! handler, which is not implemented (SYNTAX.md).
 
 const TODOMVC: &str = include_str!("../../../examples/todomvc/src/app.rex");
 const BENCH: &str = include_str!("../../../examples/js-framework-benchmark/src/app.rex");
@@ -36,14 +37,13 @@ fn kanban_v1_parses() { parses_clean(KANBAN_V1); }
 fn chat_parses() { parses_clean(CHAT); }
 
 #[test]
-#[ignore = "`let x = new …` inside a handler (unassigned)"]
+#[ignore = "`let x = new …` inside a handler is not implemented"]
 fn chat_checks() { checks_clean(CHAT); }
 
 #[test]
 fn todomvc_checks() { checks_clean(TODOMVC); }
 
 #[test]
-#[ignore = "S-42/S-61: `import js`, untyped extractor params, components"]
 fn bench_checks() { checks_clean(BENCH); }
 
 #[test]

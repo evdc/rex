@@ -1,9 +1,33 @@
 # Rex → MVP: plan, stories, and architecture review
 
-**Status:** proposal, 2026-09-18. Companion to `ROADMAP.md` (strategy) and
-`SYNTAX.md` (the current `view` surface). This file is the *work breakdown*:
-what "MVP" means, the architectural decisions that gate it, and stories sized
-for independent (smaller) agents to implement.
+**Status:** written as a proposal 2026-09-18; **every story has landed as of
+2026-10-01** except S-72 (a design note) — see the table below. Companion to
+`ROADMAP.md` (strategy) and `SYNTAX.md` (the surface, as implemented). This
+file is the *work breakdown*: what "MVP" means, the architectural decisions
+that gate it, and stories sized for independent (smaller) agents to
+implement. Each story keeps its original text and gains a *Landed as* note
+saying what was actually built and where it deviates.
+
+| Epic | Stories | State |
+|---|---|---|
+| E0 Foundations | S-01, S-02, S-03, S-04 | done |
+| E1 Surface | S-10 | done |
+| E2 Events + log | S-20, S-21, S-22 | done |
+| E3 Handlers | S-40, S-41, S-42 | done |
+| E4 `Unit`/state/match | S-50, S-51, S-52, S-53 | done |
+| E5 Binds + components | S-60, S-61, S-62 | done |
+| E6 Ordering | S-70, S-71 done; **S-72 (design note) open** | |
+| E7 Packages | S-30, S-31 done; S-32 superseded by PERF-PLAN.md | |
+| E8 Persistence | S-80 | done |
+| E9 Apps, CLI, docs | S-90, S-91, S-92, S-93, S-94 | done |
+| — | Hardening pass (oracle, model and fuzz suites) | done, unplanned |
+
+Against the five MVP criteria of §1: all met, with two caveats recorded in
+README *Status against the MVP* — CI has not run on the unpushed commits, and
+the "create 10k in one frame" stretch line of S-91 is still missed (~44 ms).
+The one acceptance program that does not check is `examples/chat` (not one of
+the three MVP apps): it needs `let x = new …` in a handler, which no story
+owned.
 
 How to read the stories:
 
@@ -478,7 +502,7 @@ comfortably under the 2× budget (silent replay skips the per-step delta
 clone `step` does, so it should generally beat live apply, not just meet
 it).
 
-#### S-22 wasm API around events (M, deps S-21)
+#### S-22 wasm API around events (M, deps S-21) — **done 2026-09-18** (commit `ba422cb`; `crates/rex-wasm`: `dispatch` by event name, `log_since`, `replay`, `base_snapshot`, `restore`, `forRestore`, and `rebalance` as the logged `@rebalance` event; the direct-write methods are gone. Since the hardening pass the logic lives in a plain-Rust `App` behind a thin binding, and `restore`/`replay` validate what they are given.)
 *Files:* `crates/rex-wasm/src/lib.rs`, `js/rex-runtime/src/app.ts` (new; see S-30).
 *Subtasks:*
 1. `RexApp.dispatch(event, args_json)` takes the event name; relation args
@@ -999,7 +1023,7 @@ removed.
 *Acceptance:* no direct writes remain in `js/rex-dom` (grep `update_field`
 returns nothing).
 
-#### S-72 (post-MVP) Hidden manual order: `order manual`, `move x before y`
+#### S-72 (post-MVP) Hidden manual order: `order manual`, `move x before y` — **open** (the `docs/ordering.md` note is not written)
 Design only for MVP: a one-page note under `docs/ordering.md` consistent with
 the memory note "fractional keys are an impl detail".
 
@@ -1081,7 +1105,7 @@ and testing without wasm; its test checks the exports named in the README exist
 and that every export is documented. The wasm-dependent snippets are not
 executed by a test.
 
-#### S-32 Boundary batch entry + V8 profile (M, deps S-22) — *perf, can slip*
+#### S-32 Boundary batch entry + V8 profile (M, deps S-22) — *perf, can slip* — **superseded** (`replay` crosses once for N events since S-22; the measuring and profiling became PERF-PLAN.md, P-0 and the P-6 profile, with numbers there rather than in ROADMAP §3.2)
 *Subtasks:* `replay` crosses once for N events (done in S-22); measure with
 `crates/rex-core/benches/dbsp_vs_batch.rs`'s dataset in Node and Bun;
 profile allocation hot spots (`Value` clones, `BTreeMap`) and record findings
@@ -1215,7 +1239,7 @@ pending writes when one applies.
 Bootstrap stylesheet is replaced by a small inline one (the glyphicon is a CSS
 `::before`), so the visual is approximate, the ids are the harness's.
 
-#### S-92 Kanban re-port to named events (S, deps S-22, S-71)
+#### S-92 Kanban re-port to named events (S, deps S-22, S-71) — **done** (in S-20: `board.rex` is the v1 program with named events and the per-list count; the Playwright suite is unchanged and green)
 *Acceptance:* existing Playwright suite unchanged and green; per-list card
 count bind (S-60) shown.
 
@@ -1283,11 +1307,46 @@ that handler form, and `models.rs` gained the stockroom.
 the TodoMVC example accepts empty todos; an `in` set or operator chain longer
 than 128 hits the nesting limit.
 
-#### S-94 Docs pass (S, deps everything above)
+#### S-94 Docs pass (S, deps everything above) — **done 2026-10-01**
 *Subtasks:* `README.md` status + "What's left" rewritten; `SYNTAX.md` is the
 v1 surface reference (from S-02, updated); SPEC gets the `Unit`, event-log,
 and `+` decisions; ROADMAP marks M6 gate met and lists post-MVP (M4,
 ordering hide, precompiled circuit, sync).
+
+*Landed as:* every claim was checked against the compiler rather than against
+the plan (a batch of probe programs through `rex check`), which is where most
+of the changes came from.
+- **SYNTAX.md** is now the reference for what is implemented. The "(v1) — not
+  implemented yet" markers are gone, and what really is unimplemented is
+  listed at the top and marked in place. Corrected: its examples used `by` as
+  a field name (a reserved word); scalar component arguments (`Panel("Todo")`),
+  `let x = new …` in a handler, and `set` of a `state` from a DOM handler were
+  described as working; handler values were "ordinary Rex expressions" (they
+  are a smaller language: no `*`, `if`, `match`, aggregates); a `local` was a
+  "hidden entity" (it is a hidden field); the checker was said to warn about an
+  empty state used as a value and about arg-dependent scans (it does neither —
+  the former is refused at dispatch).
+- **README.md**: new introduction with a program that is built by a test
+  (`rex-codegen/tests/docs.rs`), a document map, the status, a table of the
+  five MVP criteria, *What's left* rewritten from scratch, a pipeline diagram
+  with the desugar stage and both evaluators, current performance numbers. The
+  struck-through history of fixed bugs and the Sept engine table are gone
+  (the latter is in ROADMAP §3.2, marked superseded).
+- **SPEC.md**: a status note; what is and is not implemented in §§2, 5, 7, 9,
+  10; the empty-group/total-group decision in §5; and a new **§14** for the
+  application layer — `Unit`, state as a singleton relation, events as the
+  semantic boundary (pre-event reads, composing writes, refusal, id minting,
+  targets-as-views), the log, snapshots and validated restore. The `+`
+  decision was already there (§3.1, §11).
+- **ROADMAP.md**: M6 marked met, with what of its build order did and did not
+  land (M6.e did not); §3.2's benchmark table marked superseded by PERF-PLAN
+  with the current figures; a new §4.1 listing what comes after the MVP.
+- **Code:** two diagnostics cited stories that have landed; `surface_v1.rs`
+  said the programs "do not parse yet" and kept `bench_checks` ignored though
+  it passes; the crate doc called the checker "in progress".
+*Not done:* `docs/ordering.md` (S-72). `nesting-draft.md` and `drafts.md` are
+left as the historical notes they are; PERF-PLAN.md and SYNC.md are current
+and were not touched.
 
 ---
 

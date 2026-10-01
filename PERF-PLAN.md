@@ -548,6 +548,156 @@ both the startup work and most of the wasm. Before that, two cheap checks:
 Not measured: how the 1.58 s splits between download, compile and in-browser
 compilation of the program. Measure before choosing.
 
+### Phase 8: compiled circuits (proposal, not started)
+
+Today every app ships one generic `rex_wasm` (825 KB). At boot it parses, checks and
+lowers the `.rex` source (`RexApp::boot`), then interprets the resulting `Circuit` arena
+every step (`Circuit::run`, `Node::compute`). Event handlers are interpreted too:
+`events::expand` walks `MutationIR` into `DispatchOp`s, and `Engine::build_tx` turns
+those into a `Transaction`. The idea: `rex build` already compiles the program, so it
+can emit Rust that implements the circuit and handlers statically, calling the DBSP
+operators as a library.
+
+**Where the payoff is (measured 2026-09-30).** The benchmark circuit is 14 nodes
+(8 inputs, 6 computed). The interpreter's `match` runs once per node per step, not per
+row, so compiling the node graph alone saves almost nothing. A native Time Profiler run
+of `tests/bench_create.rs` (about 60 samples, so rough) split `dispatch_event` like this:
+
+| Part | Samples |
+|---|---|
+| `Engine::build_tx` (`push_retract` 19, `net_rows` 10, `push_new` 6) | 26 |
+| `events::expand` | 14 |
+| `Circuit::run`, the whole circuit | **11** |
+
+Native totals: Run(10k) 21 ms, replace 28 ms, Clear 13 ms. In the browser, `dispatch`
+is about 40 ms of the 121 ms create-10k click. The handler layer's cost is per row and
+per field: SipHash, a `row_args.clone()` per row, `String` field names, `check_field`,
+and `intern()` (a global mutex).
+
+So compilation pays off through:
+- compiled handlers, which write rows straight into each input's delta;
+- typed rows instead of `Value`, which is P-5 done statically;
+- fusion of linear chains, with no intermediate batches;
+- startup and bundle size: no parser, checker or lowering in the wasm, and no compile
+  at boot (Phase 7).
+
+Some handler wins (pre-interned field syms, no per-row `HashMap` clone) are also
+reachable inside the interpreter.
+
+**Crate split.**
+- `rex-core` stays the compiler and the oracle: parse, check, lower, the `Circuit`
+  interpreter, batch `eval::algebra`, the REPL, `add_view`/backfill, node sharing.
+- A new `rex-engine` runtime library, with no parser or checker, holds `Value`,
+  `Sym`/intern, `Batch`/`BatchBuilder`, `Integral`/`Column`, `BTreeRelation`, the
+  kernels, the event log and JSON encode. `rex-core` depends on it and re-exports it.
+- Kernels become free functions extracted from the `Node::compute` arms: `compose`,
+  `co_keyed`, `semijoin_delta` (already free), `aggregate`, `distinct`, `intersect`.
+  `Node::compute` becomes a thin match over them, so the interpreter and generated
+  code share one implementation per operator.
+- `FixRegion::evaluate` stays a library call. Generated code embeds an interpreted
+  inner `Circuit` for recursion groups (no example uses one yet).
+
+**What `rex build` emits.** `rex build app.rex -o src/main.ts --engine engine/` also
+writes a small cargo crate (`engine/{Cargo.toml, src/lib.rs}`) depending on
+`rex-engine` and `wasm-bindgen`. `scripts/build-wasm.sh` builds that crate instead of
+`rex-wasm`. The emitter:
+- checks the program, then lowers it into a scratch `Circuit`, exactly as boot does
+  today;
+- walks the arena in topological order, reading `keep`, `integral_reads`,
+  `column_sort` and `props::functional`;
+- emits one Rust item per node. Ids bound by seed `new`s are deterministic
+  (`#sort:0..`), so the emitter knows them too.
+
+Sketch of the generated code for the benchmark (stage B, still `Value`-typed):
+
+```rust
+pub struct App {
+    // kept integrals, representation fixed at compile time
+    i_row: Column, i_row_num: Column, i_row_label: Column, i_row_pos: Column,
+    i_row_selected: Column, i_state_next_id: Column, i_state_next_pos: Column,
+    i_gate1: Column, i_on_update: Column, i_on_swap_a: Column, i_on_swap_b: Column,
+    next_row: u64, log: EventLog,
+}
+
+// one builder per input, filled directly by handlers (no Transaction / DispatchOp)
+#[derive(Default)] struct Tx { row: BatchBuilder, row_num: BatchBuilder, row_label: BatchBuilder,
+                               row_pos: BatchBuilder, row_selected: BatchBuilder, /* … */ }
+
+impl App {
+    // `on Run(n, labels) { delete Row; new Row from labels as (i, label) {…}; set … }`
+    pub fn on_run(&mut self, n: i64, labels: &[(i64, Sym)]) -> Step {
+        let mut tx = Tx::default();
+        self.retract_all_row(&mut tx);                         // generated per entity
+        let next_id = self.state_int(&self.i_state_next_id);   // pre-event snapshot read
+        for &(i, label) in labels {                            // sorted by key, typed
+            let id = Value::Id(ROW, self.next_row); self.next_row += 1;
+            tx.row.push(id.clone(), id.clone(), 1);
+            tx.row_num.push(id.clone(), Value::Int(next_id + i), 1);
+            tx.row_label.push(id.clone(), Value::Text(label), 1);
+            tx.row_pos.push(id.clone(), Value::Int(i + 1), 1);
+            tx.row_selected.push(id, Value::Atom(FALSE), 1);
+        }
+        self.set_state(&mut tx, NEXT_ID, Value::Int(next_id + n));
+        /* … */
+        self.step(tx.finish())
+    }
+
+    fn step(&mut self, d: Deltas) -> Step {
+        // straight-line, topological; dirty checks only where a child can be empty
+        let d_gate1 = filter_map(&d.row_selected, |k, v| (v == &TRUE_ATOM).then(|| k.clone()));
+        let d_on_update = filter_map(&d.row_num, |k, v| (v.as_i64()? % 10 == 1).then(|| k.clone()));
+        let d_member = map_const(&d.row, &Value::Unit);
+        // commit: a direct Column::commit call, no Integral enum dispatch
+        self.i_row.commit(&d.row); /* … */
+        Step { member: d_member, order: d.row_pos, num: d.row_num, label: d.row_label,
+               gate1: d_gate1, /* fixed fields, not a HashMap<String, _> */ }
+    }
+}
+```
+
+The generated `#[wasm_bindgen]` glue keeps the existing `RexApp` surface:
+`dispatch(name, json)`, `snapshot`, `log_since`, `replay`, `base_snapshot`,
+`restore`, `bound_id`. `main.ts`, `boot.ts` and the shaper work unchanged, so stage B
+is a drop-in. Typed entry points (`run(n, keys: Int32Array, labels: string[])`) come
+later; codegen already knows every event signature. `replay` calls the same generated
+`on_*` functions silently, `restore` is one step from empty (as `Engine::restore` is
+today), and the log format is unchanged, so interpreted and compiled engines can read
+each other's stores.
+
+**Stages,** each measured with the harness before the next:
+- **A. Library split.** Create `rex-engine` and extract the kernels to free functions
+  that `Node::compute` delegates to. No behaviour change.
+- **B. Compiled engine, `Value`-typed.** Per-node kernel calls, static integral
+  representations, static outputs, no per-node `match` or dirty-check dispatch.
+  Compiled handlers write into per-input builders: no `DispatchOp`, no `HashMap` args,
+  no `String` field names, pre-interned syms, and no `check_field` for values typed at
+  compile time. `retract_all_<E>` and `set_<E>_<field>` are generated per entity.
+  Wire up the js-framework-benchmark example only, behind a build flag. Measure
+  dispatch, wasm size and first paint.
+- **C. Fusion.** A chain of linear nodes (`Inverse`, `Filter`, `InRel`, `MapConst`,
+  `FilterMap`, `Proj`, `Union`) feeding one consumer becomes one loop. Only nodes that
+  are kept or have several consumers materialize a batch.
+- **D. Typed rows.** Kernels become generic over `K: Key, V: Val`, with `Batch<K, V>`
+  and `Column<V>`: ids as `u32` seqs, ints as `i64`, texts as `Sym`. Generated code
+  picks concrete types from `ValueTy`, and `Value` survives only for pairs and
+  heterogeneous nodes. This is the largest refactor; do it once B and C show where the
+  per-row time remains.
+
+**Correctness.** The interpreter stays the oracle. A new proptest
+(`crates/rex-core/tests/compiled.rs`) generates the engine for each example program,
+drives random event sequences through both engines, and asserts equal view deltas per
+step and equal integrals. Generated crates are checked in like the codegen snapshot,
+or rebuilt by a `build.rs`, so `cargo test` covers them.
+`debug_assert_base_invariant` stays in the library, and compiled handlers call it in
+debug builds.
+
+**Costs and risks.**
+- Every app needs its own Rust-to-wasm build: Rust and the wasm32 target at
+  `rex build` time, and roughly 30–60 s release LTO builds.
+- Keep the generic interpreted wasm for `vite dev` and the REPL; compiled is the
+  production path, and both expose the same `RexApp` interface.
+- Live `add_view` (the REPL, hot-reloading views) only works interpreted.
+
 ## 4. What not to do (yet)
 
 - **Don't make the hidden keyset views lazy** (scanning at dispatch time). Phase 1
@@ -587,3 +737,4 @@ That target is unmeasured.
 | P-5 | `Value` shrink; thread-local interner | none |
 | P-6 | Shaper bulk paths, single-value mirrors, template cloning (first cut landed); functional change records across the boundary | P-4a, P-0 |
 | P-7 | Startup measurement, then profile and streaming fixes | none |
+| P-8 | Compiled circuits: A library split, B compiled `Value`-typed engine and handlers, C fusion, D typed rows | P-7 measurement; D subsumes P-5 |

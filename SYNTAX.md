@@ -1,12 +1,23 @@
-# Rex surface syntax, v1 (proposal)
+# Rex surface syntax, v1
 
-**Status:** S-02 proposal, revised 2026-09-18 after owner review. This is the
-surface the MVP acceptance programs are written in:
-`examples/todomvc/src/app.rex`, `examples/js-framework-benchmark/src/app.rex`,
-`examples/chat/src/app.rex`, `examples/kanban/src/board.rex`. Constructs
-marked **(v1)** are not implemented yet (MVP-PLAN.md E1–E5); everything else
-is what `rex build` accepts today. The programs are the acceptance tests: the
-grammar is whatever they need, and no more.
+**Status:** the reference for what `rex check` / `rex build` accept, as of
+2026-10-01 (MVP-PLAN E1–E9 landed). The acceptance programs are written in it:
+`examples/todomvc/src/app.rex`, `examples/js-framework-benchmark/src/app.rex`
+and `examples/kanban/src/board.rex` build and run; `examples/chat/src/app.rex`
+is the one program that does not check yet (see below). The grammar is
+whatever those programs need, and no more.
+
+**Described here but not implemented** — each is marked where it appears:
+
+- `let x = new …` inside a handler, binding the new row's id for later
+  statements (what `chat` needs);
+- component arguments other than row binders (`Panel("Todo")`);
+- `*`, `if`, `match` and aggregates in a handler *value* (§3);
+- a write through a path (`b.owner.name := …`);
+- `set` of a `state` directly from a DOM handler (a `local` works);
+- the query sugar of ROADMAP M6.e — `select {…}` records, `group by`,
+  `from E:` blocks — and hidden manual order (`pos: Text` and
+  `endOf`/`dropPos` are still visible).
 
 Nothing here widens the narrow binary core (SPEC.md). Every construct
 **desugars** to entities, relations and `let`s; §8 says how.
@@ -33,24 +44,26 @@ entity Todo {
   completed: Bool
 }
 entity Card { title: Text, pos: Text, list: List }   // `list: List` IS a relation Card -> List
-entity Like { msg: Message, by: User }               // a many-to-many is a link entity
+entity Like { msg: Message, user: User }             // a many-to-many is a link entity
 rel CardList(Card, List)                             // a functional field declared on its own line
 
-type Filter = All | Active | Completed               // (v1) named union type
+type Filter = All | Active | Completed               // named union type
 ```
 
 - Scalar types: `Text`, `Int`, `Money`, `Date`; atoms `@foo` (anonymous,
-  self-denoting); **named union types** **(v1)** `type T = A | B | C`, whose
-  constructors are bare names resolved by the expected type (`set filter =
-  All`, `match filter { All => … }`). `Bool` is the built-in
-  `type Bool = True | False`.
-- A field whose type is an entity is a relation; access it as `.list`. No
-  `ID` suffix — write the entity name.
-- `Unit` **(v1)** is a built-in sort with exactly one row. `unit : X -> Unit`
+  self-denoting); **named union types** `type T = A | B | C`, whose
+  constructors are bare names (`set filter = All`, `match filter { All => …
+  }`, `.kind in (Food | Toy)`). A constructor names its atom verbatim: `All`
+  is `@All`. `Bool` is the built-in `type Bool = True | False`.
+- A field whose type is an entity is a relation; access it as `.list`. Write
+  the entity name (`list: List`); the sort name `ListID` is accepted too.
+- A row need not have every field: `new E { … }` may leave one out, and that
+  row simply has no value there (there is no NULL, and no default).
+- `Unit` is a built-in sort with exactly one row. `unit : X -> Unit`
   is the constant relation to it, so whole-app values are ordinary relations
   keyed by `Unit`: `count(Todo by unit) : Unit -> Int`.
 
-## 2. State **(v1)**
+## 2. State
 
 ```rex
 state filter  : Filter = All
@@ -65,7 +78,7 @@ already maintains. A state with no default is the empty singleton until `set`, w
 "no current user" is expressed without an option type. Changing state is one
 field delta that flows through joins; nothing is recomputed from scratch.
 
-## 3. Events and handlers **(v1)**
+## 3. Events and handlers
 
 ```rex
 event AddTodo(text: Text)
@@ -92,7 +105,7 @@ Statements, one spelling per verb, verb first, target an expression:
 
 | Statement | Meaning |
 |---|---|
-| `new E { f: e, … }` | insert one row, all fields atomically; `let x = new …` binds its id |
+| `new E { f: e, … }` | insert one row, all fields atomically. (`let x = new …`, binding its id for later statements, is **not implemented**.) |
 | `new E from R as (k, v) { f: e, … }` | one row per tuple of `R`; `k`/`v` name the key and value in the field expressions |
 | `update T { f: e, … }` | set fields on every row of the keyset `T` (a binder, or `E [where P]`) |
 | `x.f := e` | sugar for `update x { f: e }` |
@@ -100,12 +113,24 @@ Statements, one spelling per verb, verb first, target an expression:
 | `set s = e` | write a `state` or a component `local` |
 | `do E(args)` | run another event's handler **in the same transaction** (only the outer event is logged; the static `do` graph must be acyclic) |
 
-Values are ordinary Rex expressions with the target row as ambient domain:
-`not .completed`, `.label ++ " !!!"`, `nextId + i`, `current`. An arg-free
-`where P` target is a hidden maintained view (O(1) at dispatch); an
-arg-dependent one is evaluated per event and the checker says so. A value
-that may be empty (a defaultless state) writes no row for that field, and
-the checker warns.
+**Values** are a small expression language evaluated at one row, against the
+pre-event snapshot: literals and constructors, the handler's params, field
+paths read from a param or the target row (`t.text`, `.label`, `b.owner.name`),
+a `state` name, `not`, `+ - / %`, `++`, and comparisons (which yield a `Bool`):
+`not .completed`, `.label ++ " !!!"`, `nextId + i`, `.qty > limit`. `*`, `if`,
+`match` and aggregates are **not implemented** in values (they are in
+queries, §4). A value that reads something absent — a field of a row that is
+gone, a `state` with no default that was never `set` — makes the dispatch
+fail: the event is refused, nothing is written, nothing is logged. A plain
+write to a row that is gone is not an error; it does nothing.
+
+**Targets.** `update`/`delete` take a param (`delete t`), a whole entity
+(`delete Row`), or `E where P`. If `P` mentions no param, the target is a
+hidden maintained view and dispatch reads its keys (O(|targets|), no scan); if
+it does (`delete Item where .kind = k`), each row of `E` is tested at dispatch
+(O(|E|)). Statements in one handler all read the pre-event snapshot, and their
+writes to one cell compose in order — the last one wins, and a row deleted by
+an earlier statement stays deleted.
 
 Nothing non-deterministic runs in a handler. Random labels, timestamps and
 DOM geometry are computed client-side and passed as event args (§7), so
@@ -121,11 +146,11 @@ let visible : Todo = match filter {
 }
 let active : Unit -> Int  = count((Todo where not .completed) by unit)
 let cards  : List -> Int  = count(Card by .list)
-let liker  : Like -> Text = .by.name
+let liker  : Like -> Text = .user.name
 ```
 
-Unchanged core (SPEC.md): point-free binary relations, `let name : A -> B`.
-New in v1:
+The core is SPEC.md's: point-free binary relations, `let name : A -> B`.
+On top of it:
 
 - `match e { pat => rel, … }` — each arm is a relation; the whole is the
   union of arms gated by `e = pat`; `_` matches the rest.
@@ -153,11 +178,11 @@ view main =
 
 - **Root level.** `view main` is the mounted root (`rex build` mounts
   `main` into `#app`). If its body is an element rather than a `select`,
-  the body sits at the implicit **`Unit` level** **(v1)**: one row, so static
+  the body sits at the implicit **`Unit` level**: one row, so static
   chrome, `if` blocks and `Unit`-keyed binds (`active`) live there.
 - **Levels.** `R as x [where …] [order by e [desc]] select <element>` renders
   one element per row of `R`. `R` is an entity or any sub-identity relation
-  (`visible : Todo`) **(v1: derived sources)**. `x` is the row binder: a
+  (`visible : Todo`). `x` is the row binder: a
   **key**, never a relation — it appears as the RHS of a membership
   `where .list = l`, as an event arg, or as the head of a path `x.f`; inside
   its own level `x.f` and `.f` mean the same thing.
@@ -165,13 +190,16 @@ view main =
   relation of its rows to the enclosing binder (`Card as c where .list = l`);
   other `where`s are plain restrictions.
 - **Order.** `order by .pos` sorts in the shaper by the value's type
-  (`desc` allowed; ties broken by key) **(v1: typed, `desc`)**; `order by id`
+  (`desc` allowed; ties broken by key); `order by id`
   is insertion order. A `Text` key written by drag handlers is manual order
   (see `endOf`/`dropPos`); hiding those keys is post-MVP.
-- **`if (c) { … }`** **(v1)** — children present iff the coreflexive `c`
-  holds at this level (`if (total > 0)` at the root, `if (.by = current)`
-  inside a level); sugar for `X where c select …`, so it mounts/removes like
-  any level.
+- **`if (c) { … }`** — children present iff the coreflexive `c` holds at
+  this level (`if (total > 0)` at the root, `if (.user = current)` inside a
+  level); sugar for `X where c select …`, so it mounts/removes like any level.
+  Whatever is nested inside comes and goes with it: a `select` under an `if`
+  re-appears, with its current rows, when the condition holds again.
+- **Source order is DOM order.** Levels, `if`s and static markup that share an
+  element stay in the order written, whichever mounts first.
 
 ### Elements
 
@@ -188,11 +216,12 @@ bind     := .path | x.path | name | ( expr )
   (`draggable`, `dropTarget`, `autofocus`) are presentation hooks lowered
   to `rex-dom` helpers or plain attributes.
 - A **bind** is anything co-keyed with the level: a path (`.text`,
-  `l.by.name`), a declared name (`active`, `cards`), or a parenthesised
+  `l.user.name`), a declared name (`active`, `cards`), or a parenthesised
   expression (`(active = 0)`). Coreflexive-valued binds toggle by
   **presence**: `class.selected=(filter = All)`, `checked=(active = 0)`,
   `class.done=.completed`. Value binds decode by type (`Int` renders `3`,
-  not `i:3`) **(v1)**. A bare name that is not a declared relation is an error.
+  not `i:3`; a `Money` renders its minor units, `250` for 2.50 — formatting
+  is not done for you). A bare name that is not a declared relation is an error.
 - Text and binds mix freely as children: `td { .sender.name ":" }`; a string
   followed by `++` starts a concat bind (`"Current user: " ++ current.name`).
 - An element with neither properties nor children needs parens (`hr()`),
@@ -200,23 +229,32 @@ bind     := .path | x.path | name | ( expr )
 - `by`, `in`, `id`, `not`, `type`, … are keywords and cannot be field names
   (`sender`, not `by`).
 
-### Components **(v1)**
+### Components
 
 ```rex
 view TodoItem(t: Todo) =
   local editing = False
   li(class.editing=editing) { … }
 
-view Panel(title: Text) = section { header { title } children }
-Panel("Todo") { … }
+view ListBox(l: List) = section { h2 { .title } children }
+
+ul { visible as t select TodoItem(t) }
+List as l select ListBox(l) { Card as c where .list = l select … }
 ```
 
 A `view` with params is a component. A call `Name(args)` expands **inline**
-at the call site with the binder substituted, so the shaper sees ordinary
-levels (`main#todo#TodoItem`). `Name(args) { … }` passes a block that lands
-at the component's single `children` slot. `local` declares per-instance
-state: a hidden relation keyed by the instance (`Todo -> Bool`) with a
-default (type inferred from it); `set editing = …` writes it.
+at the call site with the params renamed to the caller's binders, so the
+generated code is identical to writing the body in place — a component adds no
+level and nothing at run time. `Name(args) { … }` passes a block that lands at
+the component's single `children` slot. Arguments are **row binders in scope**,
+checked against the declared entity; scalar arguments (`Panel("Todo")`) are
+**not implemented**. Components may call components; recursion is an error.
+
+`local` declares per-instance state: a hidden field on the entity of the
+component's first param (so `Todo -> Bool` here), absent until first `set`
+and read through its default (whose type is inferred, or annotated). It lives
+and dies with the row, and `set editing = …` from a DOM handler is a real,
+logged event.
 
 ## 6. DOM handlers
 
@@ -234,13 +272,15 @@ stmt := do E(args) | set local = e | clear | revert | focus(level | .class)
 
 A DOM handler is a property of its element. It names the DOM event
 (`click`, `change`, `keydown.enter`, `drop`), materialises args through
-**extractors**, and runs statements in order **(v1)**: each `do` dispatches
-one named event (two `do`s are two sequential, separately logged events);
-`set` of a `local` or `state` is sugar for an implicit, logged event; `clear`
-and `focus` are presentation actions and see the DOM *after* any preceding
-`do`. A DOM handler may not mutate directly — that is what events are for.
-It may reference its own level's binder, any **enclosing** binder **(v1)**,
-and its params; param types come from the event signature.
+**extractors**, and runs statements in order: each `do` dispatches one named
+event (two `do`s are two sequential, separately logged events); `set` of a
+component `local` is sugar for an implicit, logged event (a `state` is set
+from an `on` handler: declare an event and `do` it); `clear`, `revert` and
+`focus` are presentation actions and see the DOM *after* any preceding `do`.
+A DOM handler may not mutate directly — that is what events are for. It may
+reference its own level's binder, any **enclosing** binder, and its params;
+param types come from the event signature. `keydown.enter` (and `.escape`,
+`.tab`, `.space`, arrows, single characters) runs only for that key.
 
 ## 7. Extractors and actions (the DOM-layer vocabulary)
 
@@ -253,7 +293,7 @@ relational, implemented once in `rex-dom`:
 | `drag(E)` | the dragged row's key, typed `E` |
 | `dropPos(c, x)` | a fractional key at the pointer among level `c`'s rows, excluding `x` |
 | `endOf(c)` | a fresh key after the last row of level `c` |
-| `utils.fn(args)` **(v1)** | a JS function from `import js "./utils.js" as utils`; the only escape hatch, and it lives entirely in the DOM layer — its result is an event arg, so the engine stays pure |
+| `utils.fn(args)` | a JS function from `import js "./utils.js" as utils`; the only escape hatch, and it lives entirely in the DOM layer — its result is an event arg, so the engine stays pure |
 
 Actions: `clear` resets the handler's target input; `revert` puts it back to the last value its bind set (so `Escape` cancels an edit — the blur that follows re-commits the old text); `focus(c)` focuses the
 first input of the row the preceding `do` created at level `c`;
@@ -287,7 +327,7 @@ first input of the row the preceding `do` created at level `c`;
 | two `select`s of one entity in a level | second is named `…#entity2`, third `…#entity3` |
 | `{ e }` / `attr=e` | attribute view `let …#attr = X . e`; coreflexives bind by presence |
 | `Name(args) { … }` | inline expansion with binder substitution; block at the `children` slot |
-| `local s = d` in `Name(x: E)` | hidden entity keyed by `E` with field `s`, defaulted via `except` |
+| `local s = d` in `Name(x: E)` | hidden field `local#Name#s` on `E`, read as `(E . .f) \| ((E except .f) . d)`; `set s = v` is `do local#Name#s#set(x, v)` |
 | `on click(p = ex) { do E(a); focus(c) }` | listener: run extractors, `dispatch("E", {…})`, then actions |
 
 ## 8a. Limits and name rules
@@ -322,8 +362,9 @@ first input of the row the preceding `do` created at level `c`;
 2. **Many-to-many sugar**: `rel Liked(Message, User)` as a link entity with
    `new Liked(m, u)` / `delete Liked(m, u)`, vs. writing the entity out as
    `chat/app.rex` does now.
-3. **Empty state as a field value** (`by: current` when nothing is
-   selected): warn, or reject and require an `if (current)` guard?
+3. **Empty state as a field value** (`user: current` when nothing is
+   selected): today the dispatch is refused at run time. Should the checker
+   warn, or require an `if (current)` guard?
 4. **`order by id`** for insertion order relies on id keys sorting by mint
    order — true today, worth stating in SPEC.
 5. **Type aliases beyond unions** (`type Money2 = Money`) — not needed yet.

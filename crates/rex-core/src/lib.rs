@@ -1,7 +1,10 @@
 //! Rex — a point-free binary-relational view language.
 //!
-//! This crate implements the compiler front end: lexer, parser, and (in
-//! progress) the static type/soundness checker. See `SPEC.md` for the design.
+//! This crate is the compiler and both evaluators: the front end (lexer,
+//! parser, the `view`/`state`/event desugaring, the checker and elaborator),
+//! the batch interpreter that defines the semantics (`eval`), and the
+//! incremental DBSP engine that implements them (`dbsp`, `events`). See
+//! `SPEC.md` for the design and `SYNTAX.md` for the surface language.
 
 pub mod ast;
 pub mod dbsp;

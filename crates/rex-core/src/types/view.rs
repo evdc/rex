@@ -668,7 +668,7 @@ impl Desugar {
             }
             HStmt::New { bind, entity, from, fields, .. } => {
                 if bind.is_some() {
-                    self.error(span, "`let x = new …` in a handler is not supported yet (MVP-PLAN S-40)");
+                    self.error(span, "`let x = new …` in a handler is not supported yet: a handler cannot name a row it has just created");
                     return None;
                 }
                 if !self.entity_fields.contains_key(entity) {
@@ -1097,7 +1097,7 @@ impl Desugar {
                 ))
             }
             _ => {
-                self.error(e.span, "this expression is not supported in a mutation value yet (MVP-PLAN S-40/S-52)");
+                self.error(e.span, "this expression is not supported in a handler value: a value may use literals, params, field paths, state, `not`, `+ - / %`, `++` and comparisons");
                 None
             }
         }
@@ -1869,7 +1869,7 @@ impl LevelWalk<'_> {
                     return None;
                 }
                 HStmt::New { .. } | HStmt::Assign { .. } | HStmt::Update { .. } | HStmt::Delete { .. } => {
-                    self.d.error(span, "a DOM handler may not mutate directly: declare an `event` with an `on` body and `do` it (MVP-PLAN S-20)");
+                    self.d.error(span, "a DOM handler may not mutate directly: declare an `event` with an `on` body and `do` it");
                     return None;
                 }
             }

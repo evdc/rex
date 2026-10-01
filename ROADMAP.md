@@ -1,7 +1,9 @@
 # Roadmap: from Rex to a whole-app incremental relational system
 
 **Status:** strategy document, July 2026; revised Sept 2026 (engine/elysium
-comparison with measurements in §3.2, new M6 plan in §4).
+comparison with measurements in §3.2, new M6 plan in §4); **October 2026: the
+M6 gate is met** and with it the MVP (MVP-PLAN.md) — §4 says what landed, and
+§4.1 is what comes after.
 **Scope:** the path from today's four prototypes to one system: a relational language
 covering data model → logic → UI, incrementally maintained end to end, with deltas
 driving the DOM directly. Companion to the "Incremental Relational → DOM" spec
@@ -47,8 +49,12 @@ Four prototypes, each contributing a different proven piece:
 - *(Sept 2026: the two bullets above describe the July starting point. Since then
   M1–M3 and the M5 Kanban gate landed — circuit IR + delta engine with recursion,
   nesting, WASM `RexApp`, TS shaper, `rex build` codegen; paths are now under
-  `crates/rex-core/src/`. The gap today is **surface-language breadth and the
+  `crates/rex-core/src/`. The gap then was **surface-language breadth and the
   event log**, not the engine — see M6.)*
+- *(Oct 2026: M6 closed that gap. Rex now has named events and a replayed log,
+  `state`, `match`, components, derived binds, and three apps built from single
+  `.rex` files. What it still lacks relative to elysium26 is listed under M6.e
+  and §4.1.)*
 
 ### reactor-ts — the runtime reference
 - A working, tested TypeScript DBSP runtime: Z-sets (`src/zset.ts`), delta-driven
@@ -193,6 +199,16 @@ figure is the `engine cost` spec in that example's Playwright suite):
 - Found and fixed on the way: `Engine::push_retract` re-scanned the whole transaction per
   retracted row, so `Clear` on 10k rows took 2.3 s; it now takes 0.19 s.
 
+**Superseded by PERF-PLAN.md (30 Sept 2026).** The table above is the starting point
+that plan was written from. After its phases P-0…P-4 and the first cut of P-6, the same
+`Run(10000)` dispatch costs about 44 ms in the browser's wasm (from ~283 ms), and in
+the official harness Rex's script time is below elysium26's on every CPU benchmark
+except clear (create 10,000: 127 ms script vs 153; vanillajs 26). The finding that
+changed the plan: against elysium the gap had been the **JS shaper** — order-index
+parsing, per-row removal — not the engine or the boundary. Current figures, and what is
+left (startup above all: ~1.6 s to first paint, an 858 KB wasm that carries the whole
+compiler), are in PERF-PLAN.md.
+
 **Why keep Rust+WASM, then:** not browser speed, but (1) **one engine everywhere** —
 the event log wants a server (replay, sync, multi-client fan-out), where native Rex is
 5–10× faster than either engine in V8; (2) the correctness investment (batch-oracle
@@ -252,7 +268,7 @@ internals de-risks it.
 
 | project | role |
 |---|---|
-| **Rex** | The system. Core model, compiler, and (pending M0) engine. |
+| **Rex** | The system. Core model, compiler, engine, and the two JS packages that run it. |
 | **reactor-ts** | Runtime semantics reference and test oracle; its platform is evaluated against, and likely ported to satisfy, the spec (M3). |
 | **elysium26** | Design reference for surface language, compiler structure, examples, and benchmarks. Frozen as a codebase; **its surface language and event model are the M6 donor**, and its example apps (TodoMVC, js-framework-benchmark) are M6 acceptance targets. |
 | **ripple** | Type-system and IR donor (cardinality lattice, key tracking, decorrelation). Rewrite-onto-Rex question re-opened at M5, not before. |
@@ -327,7 +343,7 @@ Build in the spec's §11 order:
 **Gate:** spec §12 obligations green: field edit preserves node identity, reorder is
 one move, subtree delete is one `removeChild`, coupled batches apply atomically.
 
-### M4 — Effects membrane (spec Part II) — **not started; sequenced after M6.a**
+### M4 — Effects membrane (spec Part II) — **not started** (its prerequisite, M6.a, is done)
 The named-event log (M6.a) is its foundation: intents/outcomes are logged events.
 In the spec's §20 order: intent/claim/outcome relations + driver skeleton (GET only)
 → `Async<T>` and single `await` desugar with Pending/Loaded/Failed rendering →
@@ -372,7 +388,19 @@ and notes below kept for the record.
 **Gate:** Kanban ✓. **Remaining** (TodoMVC, js-framework-benchmark) is folded into
 M6, which generalizes it.
 
-### M6 — Surface convergence with elysium26 + event log (Sept 2026)
+### M6 — Surface convergence with elysium26 + event log — **GATE MET (Sept–Oct 2026)**
+Delivered (story by story in MVP-PLAN.md): TodoMVC and js-framework-benchmark ported
+from elysium26 and running on generated code beside Kanban, each from one `.rex` file;
+named events as the only write path, an append-only log, and reload by snapshot +
+replay with validated restore; benchmark numbers recorded for both systems (§3.2,
+PERF-PLAN.md). Against the build order below: **M6.a–d landed**; **M6.e did not** (no
+`select {…}` records, `group by` or `from E:` — the three apps did not need them; FK
+paths and `order by` over intrinsic fields are in); **M6.f** became PERF-PLAN.md, whose
+first phases landed; **hiding fractional order keys** is still a design note to write
+(MVP-PLAN S-72). The surface took elysium26's *constructs* in Rex's own brace grammar
+rather than its syntax (MVP-PLAN §2.1); the reference is SYNTAX.md. Plan as written,
+kept for the record:
+
 **Decision: extend Rex, don't rewrite.** The novel, hard parts — Z-set DBSP with
 correct retraction, recursion, composite-key nesting, the delta shaper with
 node-identity guarantees — are built and tested here; a rewrite re-earns them. What's
@@ -409,6 +437,28 @@ Build order:
 on the generated code with no hand-written per-app JS; js-framework-benchmark
 numbers recorded for both, and a page reload restoring state via log replay.
 
+### 4.1 After the MVP
+
+In rough order of how much they block real use:
+
+1. **Persistence that survives real use.** Two tabs on one store lose writes; editing
+   a program discards its saved state (the store is keyed by a hash of the source, with
+   no migration); the log is never compacted. The first is the smallest instance of
+   sync — SYNC.md (post-MVP design, decisions made) treats tabs, devices and a server
+   as replicas of one log.
+2. **Startup and bundle size** — PERF-PLAN P-7: the browser downloads the whole
+   compiler and compiles the program at boot. The end of that road is a circuit
+   compiled ahead of time.
+3. **The rest of the handler language** — `let x = new …` in a handler (the `chat`
+   example needs it), `*`/`if`/`match` in values, scalar component arguments.
+4. **M4, the effects membrane** — its substrate (logged events with reserved
+   `cause`/`intent` fields, MVP-PLAN §5 decision 2) is in place; nothing else is.
+5. **Manual order as a language concept** — `order manual` and `move x before y`,
+   with the fractional keys compiler-owned (MVP-PLAN S-72).
+6. **M6.e query sugar**, and ripple's cardinality typing with it.
+7. **Engine**: fully incremental recursion; in-engine top-N; the linearity cost model
+   surfaced to users.
+
 ---
 
 ## 5. Parked
@@ -420,6 +470,6 @@ numbers recorded for both, and a page reload restoring state via log replay.
 - **Sync / multi-client** — elysium26's `sync/` package proves the event-sourcing
   shape; out of scope until the single-client story is done. M6.a's event log is
   designed to be its substrate, and native Rex on a server is the reason §3.2 keeps
-  Rust.
+  Rust. *(Oct 2026: the single-client story is done; the design is SYNC.md.)*
 - **Firmament** — the distributed/ontology extension. The effect membrane (M4) and
   the derivation/justification model are its foundations; nothing more yet.

@@ -1,27 +1,54 @@
 # Rex
 
-A point-free, binary-relational **view language**. Every program denotes a binary
-relation `A → B`; relations compose like arrows in a category; entities are
-families of keyed columnar relations. The long-term goal (per [`SPEC.md`](SPEC.md))
-is to lower programs to **DBSP circuits** so that incremental view maintenance
-(inserts, deletes, corrections over Z-sets) is automatic.
+A relational language for whole applications: schema, derived state, event
+handlers and UI in one `.rex` program, **incrementally maintained end to end**.
 
-This repository holds the compiler, a batch reference interpreter, an
-incremental DBSP engine (compiled to WASM), a UI compiler (`rex build`), and a
-TypeScript DOM shaper. The design is captured in `SPEC.md` (working notes, not
-a spec — read it first), `nesting-draft.md` (nesting/shaper/effects), and
-`SYNTAX.md` (the `view` surface). `ROADMAP.md` is the strategy and plan;
-`drafts.md` holds looser ideas and project context.
+The core is a point-free, binary-relational **view language**: every expression
+denotes a binary relation `A → B`, relations compose like arrows in a category,
+and entities are families of keyed columnar relations. Programs lower to a
+**DBSP circuit**, so a change to the data — an insert, a delete, a correction,
+all as Z-set deltas — updates every view by doing work proportional to the
+change. A `view` is a nested query with element constructors; its deltas drive
+the DOM directly, one mutation per logical change, with no virtual DOM.
 
-> **Status (Sept 2026):** the core parses, type-checks, elaborates, and
-> evaluates end-to-end, both through the batch reference interpreter and
-> through a **DBSP circuit backend** with incremental maintenance
-> (`crates/rex-core/src/dbsp/`), including recursion (§8). The full UI pipeline
-> works for one app: `examples/kanban/src/board.rex` compiles (`rex build`) to
-> a running Kanban board — WASM engine → delta JSON → TS shaper → surgical DOM
-> mutations, with Playwright tests for node identity and focus. The **view
-> language is narrow** (Kanban-shaped); the next phase (ROADMAP M6) grows the
-> surface toward elysium26's, with a named-event log as the entry point.
+```rex
+entity Todo { text: Text, completed: Bool }
+event Toggle(t: Todo)
+on Toggle(t) => t.completed := not t.completed
+
+let active : Unit -> Int = count((Todo where not .completed) by unit)
+
+view main = section {
+  ul { Todo as t order by id select
+    li(class.done=.completed on click => do Toggle(t)) { .text } }
+  span { active } " left"
+}
+```
+
+This repository holds the compiler, a batch reference interpreter, the
+incremental engine (Rust, compiled to WASM), a UI compiler (`rex build`), and
+two TypeScript packages that run the result in a browser.
+
+| Document | What it is |
+|---|---|
+| [`SYNTAX.md`](SYNTAX.md) | The surface language, as implemented: schema, state, events, queries, views. **Start here to write a program.** |
+| [`SPEC.md`](SPEC.md) | The core model and why: Z-sets, the combinators, aggregation, negation, recursion, the application layer. Working notes, kept current. |
+| [`js/rex-dom/README.md`](js/rex-dom/README.md), [`js/rex-runtime/README.md`](js/rex-runtime/README.md) | The delta protocol and shaper; boot, the event log and persistence. |
+| [`ROADMAP.md`](ROADMAP.md) | Strategy, architecture decisions with their measurements, milestones. |
+| [`MVP-PLAN.md`](MVP-PLAN.md) | The MVP story breakdown, with what each story actually landed as. |
+| [`PERF-PLAN.md`](PERF-PLAN.md), [`SYNC.md`](SYNC.md) | Post-MVP: engine performance work (in progress) and the multi-replica design. |
+| `nesting-draft.md`, `drafts.md` | Earlier design notes (nesting/shaper/effects; loose ideas), kept for the reasoning. |
+
+> **Status (October 2026): the MVP is functionally complete.** Three apps —
+> [Kanban](examples/kanban/src/board.rex), [TodoMVC](examples/todomvc/src/app.rex)
+> and the [js-framework-benchmark](examples/js-framework-benchmark/src/app.rex)
+> — each build from one `.rex` file with no hand-written per-app code, run in
+> the browser on the generated module, and pass Playwright suites for node
+> identity, focus and one DOM operation per logical change. Every change enters
+> as a **named event** in an append-only log; a reload restores the app from a
+> snapshot plus log replay. `rex-dom` and `rex-runtime` are standalone packages
+> with a documented delta contract. See *Status against the MVP* below for
+> what is and is not done.
 
 ---
 
@@ -43,7 +70,7 @@ Workspace layout:
 
 ```sh
 cargo build
-cargo test --workspace         # ~180 tests incl. property tests vs. the batch oracle
+cargo test --workspace         # ~420 tests incl. the oracle and fuzz suites (see Test coverage)
 cargo run -p rex-cli                         # start the REPL
 cargo run -p rex-cli -- check app.rex        # diagnostics only; exit 1 on errors
 cargo run -p rex-cli -- run prog.rex         # check, then batch-evaluate and print every view
@@ -70,32 +97,34 @@ two publishable tarballs (`rex-runtime`'s needs `pkg/` built first).
 
 The REPL (`crates/rex-cli/src/repl.rs`) accepts `entity`/`let` statements
 (committed to the session) and bare expressions (evaluated in a scratch copy
-and discarded). `view`/`state`/`rel` are rejected there — use `rex build`.
+and discarded). It is for the query core: `view`, `state`, `rel`, `event`, `on`,
+`type` and `import` are rejected there — use `rex check` / `rex build`.
 Commands: `/import <path>`, `/env`, `/reset`, `/help`, `/quit`.
 
 ---
 
 ## Pipeline & architecture
 
-Source flows through five phases, each in its own module:
+Source flows through the front end once; what comes out feeds two evaluators
+(which must always agree) and the UI compiler:
 
 ```
-src → lex → parse → check/elaborate → eval
-      │      │            │              │
-   Vec<Token>  Program   TProgram   HashMap<name, BTreeRelation>
-              (untyped)  (typed)
+src → lex → parse → desugar → check/elaborate ─┬─► batch interpreter   (the reference)
+                    (views,      │             ├─► DBSP circuit        (the engine)
+                     state,   TProgram         └─► ShapeIR + EventIR ─► rex build ─► main.ts
+                     events)   (typed)
 ```
 
 | Phase | Module(s) | What it does |
 |---|---|---|
-| **Lex** | `crates/rex-core/src/lexer.rs`, `crates/rex-core/src/token.rs` | ASCII-only, hand-written. Maximal-munch operators; distinguishes decimal `.` from compose `.`; dates, atoms `@foo`, strings with escapes. Recovers and collects diagnostics. |
-| **Parse** | `crates/rex-core/src/parser.rs`, `crates/rex-core/src/ast.rs` | Recursive descent for statements, Pratt (binding-power) for expressions. Produces a surface AST that mirrors what was written — **no desugaring here**. Recovers to the next `let`/`entity` on error. |
-| **Check / elaborate** | `crates/rex-core/src/types/` | The heart. A single bidirectional, type-directed walk validates the program *and* produces the elaborated `TProgram`: field paths resolved to `(sort, field)` hops, identifiers resolved to their kind (view / entity-identity / value), filter built-ins lowered to `Filter` nodes. Threads an ambient domain through composition to resolve `.field`. |
-| **Eval** | `crates/rex-core/src/eval/` | Batch interpreter over the typed AST. `interp.rs` walks `TProgram`; `algebra.rs` is the relational algebra; `relation.rs` is the Z-set store; `value.rs` is the runtime domain element. |
-| **Support** | `crates/rex-core/src/diagnostic.rs`, `crates/rex-core/src/span.rs`, `crates/rex-core/src/pretty.rs`, `crates/rex-core/src/operator.rs` | Spans + rendered diagnostics; canonical s-expr printer (used for test assertions and `--ast`-style output); the §7 operator-metadata table. |
-| **Incremental engine** | `crates/rex-core/src/dbsp/` | `lower.rs` lowers `TProgram` to a circuit of delta nodes (`node.rs`); `circuit.rs` steps it (incl. fix regions); `engine.rs` is the transactional API (`apply_new`, `update_fields`, `retract_entity`, `dispatch`). |
-| **View desugar** | `crates/rex-core/src/types/view.rs`, `shape_ir.rs` | `view … select` → ordinary `let`s (membership / order / per-attribute) + a shape IR + checked `event`/`on` bodies (the EventIR). |
-| **Codegen / edge** | `crates/rex-codegen`, `crates/rex-wasm`, `crates/rex-core/src/eval/encode.rs`, `js/rex-dom` | Shape IR → TS; the WASM API; the canonical value/delta wire encoding; the shaper that turns per-view deltas into DOM mutations. |
+| **Lex** | `crates/rex-core/src/lexer.rs`, `crates/rex-core/src/token.rs` | Hand-written; ASCII syntax, any UTF-8 in strings and comments. Maximal-munch operators; distinguishes decimal `.` from compose `.`; dates, atoms `@foo`, strings with escapes. Recovers and collects diagnostics. |
+| **Parse** | `crates/rex-core/src/parser.rs`, `crates/rex-core/src/ast.rs` | Recursive descent for statements, Pratt (binding-power) for expressions. Produces a surface AST that mirrors what was written — **no desugaring here**. Recovers to the next statement on error; nesting is capped at 128 levels so no later pass can run out of stack. |
+| **Desugar** | `crates/rex-core/src/types/view.rs`, `component.rs`, `names.rs`, `shape_ir.rs` | `view`, `state`, `local`, components, `match`/`if` and `event`/`on` become ordinary entities and `let`s (membership / order / per-attribute views, hidden keyset views for `where` targets), plus the **ShapeIR** (what to render) and **EventIR** (checked handler bodies). The core language never sees them. |
+| **Check / elaborate** | `crates/rex-core/src/types/check.rs`, `ground.rs`, `strat.rs` | The heart. A single bidirectional, type-directed walk validates the program *and* produces the elaborated `TProgram`: field paths resolved to `(sort, field)` hops, identifiers resolved to their kind (view / entity-identity / value), filter built-ins lowered to `Filter` nodes. Threads an ambient domain through composition to resolve `.field`. |
+| **Eval** | `crates/rex-core/src/eval/` | Batch interpreter over the typed AST — the definition of the semantics, and the oracle the engine is tested against. `interp.rs` walks `TProgram`; `algebra.rs` is the relational algebra; `relation.rs` is the Z-set store; `value.rs` is the runtime domain element. |
+| **Support** | `crates/rex-core/src/diagnostic.rs`, `crates/rex-core/src/span.rs`, `crates/rex-core/src/pretty.rs`, `crates/rex-core/src/operator.rs` | Spans + rendered diagnostics; canonical s-expr printer (test assertions, `rex run --ast`); the §7 operator-metadata table. |
+| **Incremental engine** | `crates/rex-core/src/dbsp/`, `events.rs` | `lower.rs` lowers `TProgram` to a circuit of delta nodes (`node.rs`), with algebraic rewrites and node sharing; `circuit.rs` steps it (incl. fix regions); `integral.rs` holds state (dense columns for entity-keyed relations); `engine.rs` is the transactional write path and the event log (`log.rs`); `events.rs` dispatches a named event as one transaction, and replays and restores. |
+| **Codegen / edge** | `crates/rex-codegen`, `crates/rex-wasm`, `crates/rex-core/src/eval/encode.rs`, `js/rex-dom`, `js/rex-runtime` | ShapeIR → TS; the WASM API; the canonical value/delta wire encoding; the shaper that turns per-view deltas into DOM mutations; boot, the persisted log, and recovery. |
 
 Key design choices realized in code:
 
@@ -112,192 +141,158 @@ Key design choices realized in code:
   both become `Antijoin` (evaluated as `A − A[B]`, the weight-safe form, §6).
 - **Z-sets everywhere** (§2). `BTreeRelation` maps `left → right → i64 weight`,
   prunes zero-weight entries, and supports negative weights (retractions) — the
-  substrate incremental maintenance will eventually need.
-- **Money is exact**, stored as integer cents.
+  batch evaluator and the circuit share it, and its kernels (`eval/algebra.rs`).
+- **Money is exact**, stored as integer cents; arithmetic wraps (SPEC §2.1).
+- **Sugar desugars; the core never widens.** Views, state, components, `match`
+  and events all become entities, `let`s and data before the checker runs, so
+  none of them adds a node to the typed IR, either evaluator, or the circuit.
+- **Events are the only write path, and reads see the pre-event state.** One
+  event is one logged, atomic transaction; handlers are deterministic, so the
+  log replays exactly (SPEC §14).
+- **Binders are keys, never relations**, so a generated listener closes over
+  exactly the key the shaper hands its template.
 
 ---
 
 ## What exists
 
-- ✅ Full lexer, parser, s-expression pretty-printer.
-- ✅ Entity declarations → minted ID-sorts + keyed field columns.
-- ✅ `new` creation sugar (atomic per-key population; anonymous `let _`).
-- ✅ Bidirectional checker with type-directed `.field` resolution, ambient-domain
-  threading, co-keyed/join-column diagnostics, atom/coproduct subtyping.
-- ✅ Combinators: compose, semijoin/`where`, inverse, fork, union, intersect,
-  distinct, `by`, `except`/`antijoin`.
-- ✅ Functional ops `*` and `||`; comparisons (prefix-filter and binary
-  column-vs-column); `in`.
-- ✅ Aggregations `sum`/`count`/`avg`/`min`/`max` as monoid homomorphisms over
-  a key's image Z-set, respecting weights.
-- ✅ Batch interpreter; REPL with session state and `/import`.
-- ✅ The §12 worked example type-checks and evaluates correctly.
-- ✅ **DBSP backend** (`crates/rex-core/src/dbsp/`): lowering of the typed AST to a circuit of
-  delta kernels, incremental view maintenance (inserts/retractions), backfill
-  of views added over existing data, property-tested against the batch algebra.
-- ✅ **Recursion (§8)**: `let recursive path : Node -> Node = edge | edge . path`.
-  **Consecutive `let recursive` statements form one fixpoint group** (mutual
-  recursion; any other statement ends the group); annotations are mandatory
-  (they seed the self-reference's type). Semantics is the joint least fixpoint
-  — Kleene iteration from ∅ with a **forced `distinct` at the knot**. The
-  batch interpreter runs the Kleene loop directly; the circuit backend wraps a
-  nested inner circuit in an Enter/Exit **fix region** (`Circuit::fixes`):
-  imports enter as δ₀, the feedback slot is the z⁻¹ edge, inner integrals make
-  iteration semi-naive, and Exit diffs the converged fixpoint against the
-  previous step's. Cost model: recursion is **non-linear** — each outer step
-  re-derives the fixpoint (O(closure), not O(Δ)); fully incremental nested
-  deltas are future work.
-- ✅ **Stratification check** (`crates/rex-core/src/types/strat.rs`): consumes the `monotone`
-  bits of `operator.rs` — no non-monotone operator (`distinct`,
-  `except`/`antijoin`, aggregation) may sit above a recursive occurrence.
-  (`&` is monotone — min of weights — and is allowed under recursion.)
-- ✅ **Nesting (M2)**: `fst`/`snd` projections; composite-key nesting composes
-  from `~`/`,`/`.`/`by`; the §8 opaque-value cliff is a checker warning.
-- ✅ **UI pipeline (M3/M5)**: `view … select` surface (`SYNTAX.md`), `rel`
-  declarations, `Entity as l` binders; `rex build` codegen; atomic handler
-  dispatch (one engine step per DOM event); WASM `RexApp`; TS shaper with −/+
-  fusion, phased apply, fractional ordering + rebalance, subtree coalescing,
-  reparent. The Kanban app runs on it with Playwright gates.
+**The core language**
+- Lexer, parser, s-expression printer; a bidirectional checker with
+  type-directed `.field` resolution, ambient-domain threading, co-keyed /
+  join-column diagnostics and atom/coproduct subtyping; groundedness and
+  stratification passes.
+- Combinators: compose, semijoin/`where`, inverse, fork with `fst`/`snd`,
+  union `|`, intersect `&`, `except`/`antijoin`, `distinct`, `by`.
+- Arithmetic `+ - * / %` and `++` on co-keyed columns; comparisons (filter
+  form and column-vs-column); `in`; `match`, `if … then … else`, relational
+  `not`.
+- Aggregations `sum`/`count`/`avg`/`min`/`max` as monoid homomorphisms over a
+  key's image, respecting weights; `count`/`sum` grouped `by unit` yield their
+  identity when empty.
+- **Recursion** (SPEC §8): `let recursive path : Node -> Node = edge | edge .
+  path`; consecutive recursive `let`s form one fixpoint group; a stratification
+  check keeps non-monotone operators out from under it.
+
+**The engine**
+- Lowering to a circuit of delta kernels with rewrites, node sharing and
+  demand-driven state; inserts, retractions, backfill of views added over
+  existing data; nested fix regions for recursion.
+- Named-event dispatch as one atomic transaction against the pre-event
+  snapshot; an append-only event log; silent replay; base snapshots and
+  validated restore.
+
+**The application layer** (SYNTAX.md)
+- `type` unions and `Bool`; `state` as a singleton relation; `event`/`on`
+  handlers with `new`, `new … from` a relation-valued param, `update`,
+  `delete`, `:=`, `set`, `do`; `where`-targeted bulk mutations as hidden
+  maintained views.
+- `view`s: `Unit`-rooted static chrome, nested `select` levels over entities
+  or derived keysets, `order by … [desc]`, `if` gates, binds of any co-keyed
+  expression, presence binds for classes and boolean props, components with a
+  `children` slot, per-instance `local` state, DOM handlers with extractors
+  (incl. `import js`).
+
+**The edge**
+- `rex` CLI: `check`, `run`, `build [--watch]`, REPL.
+- `rex-wasm` (`RexApp`), `rex-dom` (shaper: −/+ fusion, phased apply, typed
+  ordering, fractional keys + rebalance, subtree coalescing, reparent), and
+  `rex-runtime` (typed engine, boot, IndexedDB persistence, recovery).
+- Three example apps with Playwright suites.
 
 ---
 
-## What's left to do
+## Status against the MVP
 
-The plan and its rationale live in **`ROADMAP.md` §4 (M6 onward)**. In short:
-grow the user-facing surface toward elysium26's (it is the language donor)
-while keeping the narrow binary core as the IR, with a **named-event log** as
-the entry point for all change. Priority order:
+MVP-PLAN §1 defines the MVP as five things. Where each stands:
 
-1. **Events + log (M6.a).** Named `event`s and `on E(…)` handlers landed
-   (MVP-PLAN S-20): DOM handlers `do` a declared event and never mutate
-   directly. Next is the append-only, replayable event log (S-21).
-2. **Handler expressiveness (M6.b).** `where`-targeted bulk
-   update/insert/delete; mutation values as expressions over the pre-event
-   snapshot (today: literals and params only — `t:n := t:n * 2` is rejected).
-3. **`state` + `match` (M6.c).** `state` parses but is rejected
-   (`types/view.rs:58`). Model state as singleton relations so state changes
-   are ordinary deltas (elysium's full-recompute-on-state cliff can't arise).
-4. **Views over derived relations (M6.d).** Binds are `.field`-only; aggregates
-   and joins can't be displayed. Also components with props, `if`/class
-   expressions.
-5. **Query sugar (M6.e).** `select {…}` records, `group by`, FK paths as sugar
-   desugaring to binary relations.
-6. **Persistence** via the event log (snapshot + replay), then **effects (M4)**.
-7. **Engine/boundary performance** — see *Performance* below and ROADMAP §3.2.
+| | Criterion | Status |
+|---|---|---|
+| 1 | Three apps, each from one `.rex` file via `rex build`, passing Playwright | **Met.** The benchmark's random labels come from a 24-line `utils.ts` through `import js`, the one sanctioned escape hatch. |
+| 2 | Every change is a named event in an append-only log; reload restores | **Met.** Snapshot + log replay, validated on load, with recovery when storage does not load. |
+| 3 | `rex-dom` and the engine wrapper as standalone packages with a documented contract | **Met.** `npm pack` works and the tarballs run Kanban; not published to npm. |
+| 4 | `rex check`/`build`/`run`; errors at source spans; CI | **Met locally.** The CI workflow covers all of it, but the commits since `bb7a655` have not been pushed, so it has not run on them. |
+| 5 | Benchmark numbers for Rex and elysium26 side by side | **Met** (ROADMAP §3.2, PERF-PLAN). The stretch target "create 10,000 rows inside one frame" is not: see *Performance*. |
 
-Core-language items, still open:
+Not part of the MVP, and not done: the effects membrane (M4), sync and
+multi-client, the query sugar of ROADMAP M6.e, hidden manual order, fully
+incremental recursion, an LSP.
 
-- **Fully incremental recursion.** The fix region re-derives its fixpoint each
-  outer step (semi-naive within the step, O(closure) across steps); the DBSP
-  nested-delta construction would make an edge insert cost only the newly
-  derivable paths.
-- **Analysis consumers.** Set-ness (drop redundant `distinct`), linearity cost
-  model surfaced to users, delta fan-out warning (§10) — unimplemented; of the
-  metadata table only the `monotone` bits (stratification, §8) and `grounding`
-  have readers.
-- **Coproduct runtime forms.** Coproducts exist in the *type* system but have
-  no runtime injection/case forms — no way to construct or match `(V + Unit)`,
-  so the "no NULL, use `V + Unit`" story isn't realizable at runtime yet.
-- **Top-N / engine-side ORDER BY** (§11). Ordering is currently the shaper's
-  job (`order by` designates an order relation; the engine doesn't sort).
-- **Hide fractional order keys.** `pos: Text` and the `endOf`/`dropPos`
-  extractors are visible in user code; manual order should become a language
-  concept.
-- **`from E:` blocks** (§4 secondary sugar) — not parsed.
-- **The `+` naming collision** (§11) is unresolved in surface syntax (`+` is
-  union; arithmetic add isn't spelled at all — only `*` and `||` exist).
+## What's left
+
+**Small, known, and worth doing next**
+- `examples/chat` does not check: it needs `let x = new …` inside a handler,
+  binding the new row's id for the statements after it.
+- Handler values lack `*`, `if`, `match` and aggregates, and cannot write
+  through a path; component arguments must be row binders (SYNTAX.md lists
+  these where they come up).
+- A `Money` text bind renders minor units (`250` for 2.50).
+- `docs/ordering.md` (MVP-PLAN S-72) — the design note for hiding fractional
+  order keys behind `order manual` — is not written.
+
+**Persistence** (the weakest part of what is built)
+- **Two tabs on one store lose writes**: both number events from the same
+  cursor. SYNC.md is the real answer; nothing guards against it today.
+- **Editing a program discards its saved state**: the store is keyed by a hash
+  of the source, there is no migration, and old databases are never deleted.
+- **The log is never compacted**: events a snapshot already covers stay in
+  IndexedDB and in the engine's in-memory log.
+
+**Larger, each with its own document**
+- **Performance** — PERF-PLAN.md: P-5 (a smaller `Value`), the rest of P-6
+  (event delegation, change records for functional views), and P-7 (startup,
+  up to compiling the circuit ahead of time).
+- **Sync** — SYNC.md: replicas that accept writes offline and converge.
+- **Effects** (M4) — ROADMAP §4: intent/claim/outcome on top of the event log.
+- **Query sugar** (M6.e) — `select {…}` records, `group by`, `from E:` blocks.
+
+**Core-language items, still open**
+- **Fully incremental recursion.** A fix region re-derives its fixpoint each
+  outer step (semi-naive within the step, O(closure) across steps).
+- **Analysis consumers.** Of the operator metadata table, `monotone` and
+  `grounding` have readers; set-ness and the linearity cost model do not, and
+  the delta fan-out warning (SPEC §10) is unimplemented.
+- **Coproduct runtime forms.** Coproducts of atoms exist (`type`, `Bool`);
+  general `(V + W)` has no injection or case form, so "no NULL, use
+  `V + Unit`" is not realizable — absence of a row is what stands in for it.
+- **Empty groups.** An aggregate has no row for a key with an empty image
+  (except `count`/`sum` `by unit`), so "customers with zero orders" needs an
+  `else`-style default form that does not exist yet (SYNTAX §9).
+- **`min`/`max` under retraction** re-fold the affected group: correct, but
+  O(group) rather than O(Δ).
+- **Top-N / engine-side ordering.** `order by` names an order relation; the
+  shaper sorts.
 
 ---
-
-## Bugs & correctness issues
-
-- ~~**Negative money parses and prints wrong.**~~ **Fixed.** The sign is now taken
-  from the literal itself (`"-0.50" → Money(-50)`) and `Display` prints it
-  (`-$0.50`). Covered by tests in `crates/rex-core/src/eval/value.rs`.
-- ~~**Coreflexive-producing nodes ignore input weights.**~~ **Fixed.**
-  `BinCompare` now combines weights bilinearly (`wa * wb`), and `InRel` /
-  standalone `Coreflexive` carry the source row's weight, so they produce faithful
-  Z-set coreflexives instead of clamped weight-1 rows.
-- ~~**Standalone `Coreflexive` silently yields empty off an entity domain.**~~
-  **Closed** by the groundedness pass (`crates/rex-core/src/types/ground.rs`): an infinite
-  built-in with no enumerable domain is now a check-time error, so the
-  interpreter's `ValueTy::Id`-only materialization is unreachable otherwise.
-- **Aggregation of an empty group produces no row.** `sum`/`count` over a key with
-  no image emit nothing rather than `0` — there's no outer key to range over, so
-  "count of customers with zero orders" is unrepresentable. Standard group-by
-  behavior, but worth deciding deliberately given the incremental target.
-- ~~**`in` is atoms-only.**~~ **Fixed.** `expect_subset` now accepts any scalar
-  type when both sides agree (not just atom (co)products), and `check_in`
-  derives the set's element type from the collected literals themselves
-  rather than re-typechecking the set expression with no domain — so
-  `x in (1 + 2 + 3)` over an `Int` field type-checks.
-- **`min`/`max` under retraction** take the recompute tier in the engine: the
-  `Aggregate` node re-folds the affected group from its integral
-  (`dbsp/node.rs`). Correct, but O(group) rather than O(Δ).
-- ~~**Non-Text binds render the wire encoding.**~~ **Fixed.** `AttrBinding` now
-  carries the bound field's `Encoding` (resolved from the entity's declared
-  field types at desugar time), and codegen picks `decodeInt`/`decodeMoney`/
-  `decodeAtom` accordingly instead of always `decodeText`.
-- ~~**A bare identifier in an element body silently becomes a tag.**~~
-  **Fixed.** A childless, attribute-less bare tag that names a field of the
-  enclosing entity is now a desugar-time error ("unknown element `cnt`; did
-  you mean `{ :cnt }`?"); a genuine tag (one that isn't a field name) is
-  unaffected.
-- ~~**`where :f = @atom` on a view level is rejected.**~~ **Fixed.** An atom
-  literal now grounds to a constant relation over the ambient entity domain
-  (like `Int`/`Text`/etc. literals already did via `constant()`), so `=`
-  co-keys correctly; `where :f in @atom` still works as before.
 
 ## Performance
 
-Measured Sept 2026 (engine only, no DOM; same Kanban-shaped program and a log
-of single events — 10k card inserts, then 1k renames / moves / deletes; µs per
-event at N = 10k; Rex figures include delta JSON serialization):
+The work and its measurements live in **PERF-PLAN.md** (and the engine
+comparison behind the Rust+WASM decision in ROADMAP §3.2). Where it stands
+after P-0…P-4 and the first cut of P-6 (official js-framework-benchmark
+harness, Chrome, medians, ms, total / script):
 
-| Engine | insert | rename | move | delete |
-|---|---|---|---|---|
-| Rex native (Rust) | 7.9 | 4.0 | 12.0 | 9.4 |
-| Rex WASM `-O3`, Bun (JSC) | 18 | 7 | 17 | 12 |
-| Rex WASM `-O3`, Node (V8) | 62 | 24 | 35 | 32 |
-| Rex WASM as shipped (`opt-level="z"`), Node | 87 | 40 | 60 | 42 |
-| elysium26 (TS), Node | 58 | 278 | 301 | 257 |
+| Benchmark | Rex | vanillajs | elysium26 |
+|---|---|---|---|
+| create 1,000 | 45.0 / 13.5 | 85.1 / 6.4 | 107.6 / 19.1 |
+| replace 1,000 | 53.7 / 21.3 | 99.9 / 18.0 | 124.7 / 31.5 |
+| update every 10th | 26.1 / 4.8 | 20.2 / 1.1 | 36.7 / 6.0 |
+| create 10,000 | 483.6 / 126.7 | 353.4 / 26.3 | 508.5 / 152.8 |
+| append 1,000 | 54.9 / 14.9 | 41.1 / 2.9 | 53.5 / 16.1 |
+| clear 1,000 (4× throttle) | 41.3 / 37.5 | 19.3 / 15.4 | 34.5 / 30.8 |
 
-- **The JS↔WASM boundary is not the bottleneck**: a bare call is ~0.4 µs;
-  `JSON.parse` of a delta adds ~1–8 µs. The gap is V8 executing this WASM
-  (3–8× native; JSC is within ~2×) — likely allocation/`BTreeMap`/`Value`
-  cloning; unprofiled.
-- **`wasm-release` uses `opt-level = "z"`**, costing ~1.4–1.7× vs `-O3` for
-  ~+27 KB gzipped (155 → 182 KB). Switch the shipped profile.
-- **No batch entry point across the boundary.** Each `apply_new` /
-  `update_fields` is its own step; bulk loads and log replay should cross once
-  (`Engine::dispatch` already takes a batch).
-- (elysium's O(N) updates come from a predicate scan for `where .id = x`, not
-  from TS itself.)
-- **The REPL re-parses and re-checks the whole session per line** but applies
-  only the new statements to the engine (`Session::commit` in
-  `crates/rex-cli/src/repl.rs`); a recursion-group extension rebuilds and
-  replays. Fine at prototype scale.
-- **The interpreter clones pervasively.** `eval` returns owned `BTreeRelation`s,
-  `View`/`Identity`/field lookups `.clone()` whole relations, `Const` clones the
-  entire id relation to iterate its domain. `BinaryRelation::iter`/`row` return
-  boxed iterators that clone every `Value`. All acceptable for a reference
-  interpreter; none of it survives into a columnar/vectorized backend.
-- **Field lookups allocate a `String` key per access** (`(sort, name.to_string())`
-  in `Interp::field`).
-
-## Code style / cleanup
-
-- ~~Duplicate interpreter entry points `run_typed`/`run_typed_values`.~~
-  **Done** — collapsed to the single `run_typed_values`.
-- ~~`operator.rs` is dead metadata that can silently drift.~~ **Mostly addressed** —
-  a test guards that every combinator has an entry and that names are unique, and
-  the `monotone` bits now have a real consumer (`crates/rex-core/src/types/strat.rs`, the §8
-  stratification check). The linearity bits still have no reader.
-- ~~`Value::is_money` is unused.~~ **Removed.**
-- ~~The `spec12.rex` fixture's `result` line deviates from SPEC §12.~~ **Done** — a
-  correction note is now in SPEC §12 pointing at the fixture, so the two no longer
-  drift silently. The fixture uses `inregion . (custspend where > 30)` because the
-  spec's `(custspend where > 30)[inregion]` is (correctly) ill-typed under §3.2.
+- A create-10,000 click is about 120 ms of script: ~40 ms in `dispatch`
+  (the engine step itself is ~44 ms measured alone in the browser, down from
+  ~283 ms before the plan) and ~70 ms in the shaper and DOM construction. The
+  one-frame target for the engine is still missed by about 3×.
+- **Startup is the weak number**: first paint ~1.6 s. The browser downloads an
+  858 KB wasm (281 KB gzipped) that contains the whole compiler, and parses,
+  checks and lowers the program at boot. P-7 is about this.
+- The JS↔WASM boundary is not the bottleneck (a bare call is ~0.4 µs).
+- `REX_PROFILE=1 npx playwright test e2e/profile.spec.ts` in
+  `examples/js-framework-benchmark` prints the engine / parse / shaper split
+  of one click; `?profile` on any generated app logs it per dispatch.
+- The batch interpreter clones pervasively and the REPL re-checks the whole
+  session per line. Both are fine for what they are for.
 
 ## Test coverage
 
