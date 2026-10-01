@@ -1268,7 +1268,7 @@ impl Desugar {
             // chrome and scalar binds need no entity to range over.
             ViewBody::Element(e) => {
                 let name = format!("{}#unit", v.name);
-                self.emit_let(&name, ident(UNIT_ROOT, e.span));
+                self.emit_let(&name, ident(UNIT_ROOT, e.span), e.span);
                 let level = self.walk_level(&name, UNIT_ENTITY, UNIT_ENTITY, UNIT_BINDER, &[], e, None, None);
                 self.shapes.views.push(level);
             }
@@ -1345,12 +1345,12 @@ impl Desugar {
             None => base, // root: `E [where ..]`
             Some(rel) => compose(base, rel.clone(), span),
         };
-        self.emit_let(name, membership_expr);
+        self.emit_let(name, membership_expr, span);
 
         // Order view: `E . <order expr>` (a field path or any co-keyed expression).
         let order_view = sel.order_by.as_ref().map(|o| {
             let vname = format!("{name}#order");
-            self.emit_let(&vname, compose(ident(e, span), o.expr.clone(), span));
+            self.emit_let(&vname, compose(ident(e, span), o.expr.clone(), span), o.expr.span);
             vname
         });
         let order_field = sel.order_by.as_ref().and_then(|o| match &o.expr.kind {
@@ -1406,6 +1406,7 @@ impl Desugar {
             binder,
             ancestors,
             level_name: name,
+            span: body.span,
             child_levels,
             seen: Default::default(),
             attrs: Vec::new(),
@@ -1451,13 +1452,13 @@ impl Desugar {
         }
     }
 
-    fn emit_let(&mut self, name: &str, body: Expr) {
+    fn emit_let(&mut self, name: &str, body: Expr, span: Span) {
         self.stmts.push(Stmt::Let(LetDecl {
             name: Some(name.to_string()),
             ty: None,
             body,
             recursive: false,
-            span: Span::point(0),
+            span,
         }));
     }
 }
@@ -1477,6 +1478,9 @@ struct LevelWalk<'a> {
     /// Enclosing levels' `(binder, entity)`, outermost first.
     ancestors: &'a [(String, String)],
     level_name: &'a str,
+    /// The level's element, where an error in a view built on the level's
+    /// own rows (an unknown source, say) is reported.
+    span: Span,
     /// Binder -> level name of every `select` nested directly in this level.
     child_levels: std::collections::HashMap<String, String>,
     /// How many `select`s of each entity have been named so far in this
@@ -1623,7 +1627,7 @@ impl LevelWalk<'_> {
     /// and (until S-60 types it) a `Text` encoding.
     fn bind_view(&mut self, expr: &Expr) -> (String, Encoding) {
         if let ExprKind::FieldPath(parts) = &expr.kind {
-            return (self.attr_view(parts), self.field_encoding(parts));
+            return (self.attr_view(parts, expr.span), self.field_encoding(parts));
         }
         self.d.attr_seq += 1;
         let name = format!("{}#bind{}", self.level_name, self.d.attr_seq);
@@ -1698,7 +1702,7 @@ impl LevelWalk<'_> {
     /// The identity relation of this level's rows: the entity for a `select`
     /// level, the single point for a `Unit` level (S-53).
     fn base(&self) -> Expr {
-        let span = Span::point(0);
+        let span = self.span;
         if self.entity == UNIT_ENTITY { ident(UNIT_ROOT, span) } else { ident(self.source, span) }
     }
 
@@ -1726,10 +1730,9 @@ impl LevelWalk<'_> {
         }
     }
 
-    fn attr_view(&mut self, field: &[String]) -> String {
+    fn attr_view(&mut self, field: &[String], span: Span) -> String {
         let name = format!("{}#{}", self.level_name, field.join("."));
-        self.d
-            .emit_let(&name, compose(self.base(), field_path(field, Span::point(0)), Span::point(0)));
+        self.d.emit_let(&name, compose(self.base(), field_path(field, span), span), span);
         name
     }
 

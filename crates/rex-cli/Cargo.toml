@@ -8,6 +8,8 @@ name = "rex"
 path = "src/main.rs"
 
 [dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+notify = "8.2.0"
 rex = { path = "../rex-core" }
 rex-codegen = { path = "../rex-codegen" }
 rustyline = "18.0.1"

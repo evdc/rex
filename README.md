@@ -32,7 +32,7 @@ Workspace layout:
 | Path | What |
 |---|---|
 | `crates/rex-core` | Library (`rex`): lexer, parser, checker/elaborator, `view` desugar, batch interpreter, DBSP engine, value encoding. |
-| `crates/rex-cli` | The `rex` binary: REPL, run-a-file, and `rex build` (UI codegen). |
+| `crates/rex-cli` | The `rex` binary: `check`, `run`, `build [--watch]` (UI codegen), and the REPL. |
 | `crates/rex-codegen` | Shape IR → generated TypeScript (`main.ts`: shape tree, templates, event wiring). |
 | `crates/rex-wasm` | `RexApp`, the wasm-bindgen API (`dispatch`, `snapshot`, `apply_new`, `update_fields`, `retract`, `read_view`). |
 | `js/rex-runtime` | Boot + persistence: restores from an IndexedDB snapshot and event log, appends every dispatched event (S-80). |
@@ -45,14 +45,19 @@ Workspace layout:
 cargo build
 cargo test --workspace         # ~180 tests incl. property tests vs. the batch oracle
 cargo run -p rex-cli                         # start the REPL
-cargo run -p rex-cli -- path/to/prog.rex     # parse, type-check, and batch-evaluate a file
+cargo run -p rex-cli -- check app.rex        # diagnostics only; exit 1 on errors
+cargo run -p rex-cli -- run prog.rex         # check, then batch-evaluate and print every view
 cargo run -p rex-cli -- build app.rex -o app.ts   # compile `view`s to a TS module
+cargo run -p rex-cli -- build app.rex -o app.ts --watch   # ...and rebuild on every save
 (cd js/rex-dom && npx vitest run)            # shaper tests
 ```
 
-Running a file prints the canonical s-expression AST, a type-check result, and
-each view's materialized contents. `cargo run -p rex-cli --
-crates/rex-core/tests/fixtures/spec12.rex` is the best core demo; the Kanban
+`rex check` takes several files, prints diagnostics as `file:line:col` with the
+offending line underlined, and exits 0 (clean), 1 (errors; or warnings with
+`--deny-warnings`) or 2 (unreadable file, bad flag). `rex run` checks, then
+prints each view's materialized contents (`--ast` adds the s-expression);
+`rex prog.rex` still means `rex run prog.rex`. `cargo run -p rex-cli --
+run crates/rex-core/tests/fixtures/spec12.rex` is the best core demo; the Kanban
 app is the best whole-system demo — run `scripts/build-wasm.sh` to build
 `rex-wasm` and generate the wasm-bindgen glue into `examples/kanban/src/pkg/` (copied into every other example)
 (gitignored, not committed), then `cd examples/kanban && npm run build` and

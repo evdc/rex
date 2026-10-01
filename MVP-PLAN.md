@@ -1168,13 +1168,28 @@ Bootstrap stylesheet is replaced by a small inline one (the glyphicon is a CSS
 *Acceptance:* existing Playwright suite unchanged and green; per-list card
 count bind (S-60) shown.
 
-#### S-93 `rex` CLI: `check`, `build`, `run`, `--watch` (M, deps S-20) ∥
+#### S-93 `rex` CLI: `check`, `build`, `run`, `--watch` (M, deps S-20) ∥ — **done 2026-09-30** (`crates/rex-cli/src/main.rs`, `tests/cli.rs` (17), `Diagnostic::render_file`, `crates/rex-core/tests/diagnostic.rs` (5))
 *Files:* `crates/rex-cli/src/main.rs` (use `clap`).
 *Subtasks:* `rex check app.rex` (diagnostics only, exit code), `rex build`
 (as today, `--watch` via `notify`), `rex run` (batch eval, current
 behaviour), REPL keeps `rex` with no args. Diagnostics render spans for view
 bodies (verify handler/element spans are real, not `Span::default()`).
 *Acceptance:* each subcommand has an integration test in `crates/rex-cli/tests/`.
+*Landed as:* `clap` subcommands `check <files…> [--deny-warnings]`, `run <file>
+[--ast]`, `build <file> [-o] [--import] [--debug] [--watch]`, and `repl` (also
+plain `rex`); a bare `rex file.rex` is rewritten to `run`. Exit codes: 0 ok, 1
+program errors (or warnings under `--deny-warnings`), 2 usage/I-O. Diagnostics
+print as `file:line:col` with a gutter and underline (`render_file`; the old
+`render` is unchanged for the wasm bridge). `--watch` uses `notify` on the
+file's *directory* (editors save via rename), settles 80 ms, and keeps watching
+through a failed build. `run` no longer prints the s-expression unless `--ast`.
+*Span audit:* of 18 deliberately broken view programs, two reported at 1:1
+(`Span::point(0)`): a text bind `{ .nope }` and views built on an unknown
+`select` source. `emit_let`/`attr_view`/`LevelWalk::base` now take real spans;
+`tests/cli.rs` pins the bind, `do` handler, order key and `if` positions.
+*Known:* an unknown `select` source still reports once at the select and once
+more from the row's own bind (a cascade, now at real positions); there is no
+`--format json`, and `rex check` does not read stdin.
 
 #### S-94 Docs pass (S, deps everything above)
 *Subtasks:* `README.md` status + "What's left" rewritten; `SYNTAX.md` is the
