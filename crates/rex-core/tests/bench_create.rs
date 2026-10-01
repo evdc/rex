@@ -4,7 +4,7 @@
 //! `cargo test --release -p rex --test bench_create -- --ignored --nocapture`
 //! and read the microseconds. The wasm figure is in the browser spec.
 
-use rex::dbsp::{ArgValue, Engine};
+use rex::dbsp::{ArgValue, Circuit, Engine, NodeId};
 use rex::eval::Value;
 use rex::events::dispatch_event;
 use std::collections::HashMap;
@@ -12,6 +12,14 @@ use std::time::Instant;
 
 fn labels(n: i64) -> ArgValue {
     ArgValue::Rel((0..n).map(|i| (Value::Int(i), Value::text(&format!("pretty red table {i}")), 1)).collect())
+}
+
+/// P-4b: how the kept integrals are stored — columns vs general relations.
+/// Run after the events too: a column that demoted shows up as general.
+fn integrals(c: &Circuit) -> String {
+    let kept: Vec<NodeId> = (0..c.node_count()).map(NodeId).filter(|&id| c.keeps_integral(id)).collect();
+    let cols = kept.iter().filter(|&&id| c.integral(id).is_column()).count();
+    format!("{} integrals kept: {cols} columns, {} general", kept.len(), kept.len() - cols)
 }
 
 fn args(pairs: Vec<(&str, ArgValue)>) -> HashMap<String, ArgValue> {
@@ -32,7 +40,7 @@ fn engine_cost_of_each_operation() {
         engine.apply_typed_stmt(stmt, &mut values);
     }
     let c = &engine.circuit;
-    println!("circuit: {} nodes, {} inputs", c.node_count(), c.input_keys().count());
+    println!("circuit: {} nodes, {} inputs; {}", c.node_count(), c.input_keys().count(), integrals(c));
     let mut run = |label: &str, name: &str, a: Vec<(&str, ArgValue)>| {
         let t = Instant::now();
         let (_, step) = dispatch_event(&mut engine, &checked.env, &checked.shapes.events, name, &args(a))
@@ -48,6 +56,7 @@ fn engine_cost_of_each_operation() {
     run("Update()", "Update", vec![]);
     run("SwapRows()", "SwapRows", vec![]);
     run("Clear()", "Clear", vec![]);
+    println!("after: {}", integrals(&engine.circuit));
 }
 
 /// P-2: TodoMVC has real intermediate nodes (filter joins, counts), so it is
@@ -65,6 +74,7 @@ fn todomvc_engine_cost() {
     for stmt in &prog.stmts {
         engine.apply_typed_stmt(stmt, &mut values);
     }
+    println!("circuit: {} nodes; {}", engine.circuit.node_count(), integrals(&engine.circuit));
     let mut dispatch = |name: &str, a: Vec<(&str, ArgValue)>| {
         dispatch_event(&mut engine, &checked.env, &checked.shapes.events, name, &args(a))
             .unwrap_or_else(|e| panic!("{name}: {e}"))
@@ -84,7 +94,8 @@ fn todomvc_engine_cost() {
     run("ToggleAll(True)", "ToggleAll", vec![("done", ArgValue::Value(Value::atom("True")))]);
     run("SetFilter(Active)", "SetFilter", vec![("f", ArgValue::Value(Value::atom("Active")))]);
     run("ToggleAll(False)", "ToggleAll", vec![("done", ArgValue::Value(Value::atom("False")))]);
-    run("ClearCompleted()", "ClearCompleted", vec![]);
-    run("ToggleAll(True)", "ToggleAll", vec![("done", ArgValue::Value(Value::atom("True")))]);
-    run("ClearCompleted()", "ClearCompleted", vec![]);
+    run("ClearCompleted() (none)", "ClearCompleted", vec![]);
+    run("ToggleAll(True) again", "ToggleAll", vec![("done", ArgValue::Value(Value::atom("True")))]);
+    run("ClearCompleted() (2k)", "ClearCompleted", vec![]);
+    println!("after: {}", integrals(&engine.circuit));
 }

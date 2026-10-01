@@ -10,7 +10,7 @@
 //! `−/+` on the attribute view, never a whole-entity remove-plus-mount.
 
 use rex::dbsp::Engine;
-use rex::eval::relation::{BTreeRelation, BinaryRelation};
+use rex::eval::relation::BinaryRelation;
 use rex::eval::Value;
 use rex::types::typed::TProgram;
 use std::collections::HashMap;
@@ -62,11 +62,11 @@ fn text(s: &str) -> Value {
 }
 
 /// The expected delta as sorted (left, right, weight) triples.
-fn triples(rel: &BTreeRelation) -> Vec<(Value, Value, i64)> {
+fn triples(rel: &dyn BinaryRelation) -> Vec<(Value, Value, i64)> {
     rel.iter().collect()
 }
 
-fn delta<'a>(res: &'a rex::dbsp::StepResult, view: &str) -> &'a BTreeRelation {
+fn delta<'a>(res: &'a rex::dbsp::StepResult, view: &str) -> &'a rex::dbsp::Batch {
     res.view_deltas.get(view).unwrap_or_else(|| panic!("no delta for view `{view}`"))
 }
 

@@ -12,9 +12,20 @@
 //!    that keep one (P-2): base inputs, views, fix-region members, and any
 //!    node a parent's kernel reads whole ([`Node::integral_reads`]). A chain
 //!    of linear nodes feeding only other linear nodes keeps no state at all.
+//!
+//! Deltas are flat sorted [`Batch`]es (P-3); integrals are [`Integral`]s, a
+//! column for a node keyed by one sort's ids and a general indexed relation
+//! otherwise (P-4, chosen by [`column_sort`] when the node starts keeping one).
+//!
+//! Equal nodes are one node ([`Circuit::add_node`], P-2b). Adding views one at
+//! a time means a later view can reuse a node that has already stepped without
+//! an integral; its backfill then recomputes that node from its children's
+//! history ([`Circuit::backfill`]).
 
+use super::batch::{Batch, BatchBuilder, Row};
+use super::integral::Integral;
 use super::node::{Ctx, InputKey, Node, NodeId};
-use crate::eval::relation::{BTreeRelation, BinaryRelation};
+use super::props::column_sort;
 use crate::eval::value::Value;
 use crate::types::typed::Total;
 use std::collections::HashMap;
@@ -53,7 +64,7 @@ impl Transaction {
 /// The per-step output: each named view's delta for this step.
 #[derive(Debug, Default)]
 pub struct StepResult {
-    pub view_deltas: HashMap<String, BTreeRelation>,
+    pub view_deltas: HashMap<String, Batch>,
 }
 
 #[derive(Debug, Default)]
@@ -61,15 +72,23 @@ pub struct Circuit {
     nodes: Vec<Node>,
     /// `I(output)` of every node, parallel to `nodes`; stays empty for a node
     /// that does not `keep` one.
-    integrals: Vec<BTreeRelation>,
+    integrals: Vec<Integral>,
     /// Whether each node's integral is maintained (P-2): demand from parents,
     /// view registration, or being an input. Parallel to `nodes`.
     keep: Vec<bool>,
     /// How many nodes have been through a step. A node below this mark that
-    /// did not keep an integral cannot start keeping one — its history is gone.
+    /// did not keep an integral has no record of its history; it can serve new
+    /// parents only by being recomputed (`Node::is_replayable`, `revive`).
     stepped: usize,
+    /// Stepped nodes that started keeping an integral after the fact (P-2b).
+    /// Their integral is rebuilt by the next [`backfill`](Self::backfill),
+    /// which must come before any step.
+    revive: Vec<NodeId>,
     /// Base-table dedup: every mention of the same field must be the same node.
     inputs: HashMap<InputKey, NodeId>,
+    /// Every other node by [`Node::share_key`] (P-2b), so a subterm that
+    /// lowering reaches twice — within one view or across views — is one node.
+    shared: HashMap<String, NodeId>,
     /// View name -> producing node.
     outputs: HashMap<String, NodeId>,
     /// Nested fixpoint subcircuits (§8), indexed by `Node::FixOutput.region`.
@@ -103,7 +122,7 @@ pub struct FixRegion {
     /// Inner node producing each member's body.
     member_outs: Vec<NodeId>,
     /// Last converged fixpoint per member (Exit state).
-    prev: Vec<BTreeRelation>,
+    prev: Vec<Batch>,
     /// Whether the region has ever been evaluated. A region with no imports
     /// (a constant-only body) has no children to wake it, so — like an
     /// unfired `ConstSingleton` — it must fire once regardless of quiescence.
@@ -111,12 +130,10 @@ pub struct FixRegion {
 }
 
 /// Z-set subtraction `a − b` (core-only, §6).
-fn zsub(a: &BTreeRelation, b: &BTreeRelation) -> BTreeRelation {
-    let mut out = a.clone();
-    for (l, r, w) in b.triples() {
-        out.add(l.clone(), r.clone(), -w);
-    }
-    out
+fn zsub(a: &Batch, b: &Batch) -> Batch {
+    let mut rows: Vec<Row> = a.as_slice().to_vec();
+    rows.extend(b.triples().map(|(l, r, w)| (l.clone(), r.clone(), -w)));
+    Batch::from_rows(rows)
 }
 
 impl FixRegion {
@@ -124,17 +141,15 @@ impl FixRegion {
     /// each member's *outer* delta. `ctx` reads the imports' outer deltas and
     /// pre-step integrals (under a backfill floor this still yields exactly
     /// the full current value).
-    fn evaluate(&mut self, ctx: &Ctx<'_>) -> Vec<BTreeRelation> {
+    fn evaluate(&mut self, ctx: &Ctx<'_>) -> Vec<Batch> {
         self.fired = true;
         self.inner.reset_state();
         // Enter (δ₀): each import's full post-step value at iteration 0.
-        let mut d = vec![BTreeRelation::new(); self.inner.nodes.len()];
+        let mut d = vec![Batch::new(); self.inner.nodes.len()];
         for (k, outer) in self.imports.iter().enumerate() {
-            let mut full = ctx.integral(*outer).clone();
-            for (l, r, w) in ctx.delta(*outer).triples() {
-                full.add(l.clone(), r.clone(), w);
-            }
-            d[self.import_nodes[k].0] = full;
+            let mut full = ctx.integral(*outer).to_sorted_vec();
+            full.extend_from_slice(ctx.delta(*outer).as_slice());
+            d[self.import_nodes[k].0] = Batch::from_rows(full);
         }
         loop {
             let pass = self.inner.iterate(d);
@@ -143,19 +158,17 @@ impl FixRegion {
             // pass's member delta. The feedback slot telescopes: its integral
             // is distinct(member_out) as of the previous pass, so the clamp
             // *changes* are exactly what it hasn't integrated yet.
-            d = vec![BTreeRelation::new(); self.inner.nodes.len()];
+            d = vec![Batch::new(); self.inner.nodes.len()];
             let mut changed = false;
             let clamp = |w: i64| (w > 0) as i64;
             for m in 0..self.member_outs.len() {
                 let out_int = self.inner.integral(self.member_outs[m]);
-                let mut fb = BTreeRelation::new();
+                let mut fb = BatchBuilder::new();
                 for (l, r, dw) in pass[self.member_outs[m].0].triples() {
                     let after = out_int.weight(l, r); // post-commit
-                    let change = clamp(after) - clamp(after - dw);
-                    if change != 0 {
-                        fb.add(l.clone(), r.clone(), change);
-                    }
+                    fb.push(l.clone(), r.clone(), clamp(after) - clamp(after - dw));
                 }
+                let fb = fb.finish();
                 if !fb.is_empty() {
                     changed = true;
                     d[self.rec_inputs[m].0] = fb;
@@ -168,7 +181,7 @@ impl FixRegion {
         // Exit: diff the converged fixpoint against the previous outer step's.
         (0..self.member_outs.len())
             .map(|m| {
-                let result = self.inner.integral(self.rec_inputs[m]).clone();
+                let result = self.inner.integral(self.rec_inputs[m]).to_batch();
                 let delta = zsub(&result, &self.prev[m]);
                 self.prev[m] = result;
                 delta
@@ -182,31 +195,63 @@ impl Circuit {
         Circuit::default()
     }
 
-    /// Append a node to the arena. Children must already exist (topological
-    /// order is the circuit's core invariant).
+    /// Append a node to the arena, or return an existing node that computes
+    /// the same relation from the same children (P-2b). Children must already
+    /// exist (topological order is the circuit's core invariant).
+    ///
+    /// An existing node is shared only if it can present its history to a new
+    /// view's backfill (`replayable`).
     pub fn add_node(&mut self, node: Node) -> NodeId {
         let id = NodeId(self.nodes.len());
         debug_assert!(
             node.children().iter().all(|c| c.0 < id.0),
             "arena must stay topologically ordered"
         );
+        let key = node.share_key();
+        if let Some(&old) = key.as_ref().and_then(|k| self.shared.get(k))
+            && self.replayable(old)
+        {
+            return old;
+        }
+        if let Some(key) = key {
+            self.shared.insert(key, id);
+        }
         let reads = node.integral_reads();
-        self.keep.push(matches!(node, Node::Input(_) | Node::FixInput));
+        let keep = matches!(node, Node::Input(_) | Node::FixInput);
+        self.keep.push(false);
         self.nodes.push(node);
-        self.integrals.push(BTreeRelation::new());
+        self.integrals.push(Integral::default());
+        if keep {
+            self.keep_integral(id);
+        }
         for child in reads {
             self.keep_integral(child);
         }
         id
     }
 
-    /// Demand `id`'s integral. Only a node that has never stepped can start
-    /// keeping one; lowering guarantees that, since a new node can name only
-    /// new nodes, inputs, and views (which already keep theirs).
+    /// Whether a backfill can present `id`'s full history: it has not stepped
+    /// yet, it keeps its integral, or it can be recomputed from nodes that can.
+    fn replayable(&self, id: NodeId) -> bool {
+        id.0 >= self.stepped
+            || self.keep[id.0]
+            || (self.nodes[id.0].is_replayable() && self.nodes[id.0].children().iter().all(|c| self.replayable(*c)))
+    }
+
+    /// Demand `id`'s integral. A node that stepped without one can start
+    /// keeping one only if it is replayable, and then its integral is rebuilt
+    /// at the next backfill; node sharing only ever hands out such nodes.
+    ///
+    /// This is where the integral's representation is picked (P-4b): a
+    /// column when the node's keys are one sort's ids, else general.
     fn keep_integral(&mut self, id: NodeId) {
         if !self.keep[id.0] {
-            assert!(id.0 >= self.stepped, "node {} needs an integral it never kept", id.0);
+            if id.0 < self.stepped {
+                assert!(self.replayable(id), "node {} needs an integral it never kept", id.0);
+                self.revive.push(id);
+            }
             self.keep[id.0] = true;
+            self.integrals[id.0] = Integral::empty(column_sort(self, id));
         }
     }
 
@@ -243,7 +288,7 @@ impl Circuit {
             import_nodes,
             rec_inputs,
             member_outs,
-            prev: vec![BTreeRelation::new(); members],
+            prev: vec![Batch::new(); members],
             fired: false,
         });
         self.fixes.len() - 1
@@ -255,8 +300,9 @@ impl Circuit {
         for node in &mut self.nodes {
             node.reset();
         }
-        for i in &mut self.integrals {
-            *i = BTreeRelation::new();
+        for i in 0..self.nodes.len() {
+            let column = if self.keep[i] { column_sort(self, NodeId(i)) } else { None };
+            self.integrals[i] = Integral::empty(column);
         }
     }
 
@@ -266,7 +312,7 @@ impl Circuit {
     /// clamp incrementally. Same discipline as [`Circuit::run`], minus
     /// transaction seeding and view reporting. Integrals persist across
     /// iterations — that persistence is the semi-naive optimization.
-    fn iterate(&mut self, mut deltas: Vec<BTreeRelation>) -> Vec<BTreeRelation> {
+    fn iterate(&mut self, mut deltas: Vec<Batch>) -> Vec<Batch> {
         for i in 0..self.nodes.len() {
             if matches!(self.nodes[i], Node::Input(_) | Node::FixInput) {
                 continue; // seeded, never computed
@@ -280,17 +326,16 @@ impl Circuit {
             }
             rest[0] = self.nodes[i].compute(&ctx);
         }
-        self.commit(&deltas, 0);
+        self.commit(&deltas, 0, &[]);
         deltas
     }
 
-    /// Fold `deltas[from..]` into the integrals of the nodes that keep one.
-    fn commit(&mut self, deltas: &[BTreeRelation], from: usize) {
-        for (i, delta) in deltas.iter().enumerate().skip(from) {
-            if self.keep[i] {
-                for (l, r, w) in delta.triples() {
-                    self.integrals[i].add(l.clone(), r.clone(), w);
-                }
+    /// Fold `deltas[from..]`, and the replayed deltas below `from`, into the
+    /// integrals of the nodes that keep one.
+    fn commit(&mut self, deltas: &[Batch], from: usize, replay: &[bool]) {
+        for (i, delta) in deltas.iter().enumerate() {
+            if self.keep[i] && (i >= from || replay.get(i) == Some(&true)) {
+                self.integrals[i].commit(delta);
             }
         }
         self.stepped = self.nodes.len();
@@ -309,7 +354,7 @@ impl Circuit {
     }
 
     /// The integrated (full) contents of a named view.
-    pub fn view(&self, name: &str) -> Option<&BTreeRelation> {
+    pub fn view(&self, name: &str) -> Option<&Integral> {
         self.outputs.get(name).map(|id| &self.integrals[id.0])
     }
 
@@ -326,13 +371,13 @@ impl Circuit {
 
     /// The integrated output of a node that keeps one (an input, a view, or a
     /// node some kernel reads whole — see [`Node::integral_reads`]).
-    pub fn integral(&self, id: NodeId) -> &BTreeRelation {
+    pub fn integral(&self, id: NodeId) -> &Integral {
         assert!(self.keep[id.0], "node {} keeps no integral", id.0);
         &self.integrals[id.0]
     }
 
     /// The integrated contents of a base table, if it has been touched.
-    pub fn input_integral(&self, key: &InputKey) -> Option<&BTreeRelation> {
+    pub fn input_integral(&self, key: &InputKey) -> Option<&Integral> {
         self.inputs.get(key).map(|id| &self.integrals[id.0])
     }
 
@@ -355,7 +400,7 @@ impl Circuit {
     /// Run one transaction through the circuit and return each view's delta.
     pub fn step(&mut self, tx: &Transaction) -> StepResult {
         let deltas = self.seed_deltas(tx);
-        self.run(0, deltas, true)
+        self.run(0, &[], deltas, true)
     }
 
     /// Run one transaction purely for its effect on state, skipping the
@@ -364,22 +409,21 @@ impl Circuit {
     /// listening for per-step deltas.
     pub fn step_silent(&mut self, tx: &Transaction) {
         let deltas = self.seed_deltas(tx);
-        self.run(0, deltas, false);
+        self.run(0, &[], deltas, false);
     }
 
     /// Ensure every targeted base table exists (so data arriving ahead of
     /// any view that reads it is kept), then seed each input node's delta
     /// from the transaction.
-    fn seed_deltas(&mut self, tx: &Transaction) -> Vec<BTreeRelation> {
+    fn seed_deltas(&mut self, tx: &Transaction) -> Vec<Batch> {
         for (key, _, _, _) in &tx.deltas {
             self.input(*key);
         }
-        let mut deltas: Vec<BTreeRelation> = vec![BTreeRelation::new(); self.nodes.len()];
+        let mut rows: Vec<Vec<Row>> = vec![Vec::new(); self.nodes.len()];
         for (key, l, r, w) in &tx.deltas {
-            let id = self.inputs[key];
-            deltas[id.0].add(l.clone(), r.clone(), *w);
+            rows[self.inputs[key].0].push((l.clone(), r.clone(), *w));
         }
-        deltas
+        rows.into_iter().map(Batch::from_rows).collect()
     }
 
     /// Evaluate the freshly appended node suffix `from..` over the data already
@@ -389,37 +433,74 @@ impl Circuit {
     /// and reads as an *empty* integral, so the history is seen exactly once.
     /// Because every delta rule is exact, δ-from-empty equals batch evaluation
     /// by construction. Pre-existing nodes are neither recomputed nor
-    /// recommitted; their integrals are presented as deltas by reference
-    /// (`Ctx::delta` redirects below-floor reads), so nothing is cloned.
+    /// recommitted; the ones a new node reads have their integral copied into
+    /// their delta slot as a batch.
     ///
     /// `views` is named explicitly because a view may alias a node below
     /// `from` (P-1: `.num` at a row level *is* the `num` input), which
     /// the suffix alone would not reveal.
+    ///
+    /// A below-floor node that never kept an integral, or only just started
+    /// to (`revive`), is instead reset and recomputed in this pass from its
+    /// children's history (`Node::is_replayable`), which yields its full
+    /// value and rebuilds its private state as it was. A revived node commits
+    /// that value as its first integral.
     pub fn backfill(&mut self, from: usize, views: &[&str]) -> StepResult {
-        self.run(from, vec![BTreeRelation::new(); self.nodes.len()], false);
+        // Below-floor nodes a new node reads, transitively through the ones
+        // that cannot present their history as an integral.
+        let revived = std::mem::take(&mut self.revive);
+        let mut replay = vec![false; self.nodes.len()];
+        let mut deltas = vec![Batch::new(); self.nodes.len()];
+        let mut stack: Vec<NodeId> = revived.clone();
+        for node in &self.nodes[from..] {
+            stack.extend(node.children());
+        }
+        while let Some(id) = stack.pop() {
+            if id.0 >= from || replay[id.0] {
+                continue;
+            }
+            if self.keep[id.0] && !revived.contains(&id) {
+                // Presents its history as its delta (idempotent on revisit).
+                deltas[id.0] = self.integrals[id.0].to_batch();
+                continue;
+            }
+            assert!(self.nodes[id.0].is_replayable(), "backfill cannot recompute node {}", id.0);
+            replay[id.0] = true;
+            stack.extend(self.nodes[id.0].children());
+        }
+        self.run(from, &replay, deltas, false);
         let mut result = StepResult::default();
         for name in views {
             let id = self.outputs[*name];
-            result.view_deltas.insert(name.to_string(), self.integrals[id.0].clone());
+            result.view_deltas.insert(name.to_string(), self.integrals[id.0].to_batch());
         }
         result
     }
 
-    /// The shared driver: compute nodes `floor..` in topological order, commit
-    /// their deltas, and — when `collect` — report every view's delta.
+    /// The shared driver: compute the below-floor nodes marked in `replay`
+    /// (a backfill's recomputed ones), then nodes `floor..`, in topological
+    /// order; commit their deltas, and — when `collect` — report every view's
+    /// delta.
     /// `collect: false` (S-21's silent replay path)
     /// skips only that final per-view clone; every node still computes and
     /// commits, so state after a silent step is identical to a normal one.
-    fn run(&mut self, floor: usize, mut deltas: Vec<BTreeRelation>, collect: bool) -> StepResult {
+    fn run(&mut self, floor: usize, replay: &[bool], mut deltas: Vec<Batch>, collect: bool) -> StepResult {
+        assert!(self.revive.is_empty(), "a node started keeping an integral; backfill before stepping");
         // Per-step cache of each fix region's member deltas (a region is
         // evaluated once even though it has one FixOutput per member).
-        let mut region_cache: Vec<Option<Vec<BTreeRelation>>> = vec![None; self.fixes.len()];
+        let mut region_cache: Vec<Option<Vec<Batch>>> = vec![None; self.fixes.len()];
 
         // Phase 1: compute. Shared integrals stay pre-step throughout; nodes
         // below `floor` keep their seeded deltas and read as empty integrals.
-        for i in floor..self.nodes.len() {
+        let replayed = (0..floor).filter(|&i| replay[i]);
+        for i in replayed.chain(floor..self.nodes.len()) {
             if matches!(self.nodes[i], Node::Input(_)) {
                 continue; // seeded, never computed
+            }
+            if i < floor {
+                // Replayed: start from a fresh node (an unfired singleton, an
+                // unseeded aggregate) and rebuild its state from the history.
+                self.nodes[i].reset();
             }
             let (prev, rest) = deltas.split_at_mut(i);
             let ctx = Ctx { deltas: prev, integrals: &self.integrals, keep: &self.keep, floor };
@@ -453,12 +534,22 @@ impl Circuit {
         }
 
         // Phase 2: commit — fold computed deltas into the integrals kept.
-        self.commit(&deltas, floor);
+        self.commit(&deltas, floor, replay);
 
+        // Hand each view its node's delta, moved out; only a node that several
+        // views alias (P-1) is cloned.
         let mut result = StepResult::default();
         if collect {
+            let mut first: HashMap<NodeId, &String> = HashMap::new();
             for (name, id) in &self.outputs {
-                result.view_deltas.insert(name.clone(), deltas[id.0].clone());
+                let delta = match first.get(id) {
+                    Some(other) => result.view_deltas[*other].clone(),
+                    None => {
+                        first.insert(*id, name);
+                        std::mem::take(&mut deltas[id.0])
+                    }
+                };
+                result.view_deltas.insert(name.clone(), delta);
             }
         }
         result

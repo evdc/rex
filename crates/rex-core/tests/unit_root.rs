@@ -56,7 +56,7 @@ fn fire(app: &mut App, name: &str, args: &[(&str, Value)]) -> HashMap<String, Ve
 }
 
 fn view(app: &App, name: &str) -> BTreeRelation {
-    app.engine.circuit.view(name).cloned().unwrap_or_default()
+    app.engine.circuit.view(name).map(|v| v.to_relation()).unwrap_or_default()
 }
 
 fn present(app: &App, name: &str) -> bool {

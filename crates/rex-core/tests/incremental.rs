@@ -29,7 +29,7 @@ fn assert_views_match_batch(engine: &Engine, batch_src: &str, context: &str) {
     let batch = eval::run(&rex::parse(batch_src).program);
     for name in VIEWS {
         assert_eq!(
-            engine.circuit.view(name).unwrap_or(&BTreeRelation::new()),
+            engine.circuit.view(name).map(|v| v.to_relation()).as_ref().unwrap_or(&BTreeRelation::new()),
             batch.view(name).expect("batch view"),
             "view `{name}` diverged from batch ({context})"
         );

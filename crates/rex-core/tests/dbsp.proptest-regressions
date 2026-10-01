@@ -5,3 +5,5 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 437bbc76fd158ad627f1396f1f04a6a7a06deb6e83fd53a8003c2d173c782182 # shrinks to steps_a = [[]], steps_b = [[(0, 0, -1)]]
+cc 1d8ee4f9b99881b36ccad55fe3908586f097ea3c92104044aa4b0ea06798bdc3 # shrinks to steps = [[Set(5, 0)], [Raw(5, 1, -1)]]
+cc 05791ae42130b3d21c9b20f8a3457d0bd6c1fb2513347b5d64240e2f5520bb61 # shrinks to sa = [[], [], [], [], [], [Set(5, 2)], [], [Raw(5, 0, -1)]], sb = [[]], sl = [[(5, true)]]

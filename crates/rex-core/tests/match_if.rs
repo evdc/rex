@@ -61,7 +61,7 @@ fn fire(app: &mut App, name: &str, args: &[(&str, Value)]) {
 
 /// The texts of the todos a `Todo`-coreflexive view currently selects.
 fn selected(app: &App, view: &str) -> Vec<String> {
-    let rel = app.engine.circuit.view(view).cloned().unwrap_or_default();
+    let rel = app.engine.circuit.view(view).map(|v| v.to_relation()).unwrap_or_default();
     let texts = app
         .engine
         .circuit
@@ -88,7 +88,7 @@ fn selected(app: &App, view: &str) -> Vec<String> {
 fn assert_matches_batch(app: &App, src: &str, view: &str, context: &str) {
     let batch = eval::run(&rex::parse(src).program);
     assert_eq!(
-        app.engine.circuit.view(view).unwrap_or(&BTreeRelation::new()),
+        app.engine.circuit.view(view).map(|v| v.to_relation()).as_ref().unwrap_or(&BTreeRelation::new()),
         batch.view(view).expect("batch view"),
         "view `{view}` diverged from batch ({context})"
     );
@@ -253,7 +253,7 @@ let t1 = new Todo { text: "open", completed: False }
 let label : Todo -> Text = if .completed then "yes" else "no"
 "#;
     let app = build(src);
-    let rel = app.engine.circuit.view("label").cloned().unwrap_or_default();
+    let rel = app.engine.circuit.view("label").map(|v| v.to_relation()).unwrap_or_default();
     let mut got: Vec<String> = rel
         .triples()
         .filter(|(_, _, w)| *w > 0)

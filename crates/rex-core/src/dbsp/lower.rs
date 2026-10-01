@@ -3,7 +3,9 @@
 //!
 //! A straight recursive walk: children are lowered before parents, preserving
 //! the arena's topological invariant. Base tables dedup through
-//! [`Circuit::input`]; `View` references resolve to the producing node of an
+//! [`Circuit::input`], and every other node through [`Circuit::add_node`]'s
+//! sharing (P-2b), so a subterm reached twice — within a view or across views
+//! — is one node; `View` references resolve to the producing node of an
 //! already-lowered `let` (so `add_view` must be called in program order).
 //! Money/Int tagging and the `By`/antijoin desugarings mirror the batch
 //! interpreter (`eval::interp`) exactly — it is the semantics oracle.
@@ -16,6 +18,7 @@
 
 use super::circuit::Circuit;
 use super::node::{CoKeyedFn, InputKey, Node, NodeId, Scalar};
+use super::props::{anchor, functional, node_coreflexive_on, node_values_anchor};
 use crate::eval::intern::intern;
 use crate::eval::interp::lit_value;
 use crate::eval::relation::BTreeRelation;
@@ -147,39 +150,22 @@ fn materialize(circuit: &mut Circuit, scope: &mut Option<FixScope>, low: Low) ->
 // - a field input `Field(E, f)` holds at most one row per id, at weight 1, and
 //   only for live ids ("no orphans").
 //
-// From it: `Identity(E) . X` is `X` when X's left keys are live `E` ids; a
-// co-keyed op against a constant over the same live ids is a per-row map; and
-// `Identity(E)[X]` is `X` when X is already a weight-1 coreflexive on live ids.
+// From it: `Identity(E) . X` is `X` when X's left keys are live `E` ids, and
+// `X . Identity(E)` is `X` when X's values are (P-2b); a co-keyed op against a
+// constant over the same live ids is a per-row map; and `Identity(E)[X]` is
+// `X` when X is already a weight-1 coreflexive on live ids.
 // The rewrites inspect *nodes*, so a fix region's inner circuit (whose inputs
 // are `FixInput` imports) is never rewritten.
 
-/// The sort whose live ids bound `id`'s left keys at every step boundary, if
-/// the node's construction guarantees one.
-fn anchor(c: &Circuit, id: NodeId) -> Option<SortId> {
-    match c.node(id) {
-        Node::Input(InputKey::Identity(s) | InputKey::Field(s, _)) => Some(*s),
-        Node::MapConst(a, _)
-        | Node::FilterMap(a, _)
-        | Node::Filter(a, _)
-        | Node::InRel(a, _)
-        | Node::Proj(a, _)
-        | Node::Distinct(a) => anchor(c, *a),
-        Node::Compose { l, .. } | Node::Semijoin { l, .. } | Node::Antijoin { l, .. } => anchor(c, *l),
-        // Co-keyed output needs a key on both sides; either side bounds it.
-        Node::CoKeyed { l, r, .. } => anchor(c, *l).or_else(|| anchor(c, *r)),
-        // Union adds weights and intersect takes their `min` (−1 against an
-        // absent row is −1), so a key from either side can survive.
-        Node::Union(a, b) | Node::Intersect(a, b) => anchor(c, *a).filter(|s| anchor(c, *b) == Some(*s)),
-        _ => None,
-    }
-}
-
-/// Whether `id` holds at most one row per left key, at weight 1.
-fn functional(c: &Circuit, id: NodeId) -> bool {
-    match c.node(id) {
-        Node::Input(_) | Node::Aggregate { .. } => true,
-        Node::MapConst(a, _) | Node::FilterMap(a, _) | Node::Filter(a, _) | Node::InRel(a, _) => functional(c, *a),
-        _ => false,
+/// The sort whose live ids bound `low`'s *values* (right column) at every
+/// step boundary, if its construction guarantees one: then `low . Identity(E)`
+/// is `low` in every state. A field's values never qualify, even when they
+/// are ids: nothing cascades a retract to the rows that point at it.
+fn values_anchor(c: &Circuit, low: &Low) -> Option<SortId> {
+    match low {
+        Low::Map { sort, f, .. } => f.is_coreflexive().then_some(*sort),
+        Low::Const { .. } => None,
+        Low::Node(id) => node_values_anchor(c, *id),
     }
 }
 
@@ -196,15 +182,7 @@ fn low_anchor(c: &Circuit, low: &Low) -> Option<SortId> {
 fn coreflexive_on(c: &Circuit, low: &Low, sort: SortId) -> bool {
     match low {
         Low::Map { input, sort: s, f } => *s == sort && f.is_coreflexive() && functional(c, *input),
-        Low::Node(id) => {
-            anchor(c, *id) == Some(sort)
-                && match c.node(*id) {
-                    Node::Input(InputKey::Identity(_)) => true,
-                    Node::FilterMap(a, f) => f.is_coreflexive() && functional(c, *a),
-                    Node::InRel(a, _) => functional(c, *a),
-                    _ => false,
-                }
-        }
+        Low::Node(id) => node_coreflexive_on(c, *id, sort),
         Low::Const { .. } => false,
     }
 }
@@ -244,15 +222,9 @@ fn lower_low(
     let node = match &te.kind {
         TExprKind::Const { lit, dom } => return Low::Const { dom: *dom, value: lit_value(lit) },
         TExprKind::Compose(a, b) => {
-            let l = lower_in(circuit, scope, a, values);
+            let l = lower_low(circuit, scope, a, values);
             let r = lower_low(circuit, scope, b, values);
-            if let Node::Input(InputKey::Identity(s)) = circuit.node(l)
-                && low_anchor(circuit, &r) == Some(*s)
-            {
-                return r; // Identity(E) . X = X: X's keys are already live E ids.
-            }
-            let r = materialize(circuit, scope, r);
-            Node::Compose { l, r, linv: BTreeRelation::new() }
+            return compose(circuit, scope, l, r);
         }
         TExprKind::Semijoin(a, b) => {
             let l = lower_in(circuit, scope, a, values);
@@ -368,9 +340,10 @@ fn lower_plain(
         TExprKind::By(x, y) => {
             // X by Y == ~Y . X, exactly as the interpreter desugars it.
             let yi = lower_in(circuit, scope, y, values);
-            let inv = circuit.add_node(Node::Inverse(yi));
-            let xi = lower_in(circuit, scope, x, values);
-            circuit.add_node(Node::Compose { l: inv, r: xi, linv: BTreeRelation::new() })
+            let inv = Low::Node(circuit.add_node(Node::Inverse(yi)));
+            let xi = lower_low(circuit, scope, x, values);
+            let low = compose(circuit, scope, inv, xi);
+            materialize(circuit, scope, low)
         }
         TExprKind::Antijoin(a, b) => {
             let l = lower_in(circuit, scope, a, values);
@@ -413,6 +386,31 @@ fn lower_plain(
         | TExprKind::Arith(..)
         | TExprKind::BinCompare(..) => unreachable!("lowered by `lower_low`"),
     }
+}
+
+/// `l . r`, dropping an identity on either side when the other side's keys
+/// (left) or values (right) are already live ids of its sort.
+fn compose(circuit: &mut Circuit, scope: &mut Option<FixScope>, l: Low, r: Low) -> Low {
+    let identity = |c: &Circuit, low: &Low| match low {
+        Low::Node(id) => match c.node(*id) {
+            Node::Input(InputKey::Identity(s)) => Some(*s),
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(s) = identity(circuit, &l)
+        && low_anchor(circuit, &r) == Some(s)
+    {
+        return r; // Identity(E) . X = X: X's keys are already live E ids.
+    }
+    if let Some(s) = identity(circuit, &r)
+        && values_anchor(circuit, &l) == Some(s)
+    {
+        return l; // X . Identity(E) = X: X's values are already live E ids.
+    }
+    let l = materialize(circuit, scope, l);
+    let r = materialize(circuit, scope, r);
+    Low::Node(circuit.add_node(Node::Compose { l, r, linv: BTreeRelation::new() }))
 }
 
 fn co_keyed(

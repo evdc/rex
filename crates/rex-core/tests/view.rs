@@ -4,7 +4,6 @@
 //! carry the roles a compiler needs.
 
 use rex::dbsp::Engine;
-use rex::eval::relation::BTreeRelation;
 use rex::types::shape_ir::{ArgRef, BindKind, MutationIR, Tpl, UiAction};
 use rex::types::typed::TProgram;
 use std::collections::HashMap;
@@ -90,9 +89,8 @@ fn generated_views_match_manual_6nf() {
         ("card_title", "board#list#card#title"),
     ];
     for (m, g) in pairs {
-        let empty = BTreeRelation::new();
-        let man = manual.circuit.view(m).unwrap_or(&empty);
-        let generated = view.circuit.view(g).unwrap_or(&empty);
+        let man = &manual.circuit.view(m).map(|v| v.to_relation()).unwrap_or_default();
+        let generated = &view.circuit.view(g).map(|v| v.to_relation()).unwrap_or_default();
         assert_eq!(man, generated, "generated `{g}` != manual `{m}`");
     }
 }
@@ -139,9 +137,8 @@ view board =
 "#,
     );
     for g in ["board#list", "board#list#card", "board#list#card#order"] {
-        let empty = BTreeRelation::new();
-        let f = field.circuit.view(g).unwrap_or(&empty);
-        let r = rel.circuit.view(g).unwrap_or(&empty);
+        let f = &field.circuit.view(g).map(|v| v.to_relation()).unwrap_or_default();
+        let r = &rel.circuit.view(g).map(|v| v.to_relation()).unwrap_or_default();
         assert_eq!(f, r, "rel form `{g}` != field form");
     }
 }

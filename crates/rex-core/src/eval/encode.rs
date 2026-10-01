@@ -413,13 +413,14 @@ mod tests {
     #[test]
     fn step_result_json_shape() {
         use crate::dbsp::StepResult;
-        use crate::eval::relation::{BTreeRelation, BinaryRelation};
+        use crate::dbsp::Batch;
+        use crate::eval::relation::BinaryRelation;
 
         let mut res = StepResult::default();
-        let mut d = BTreeRelation::new();
+        let mut d = Batch::new();
         d.add(Value::Id(SortId(1), 0), Value::text("Todo"), 1);
         res.view_deltas.insert("card_title".into(), d);
-        res.view_deltas.insert("quiet".into(), BTreeRelation::new());
+        res.view_deltas.insert("quiet".into(), Batch::new());
 
         assert_eq!(
             step_result_to_json(&res),

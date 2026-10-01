@@ -163,12 +163,101 @@ Measured:
   `bench_create::todomvc_engine_cost`, keep-all vs P-2 (noisy): AddTodo ×2000
   about 65 → 58 ms, ToggleAll(False) on 2k about 47 → 39 ms, ClearCompleted on 2k
   about 63 → 51 ms.
-- Profiling Run(10k) after P-1: of the roughly 60 ms, circuit compute is about 4 ms
-  and commit about 18 ms, of which 15 ms is the five 10k-row inputs, which must commit.
-  The other ~35 ms is outside `Circuit::run` (event evaluation, `build_tx`,
-  seeding, `StepResult` clones) and is unprofiled. P-3 and P-4 target the input commits.
-- TodoMVC still lowers to 114 nodes. P-1's rewrites fire little there, which makes
-  it the next place to look for lowering wins.
+- Profiling Run(10k) after P-2 (temporary probes, native release, 59.8 ms total):
+
+  | Stage | ms | What it is |
+  |---|---|---|
+  | expand | 5.6 | handler → ops: per row, 4 `String` field-name clones, a `HashMap` insert of the row binders, a re-read of `nextId`'s state row, `intern(field)` under the global mutex |
+  | build_tx | 3.8 | ops → `Transaction` |
+  | seed | 12.3 | `Transaction` → one `BTreeRelation` per input |
+  | compute | 8.5 | the nodes |
+  | commit | 18.0 | mostly the five 10k-row inputs |
+  | collect | 4.1 | clone of every view's delta into `StepResult` |
+  | drop deltas | 6.4 | freeing the delta BTrees |
+
+  The same 50k base rows are built, cloned and freed about three times, each at the
+  price of an inner `BTreeMap` allocation per row (`BTreeRelation` is a map of maps,
+  so a one-entry row still allocates a leaf). Seed, collect and drop (~23 ms) are
+  P-3's target; commit is P-4's. Two cheap fixes outside the plan: resolve field
+  names to `Sym`s and row-invariant values once per mutation rather than per row
+  (~5 ms of expand + build_tx), and move rather than clone deltas into
+  `StepResult`. Run(10k) replacing 10k live rows is 117 ms: the retracts add
+  17 ms of `build_tx` and double seed and commit.
+- TodoMVC still lowers to 114 nodes. P-1's rewrites fire little there; see P-2b.
+
+### Phase 2b: lower TodoMVC-shaped programs (`dbsp/lower.rs`, `dbsp/circuit.rs`)
+
+A dump of TodoMVC's circuit after P-2 shows six kinds of waste. None of them is
+TodoMVC-specific: each comes from a desugaring every program uses (`match`,
+`by`, `where`, `if`, repeated `.field` reads across views).
+
+1. **No sharing.** Every occurrence of a subterm is lowered afresh: `.completed = True`
+   six times, the `filter` read through unit (3 nodes) six times, `MapConst(Todo, Unit)`
+   seven times, the unit singleton sixteen times, `Todo where not .completed`, `total > 0`
+   and `visible.text` twice each. Hash-consing in `Circuit::add_node` (reuse a
+   structurally equal node) removes about 48 of 114 nodes and roughly halves the
+   2000-row nodes ToggleAll and ClearCompleted drive. Constraint from P-2: a node that
+   has stepped without keeping its integral cannot start keeping one, so a stepped
+   node is shared only when it already keeps one or the new use needs none.
+2. **`X . Identity(E)` survives.** P-1 removes the left identity only. The right one
+   is `X` whenever X's values are live `E` ids. It comes from every `match` branch
+   that returns the entity, from `count(E by k)` (`Inverse(k) . E`), and from
+   `order by id`.
+3. **`Identity(E)[Antijoin(Identity(E), Y)]` survives.** `coreflexive_on` recognises
+   `FilterMap`/`InRel` only; `Semijoin`/`Antijoin` whose left side is itself a weight-1
+   coreflexive on `E` are coreflexives too. Every `where not …` hits this.
+4. **Unit-total counts keep their input.** `Aggregate` reads its input integral only
+   to decide key presence, which for `Total::Unit` is always true. Dropping that read
+   frees a 2000-row integral per `count(… by unit)`.
+5. **Scalar tests run after the broadcast.** `match filter` compares `filter` with each
+   constant after composing it onto every todo, so each branch keeps a 2000-row
+   `FilterMap`. Value maps commute with composition (`Map(A . B, f) = A . Map(B, f)`
+   when `f` ignores the key), which moves the test onto the one `filter` row.
+6. **Unit-level constants don't fuse.** In `total > 0` the `0` is a
+   `MapConst(ConstSingleton)` node, not `Low::Const`, so P-1's fusion misses it.
+   Anchoring `Total::Unit` aggregates and the unit singleton on Unit fixes it. These
+   are one-row nodes: a node-count win, not a time win.
+
+Beyond these, `match` on a unit-level scalar wants a gate node: today each branch
+retracts and re-asserts the whole entity on a switch and the union cancels most of it.
+
+Soundness is checked the same way as P-1, by driving each example program through
+random event histories and comparing every view and delta against batch evaluation
+of its unrewritten body.
+
+**Items 1–3 landed as P-2b (2026-09-30).**
+- *Sharing.* `Circuit::add_node` returns an existing node with the same
+  `Node::share_key` (its structure minus private state). Views are added one at a
+  time, each backfilled before the next, so a later view often wants a node that has
+  already stepped without keeping an integral. Such a node is still shared, and the
+  new view's backfill resets and recomputes it from its children's history. That
+  works for every kernel but a fix region's, because each kernel's private state
+  (`linv`, aggregate accumulators, `fired`) is a function of that history. If a
+  view names such a node outright, it starts keeping an integral, which the backfill
+  rebuilds (`revive`). Sharing only unstepped or kept nodes was the first cut; it
+  left 7 duplicates in TodoMVC and would leave more in any program with many views.
+- *Right identity.* `X . Identity(E)` is `X` when `values_anchor` proves X's values
+  are live `E` ids: identities, coreflexive maps and compares, `InRel`, `Inverse`
+  of an anchored node, and subsets or composes of those. A field of ids never
+  qualifies, since nothing cascades a retract to the rows pointing at it. Applied
+  to `By` as well as `Compose`.
+- *Coreflexives.* `Semijoin`/`Antijoin` whose left side is a weight-1 coreflexive
+  on `E`, and `Compose` of two, count as coreflexives for `Identity(E)[X] = X`.
+- *Tests.* `tests/lower_rewrites.rs` now drives any program from its declared
+  events, making up arguments by parameter type. It runs the benchmark, TodoMVC and
+  kanban, each with extra `let`s: ones that reach the new rules, dangling-id
+  shapes that must not be rewritten (`(.todo) . Todo`, `(.list) . List`,
+  `Tag[(.todo) except …]`), and `new` rows before them so every backfill runs over
+  data. `tests/dbsp.rs` covers replay of stateless and stateful shared nodes
+  directly. Four deliberately unsound mutations were each caught: a right identity
+  that ignores anchoring, replay without reset, no replay, and an unconditional
+  antijoin coreflexive.
+
+Measured (native release, median of 5, P-2 → P-2b): TodoMVC lowers to 57 nodes
+(from 114), with no two equal. AddTodo ×2000 54.5 → 35.7 ms; ToggleAll on 2k
+21–36 → 11–16 ms; SetFilter(Active) 21.2 → 14.3 ms; ClearCompleted on 2k 45.4 →
+22.0 ms. js-framework-benchmark: 15 → 14 nodes, timings unchanged within noise
+(Run(10k) 65.7 → 60.5 ms). Items 4–6 remain.
 
 Trade-off: `snapshot()` on an output with no integral would need to recompute it
 (batch-evaluate from inputs). That only happens at boot, where batch evaluation is
@@ -192,6 +281,26 @@ Trade-off: two relation types instead of one. The `BinaryRelation` trait already
 exists; kernels read deltas through a slice API and integrals through a probe API.
 Keep `BTreeRelation` as the reference implementation used by the batch oracle in
 tests.
+
+**Landed as P-3 (2026-09-30).** `dbsp/batch.rs`: `Batch` is a `Vec<(V, V, w)>` sorted
+by `(left, right)` and consolidated once by `BatchBuilder::finish` (an `is_sorted`
+check first, so a kernel that emits in order pays a linear pass). Every kernel pushes
+into a builder; grouping kernels (`Aggregate`) walk runs of equal keys; probes are
+binary searches. Notes:
+- `StepResult::view_deltas` is now `HashMap<String, Batch>`, and each view's delta
+  is **moved** out of the step, not cloned; only a node several views alias is
+  cloned. `Batch` implements `BinaryRelation`, so hosts and tests read it as before.
+  The JSON encoding is unchanged (same row order).
+- Backfill no longer redirects below-floor reads inside `Ctx::delta`. It copies the
+  integral of each below-floor node a new node reads into that node's delta slot, so
+  `Ctx` has one delta type. That is a copy per backfill, which runs at boot.
+- Fix regions iterate on batches too; `prev` is a batch and Exit is a batch
+  subtraction.
+
+Measured with P-3 alone (P-4's columns switched off), native release, median of 5,
+P-2b → P-3: Run(10k) 63.6 → 27.0 ms, replace-10k 126 → 48.2, Clear 64 → 29.9,
+Add(1k) 4.5 → 2.7, Update 2.5 → 2.2 (P-2b figures are one run). TodoMVC: AddTodo
+×2000 35.7 → 31.8, SetFilter(Active) 14.3 → 7.8, ClearCompleted on 2k 22.0 → 15.9.
 
 ### Phase 4: functional relations and dense entity columns
 
@@ -243,6 +352,83 @@ Trade-offs:
   page is 1024 slots even when sparsely live. Accept that, or add compaction later.
 - Determinism: a column iterates in `seq` order, not `Value::Ord` order. Output order
   must be sorted where tests or JSON depend on it. The shaper doesn't care.
+
+**Landed as P-4 (2026-09-30)**, without packed ids and without carrying the flag to
+`ShapeIR` (below). What was built:
+- *Multiplicity inference* (`dbsp/props.rs`, which now also holds P-1's `anchor` and
+  the coreflexive checks lowering uses). `functional` covers inputs, singletons,
+  aggregates, per-row maps and filters, `Proj`, `Distinct`, semijoin and antijoin of
+  a functional left side, and `Compose` or co-keyed ops of two functional sides. The
+  wider rule lets one more P-1 rewrite fire: `Row[.num + .pos > 3]` drops its
+  `Identity(Row)[…]`. `tests/lower_rewrites.rs` asserts that shape now, and its
+  random-history oracle checks it.
+- *Column integrals* (`dbsp/integral.rs`). `Integral` is `Rel(BTreeRelation)` or
+  `Col(Column)`, and one read API covers both (`row_ref`, `weight`, `has_left`,
+  `triples`, `keys`, plus `BinaryRelation`). A column is paged by `seq` into 1024-slot
+  pages held in a `VecDeque` with a `base` page number: an empty page is freed, and
+  a dead prefix pops off the front. It stores `(key, value)` per slot and no weights.
+  Iterating in `seq` order *is* `Value` order, because every key has the same sort, so
+  determinism needs nothing extra. `Circuit::view` and `input_integral` return
+  `&Integral`.
+- *Choosing a column.* `Circuit::keep_integral` picks the representation when a node
+  starts keeping an integral (`props::column_sort`): a column **whenever the node's
+  keys are proven to be one sort's ids** (`anchor`), without requiring a proof that
+  it is functional. Any write a column cannot hold (a second value at a key, a
+  weight other than ±1, a key of another sort) **demotes** it to a general relation
+  in place, and demotion is one-way. So the choice decides speed only, never
+  results. Waiting for a functionality proof left out what is functional only in
+  practice: the union of a `match`'s disjoint branches (TodoMVC's `visible`) and
+  every field read through it (TodoMVC: 11 columns with the proof, 21 without).
+  Commit applies a batch's retractions before its assertions, because a
+  consolidated batch can order a key's `+new` before its `−old`.
+- *Tests.* `tests/dbsp.rs` gains two property tests over id-keyed data, mostly
+  well-behaved writes mixed with arbitrary ones, so columns stay columns for a while
+  and then demote partway through: a column against a `BTreeRelation` after every
+  commit, and fork, semijoin, compose, `MapConst` and sum reading columns, checked
+  against the batch oracle. A mutation that retracts a slot without matching its
+  value fails both. `bench_create` prints columns vs general integrals, before and
+  after the event sequence, so a benchmark demotion would show. None happens:
+  js-framework-benchmark keeps 13 of 14 integrals as columns, TodoMVC 21 of 46.
+
+Measured, native release, median of 5, P-3 → P-3 + P-4: Run(1k) 2.5 → 1.65 ms,
+Run(10k) 27.0 → **16.7**, replace-10k 48.2 → 28.6, Add(1k) 2.7 → 1.5, Update 2.2 → 1.3,
+Clear 29.9 → 14.7. TodoMVC: AddTodo ×2000 31.8 → 27.1, ToggleAll(True) 6.9 → 4.8,
+SetFilter(Active) 7.8 → 4.0, ToggleAll(False) 10.8 → 6.8, ClearCompleted on 2k
+15.9 → 9.4. Wasm in Chrome (the example's `engine cost` spec): Run(10k) about 52 ms.
+
+Official harness after P-1 through P-4 (Chrome, medians, ms, total / script, against §1's
+S-91 run, which predates P-1; vanillajs and elysium are §1's figures):
+
+| Benchmark | Rex S-91 | Rex after P-4 | vanillajs | elysium |
+|---|---|---|---|---|
+| create 1,000 | 112.5 / 30.5 | 49.0 / 18.3 | 85.1 / 6.4 | 107.6 / 19.1 |
+| replace 1,000 | | 61.5 / 31.2 | 99.9 / 18.0 | 124.7 / 31.5 |
+| update every 10th | 28.4 / 6.4 | 27.8 / 5.3 | 20.2 / 1.1 | 36.7 / 6.0 |
+| select | | 5.7 / 1.4 | 4.8 / 0.7 | 10.6 / 3.3 |
+| swap | | 26.7 / 2.5 | 22.9 / 0.4 | 26.8 / 2.2 |
+| remove one | | 19.6 / 0.6 | 18.8 / 0.7 | 26.0 / 1.1 |
+| create 10,000 | 803.9 / 422.1 | **531.3 / 190.1** | 353.4 / 26.3 | 508.5 / 152.8 |
+| append 1,000 | | 59.6 / 20.0 | 41.1 / 2.9 | 53.5 / 16.1 |
+| clear 1,000 (4× throttle) | 103.4 / 100.4 | 64.0 / 61.1 | 19.3 / 15.4 | 34.5 / 30.8 |
+| first paint | 1,580 | 1,595 | 58 | 142 |
+
+Memory after run is 5.4 MB and after run-and-clear 4.6 MB; the saved
+`results/rex-*` files had 19.9 and 19.0, but they came from a different run than §1.
+Compressed size is 214.7 KB. Create 10k is now 1.5× vanillajs in total time and
+about 190 ms of script, of which the wasm engine is about 52 ms. The rest is the
+boundary and the shaper (P-6), and clear is the largest remaining relative gap.
+Create 1k's paint (30 vs about 80 ms elsewhere) looks like a harness artifact; its
+total is not comparable until it is re-run.
+
+Not done, deliberately:
+- **Packed ids.** `Value` stays 24 bytes while `Pair` holds two boxes, so packing
+  `Id` alone saves nothing. Do it with P-5's single-box `Pair`.
+- **The functional flag in `ShapeIR`.** Multiplicity is a property of the lowered
+  circuit, and `rex build` does not lower. The only consumer is P-6's change-record
+  boundary, so wire it there (codegen lowers, or the engine reports per view at boot).
+  The proven `functional` is the flag to send, not `column_sort`'s optimistic choice.
+- **Change records for functional deltas.** Deltas keep weights. That is P-6's
+  wire format, not an engine need.
 
 ### Phase 5: a smaller, cheaper `Value`
 
@@ -320,9 +506,10 @@ That target is unmeasured.
 | P-0 | Browser timing split (engine, parse, shaper, DOM) behind `?profile` | none |
 | P-1 | Lowering rewrites and view aliasing, plus the no-orphan invariant and its property test | none |
 | P-2 | `needs_integral` demand analysis | P-1 |
-| P-3 | Flat consolidated delta batches | none (parallel with P-1) |
-| P-4a | Multiplicity inference in lowering, carried to `ShapeIR` | P-1 |
-| P-4b | Column integrals for entity-keyed functional relations; packed ids | P-3, P-4a |
+| P-2b | Node sharing, right identity, wider coreflexives (items 1–3, landed); then 4–6 | P-2 |
+| P-3 | Flat consolidated delta batches (landed) | none (parallel with P-1) |
+| P-4a | Multiplicity inference in lowering (landed); carried to `ShapeIR` (moved to P-6) | P-1 |
+| P-4b | Column integrals for entity-keyed relations (landed); packed ids (moved to P-5) | P-3, P-4a |
 | P-5 | `Value` shrink; thread-local interner | none |
 | P-6 | Functional change records across the boundary; `Map<key, value>` mirrors | P-4a, P-0 |
 | P-7 | Startup measurement, then profile and streaming fixes | none |

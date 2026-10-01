@@ -124,7 +124,7 @@ impl eval::Store for EngineStore<'_> {
         self.engine
             .circuit
             .input_integral(&rex::dbsp::InputKey::Field(sort, rex::eval::intern(field)))
-            .cloned()
+            .map(|v| v.to_relation())
             .unwrap_or_default()
     }
 
@@ -132,12 +132,12 @@ impl eval::Store for EngineStore<'_> {
         self.engine
             .circuit
             .input_integral(&rex::dbsp::InputKey::Identity(sort))
-            .cloned()
+            .map(|v| v.to_relation())
             .unwrap_or_default()
     }
 
     fn view_rel(&self, name: &str) -> BTreeRelation {
-        self.engine.circuit.view(name).cloned().unwrap_or_default()
+        self.engine.circuit.view(name).map(|v| v.to_relation()).unwrap_or_default()
     }
 
     fn value(&self, name: &str) -> Value {
@@ -444,7 +444,7 @@ fn check_source(candidate: &str) -> Option<(Env, rex::types::typed::TProgram)> {
 
 /// Print each view's nonzero delta from a step — the incremental engine's
 /// whole point made visible.
-fn print_view_deltas(deltas: &HashMap<String, BTreeRelation>) {
+fn print_view_deltas(deltas: &HashMap<String, rex::dbsp::Batch>) {
     let mut names: Vec<&String> = deltas.iter().filter(|(_, d)| !d.is_empty()).map(|(n, _)| n).collect();
     names.sort();
     for name in names {
@@ -461,8 +461,8 @@ fn print_view_deltas(deltas: &HashMap<String, BTreeRelation>) {
     }
 }
 
-fn print_relation(rel: &BTreeRelation) {
-    let rows: Vec<_> = BinaryRelation::iter(rel).collect();
+fn print_relation(rel: &dyn BinaryRelation) {
+    let rows: Vec<_> = rel.iter().collect();
     if rows.is_empty() {
         println!("  (empty)");
         return;

@@ -12,12 +12,17 @@
 //! inputs — including under retraction (negative weights). `tests/dbsp.rs`
 //! checks exactly this, property-style.
 
+pub mod batch;
 pub mod circuit;
 pub mod engine;
+pub mod integral;
 pub mod log;
 pub mod lower;
 pub mod node;
+pub mod props;
 
+pub use batch::Batch;
+pub use integral::Integral;
 pub use circuit::{Circuit, StepResult, Transaction};
 pub use engine::{BaseSnapshot, DispatchOp, Engine};
 pub use log::{ArgValue, Event, GENESIS, GENESIS_SORT, REBALANCE, REBALANCE_FIELD, REBALANCE_ROWS};

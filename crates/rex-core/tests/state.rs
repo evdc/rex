@@ -9,7 +9,7 @@
 //! (MVP-PLAN §2.4).
 
 use rex::dbsp::{ArgValue, Engine};
-use rex::eval::relation::{BTreeRelation, BinaryRelation};
+use rex::eval::relation::BTreeRelation;
 use rex::eval::{self, Value};
 use rex::events::dispatch_event;
 use rex::types::typed::TProgram;
@@ -51,7 +51,7 @@ fn fire(app: &mut App, name: &str, args: &[(&str, Value)]) {
 }
 
 fn view(app: &App, name: &str) -> BTreeRelation {
-    app.engine.circuit.view(name).cloned().unwrap_or_default()
+    app.engine.circuit.view(name).map(|v| v.to_relation()).unwrap_or_default()
 }
 
 /// The right-hand values of a view, semantically sorted — enough to say what

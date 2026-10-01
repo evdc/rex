@@ -840,16 +840,16 @@ proptest! {
             }
             engine.circuit.step(&tx);
 
-            let src_int = engine.circuit.input_integral(&src_key).cloned().unwrap_or_default();
-            let dst_int = engine.circuit.input_integral(&dst_key).cloned().unwrap_or_default();
+            let src_int = engine.circuit.input_integral(&src_key).map(|v| v.to_relation()).unwrap_or_default();
+            let dst_int = engine.circuit.input_integral(&dst_key).map(|v| v.to_relation()).unwrap_or_default();
             let edge = algebra::compose(&algebra::inverse(&src_int), &dst_int);
             prop_assert_eq!(
-                engine.circuit.view("edge").cloned().unwrap_or_default(),
+                engine.circuit.view("edge").map(|v| v.to_relation()).unwrap_or_default(),
                 edge.clone(),
                 "edge view diverged"
             );
             prop_assert_eq!(
-                engine.circuit.view("path").cloned().unwrap_or_default(),
+                engine.circuit.view("path").map(|v| v.to_relation()).unwrap_or_default(),
                 batch_closure(&edge),
                 "path fixpoint diverged from batch closure"
             );
@@ -885,4 +885,225 @@ fn linear_nodes_keep_no_integral_unless_read() {
     tx.push(key_b(), int(1), int(3), 1);
     circuit.step(&tx);
     assert_eq!(circuit.view("out").unwrap().to_sorted_vec(), vec![(int(2), int(9), 1)]);
+}
+
+/// P-2b: an equal node is shared, even after it has stepped without an
+/// integral, when it is stateless. A later view's backfill then recomputes
+/// it from its children's history, and a view that names it outright makes
+/// it start keeping an integral, rebuilt by that backfill.
+#[test]
+fn stateless_nodes_are_shared_and_replayed_after_stepping() {
+    let mut circuit = Circuit::new();
+    let a = circuit.input(key_a());
+    let b = circuit.input(key_b());
+    let inv = circuit.add_node(Node::Inverse(a));
+    let filt = circuit.add_node(Node::Filter(inv, Pred::Cmp(CmpOp::Gt, Lit::Int(1))));
+    let first = circuit.add_node(compose_node(filt, b));
+    circuit.set_output("first", first);
+    circuit.backfill(0, &["first"]);
+    assert!(!circuit.keeps_integral(inv) && !circuit.keeps_integral(filt));
+
+    let mut tx = Transaction::new();
+    tx.push(key_a(), int(1), int(2), 1);
+    tx.push(key_a(), int(5), int(3), 1);
+    tx.push(key_b(), int(1), int(9), 1);
+    tx.push(key_b(), int(5), int(7), 1);
+    circuit.step(&tx);
+
+    // Built again after stepping: the same nodes, not copies.
+    let mark = circuit.node_count();
+    let inv2 = circuit.add_node(Node::Inverse(a));
+    let filt2 = circuit.add_node(Node::Filter(inv2, Pred::Cmp(CmpOp::Gt, Lit::Int(1))));
+    assert_eq!((inv2, filt2), (inv, filt));
+    // A new parent reads `filt` below the floor; a view names it outright.
+    let again = circuit.add_node(Node::Union(filt2, filt2));
+    circuit.set_output("again", again);
+    circuit.set_output("filt", filt2);
+    assert!(circuit.keeps_integral(filt));
+    let result = circuit.backfill(mark, &["again", "filt"]);
+
+    let expected_filt = vec![(int(3), int(5), 1)]; // `> 1` tests the right column
+    assert_eq!(circuit.view("filt").unwrap().to_sorted_vec(), expected_filt);
+    assert_eq!(result.view_deltas["filt"].to_sorted_vec(), expected_filt);
+    let doubled: Vec<_> = expected_filt.iter().map(|(l, r, w)| (l.clone(), r.clone(), 2 * w)).collect();
+    assert_eq!(circuit.view("again").unwrap().to_sorted_vec(), doubled);
+    // The replay touched no view that already held its history.
+    assert_eq!(circuit.view("first").unwrap().to_sorted_vec(), vec![(int(3), int(7), 1)]);
+
+    // And all of it stays maintained.
+    let mut tx = Transaction::new();
+    tx.push(key_a(), int(1), int(2), -1);
+    tx.push(key_a(), int(6), int(4), 1);
+    let step = circuit.step(&tx);
+    let expected_filt = vec![(int(3), int(5), 1), (int(4), int(6), 1)];
+    assert_eq!(circuit.view("filt").unwrap().to_sorted_vec(), expected_filt);
+    assert_eq!(step.view_deltas["filt"].to_sorted_vec(), vec![(int(4), int(6), 1)]);
+    let doubled: Vec<_> = expected_filt.iter().map(|(l, r, w)| (l.clone(), r.clone(), 2 * w)).collect();
+    assert_eq!(circuit.view("again").unwrap().to_sorted_vec(), doubled);
+}
+
+/// A node with private state is replayed too: resetting it and running its
+/// kernel over the full history rebuilds that state (here a compose's index
+/// of its left side, and an aggregate's accumulators) as it was, so both the
+/// view that shares it later and the one that had it all along stay right.
+#[test]
+fn stateful_nodes_are_replayed_with_their_state() {
+    let mut circuit = Circuit::new();
+    let a = circuit.input(key_a());
+    let b = circuit.input(key_b());
+    let ab = circuit.add_node(compose_node(a, b));
+    let count = |ab| Node::Aggregate {
+        input: ab,
+        kind: AggKind::Count,
+        money: false,
+        total: Total::No,
+        seeded: false,
+        st: Default::default(),
+    };
+    let first = circuit.add_node(Node::Union(ab, ab));
+    circuit.set_output("first", first);
+    circuit.backfill(0, &["first"]);
+    let mut tx = Transaction::new();
+    tx.push(key_a(), int(1), int(2), 1);
+    tx.push(key_b(), int(2), int(9), 1);
+    circuit.step(&tx);
+    assert!(!circuit.keeps_integral(ab));
+
+    let mark = circuit.node_count();
+    assert_eq!(circuit.add_node(compose_node(a, b)), ab);
+    let n = circuit.add_node(count(ab));
+    circuit.set_output("n", n);
+    circuit.backfill(mark, &["n"]);
+    assert_eq!(circuit.view("n").unwrap().to_sorted_vec(), vec![(int(1), int(1), 1)]);
+
+    // `ab`'s left index was rebuilt, not doubled or lost: a new right row
+    // joins exactly once, for both parents.
+    let mut tx = Transaction::new();
+    tx.push(key_b(), int(2), int(8), 1);
+    circuit.step(&tx);
+    assert_eq!(circuit.view("n").unwrap().to_sorted_vec(), vec![(int(1), int(2), 1)]);
+    assert_eq!(circuit.view("first").unwrap().to_sorted_vec(), vec![(int(1), int(8), 2), (int(1), int(9), 2)]);
+}
+
+// --- P-4b: column integrals ---------------------------------------------------
+//
+// A column holds a functional id-keyed relation and demotes itself to a
+// general one the first time a change would break that. Here columns get
+// mostly well-behaved writes (set a field, delete a row) mixed with arbitrary
+// ones, so they both stay columns for a while and then demote mid-history;
+// every integral must equal the general relation throughout.
+
+#[derive(Clone, Debug)]
+enum ColOp {
+    /// `−old/+new` at `id`, as `push_set` writes it.
+    Set(u64, i64),
+    /// Retract whatever `id` holds.
+    Del(u64),
+    /// Any triple at all (a second value, weight 2, a retraction of nothing).
+    Raw(u64, i64, i64),
+}
+
+fn col_ops() -> impl Strategy<Value = Vec<Vec<ColOp>>> {
+    let op = prop_oneof![
+        6 => (0u64..6, 0i64..3).prop_map(|(i, v)| ColOp::Set(i, v)),
+        2 => (0u64..6).prop_map(ColOp::Del),
+        1 => (0u64..6, 0i64..3, -2i64..=2).prop_map(|(i, v, w)| ColOp::Raw(i, v, w)),
+    ];
+    prop::collection::vec(prop::collection::vec(op, 0..5), 1..14)
+}
+
+fn col_id(n: u64) -> Value {
+    // Spread ids over several 1024-slot pages.
+    Value::Id(SortId(0), n * 700)
+}
+
+/// The rows one step of `ops` writes to a table whose current value is `now`.
+fn col_rows(now: &BTreeRelation, ops: &[ColOp]) -> Vec<(Value, Value, i64)> {
+    let mut pending = now.clone();
+    let mut rows = Vec::new();
+    for op in ops {
+        let mut step = Vec::new();
+        match op {
+            ColOp::Set(i, _) | ColOp::Del(i) => {
+                for (old, w) in pending.row(&col_id(*i)) {
+                    step.push((col_id(*i), old, -w));
+                }
+                if let ColOp::Set(_, v) = op {
+                    step.push((col_id(*i), int(*v), 1));
+                }
+            }
+            ColOp::Raw(i, v, w) => step.push((col_id(*i), int(*v), *w)),
+        }
+        for (l, r, w) in step {
+            pending.add(l.clone(), r.clone(), w);
+            rows.push((l, r, w));
+        }
+    }
+    rows
+}
+
+proptest! {
+    #[test]
+    fn column_integral_matches_general(steps in col_ops()) {
+        let mut col = rex::dbsp::Integral::empty(Some(SortId(0)));
+        let mut oracle = BTreeRelation::new();
+        for ops in &steps {
+            let rows = col_rows(&oracle, ops);
+            col.commit(&rex::dbsp::Batch::from_rows(rows.clone()));
+            for (l, r, w) in rows {
+                oracle.add(l, r, w);
+            }
+            prop_assert_eq!(&col, &oracle);
+            prop_assert_eq!(col.to_sorted_vec(), oracle.to_sorted_vec());
+        }
+    }
+
+    /// Kernels reading column integrals: a compose probing a column, a
+    /// co-keyed op over two, a semijoin against the identity column, and a
+    /// sum grouped by id — each against the batch oracle.
+    #[test]
+    fn kernels_over_columns_match_batch(sa in col_ops(), sb in col_ops(), sl in prop::collection::vec(prop::collection::vec((0u64..6, any::<bool>()), 0..4), 1..14)) {
+        let (ka, kb, ki) = (key_a(), key_b(), InputKey::Identity(SortId(0)));
+        let mut c = Circuit::new();
+        let (a, b, ids) = (c.input(ka), c.input(kb), c.input(ki));
+        let outs = [
+            c.add_node(Node::CoKeyed { l: a, r: b, f: CoKeyedFn::Fork }),
+            c.add_node(semijoin_node(a, ids)),
+            c.add_node(compose_node(ids, a)),
+            c.add_node(Node::MapConst(ids, Value::Unit)),
+            c.add_node(agg_node(AggKind::Sum)(b)),
+        ];
+        for (i, o) in outs.iter().enumerate() {
+            c.set_output(&format!("o{i}"), *o);
+        }
+        prop_assert!(c.integral(a).is_column() && c.integral(outs[3]).is_column());
+        let (mut oa, mut ob, mut oi) = (BTreeRelation::new(), BTreeRelation::new(), BTreeRelation::new());
+        let none = vec![];
+        for i in 0..sa.len().max(sb.len()).max(sl.len()) {
+            let ra = col_rows(&oa, sa.get(i).unwrap_or(&none));
+            let rb = col_rows(&ob, sb.get(i).unwrap_or(&none));
+            let mut tx = Transaction::new();
+            for (key, rows, o) in [(ka, &ra, &mut oa), (kb, &rb, &mut ob)] {
+                for (l, r, w) in rows {
+                    tx.push(key, l.clone(), r.clone(), *w);
+                    o.add(l.clone(), r.clone(), *w);
+                }
+            }
+            for &(n, live) in sl.get(i).unwrap_or(&vec![]) {
+                let id = col_id(n);
+                let w = oi.weight(&id, &id);
+                let dw = if live { 1 - w } else { -w };
+                if dw != 0 {
+                    tx.push(ki, id.clone(), id.clone(), dw);
+                    oi.add(id.clone(), id, dw);
+                }
+            }
+            c.step(&tx);
+            prop_assert_eq!(c.integral(outs[0]), &algebra::fork(&oa, &ob));
+            prop_assert_eq!(c.integral(outs[1]), &algebra::semijoin(&oa, &oi));
+            prop_assert_eq!(c.integral(outs[2]), &algebra::compose(&oi, &oa));
+            prop_assert_eq!(c.integral(outs[3]), &BTreeRelation::from_triples(oi.iter().map(|(l, _, w)| (l, Value::Unit, w))));
+            prop_assert_eq!(c.integral(outs[4]), &algebra::aggregate(&ob, Agg::Sum, false));
+        }
+    }
 }

@@ -50,7 +50,7 @@ fn at_unit(app: &App, view: &str) -> Option<Value> {
     app.engine
         .circuit
         .view(view)
-        .unwrap_or(&BTreeRelation::new())
+        .map(|v| v.to_relation()).as_ref().unwrap_or(&BTreeRelation::new())
         .row(&Value::Unit)
         .find(|(_, w)| *w > 0)
         .map(|(v, _)| v)
@@ -71,7 +71,7 @@ fn fire(app: &mut App, name: &str, args: &[(&str, Value)]) {
 fn assert_matches_batch(app: &App, batch_src: &str, view: &str, context: &str) {
     let batch = eval::run(&rex::parse(batch_src).program);
     assert_eq!(
-        app.engine.circuit.view(view).unwrap_or(&BTreeRelation::new()),
+        app.engine.circuit.view(view).map(|v| v.to_relation()).as_ref().unwrap_or(&BTreeRelation::new()),
         batch.view(view).expect("batch view"),
         "view `{view}` diverged from batch ({context})"
     );
@@ -182,7 +182,7 @@ entity Todo { text: Text, list: Text }
 let per_list : Text -> Int = count(Todo by .list)
 "#;
     let app = build(src);
-    assert!(app.engine.circuit.view("per_list").unwrap_or(&BTreeRelation::new()).is_empty());
+    assert!(app.engine.circuit.view("per_list").map(|v| v.to_relation()).as_ref().unwrap_or(&BTreeRelation::new()).is_empty());
     assert_matches_batch(&app, src, "per_list", "empty, grouped by a field");
 }
 
