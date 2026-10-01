@@ -93,6 +93,15 @@ export interface ShapeNode<El> {
   /** The element inside a parent row's element that this level mounts into
    *  (default: the parent row's element itself). */
   readonly slot?: (root: El) => El;
+  /** Identifies the slot element among a parent's child levels: levels with
+   *  equal keys (absent counts as `""`) mount into one element, so the shaper
+   *  keeps them in source order. */
+  readonly slotKey?: string;
+  /** The static node of the parent row's template that follows this level in
+   *  the source, found right after the row is built (before any level has
+   *  mounted into it). Rows of this level go before it; absent means the level
+   *  is last in its slot element. */
+  readonly anchor?: (root: El) => El | null;
   /** Nested shape levels; their membership views' parent column must be this
    *  level's child key. */
   readonly children: readonly ShapeNode<El>[];

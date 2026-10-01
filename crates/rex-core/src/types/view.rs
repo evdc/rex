@@ -1426,6 +1426,7 @@ impl Desugar {
             order_field,
             order_desc: false,
             slot: Vec::new(),
+            anchor: None,
             template,
             attrs,
             events,
@@ -1553,6 +1554,9 @@ impl LevelWalk<'_> {
         // Children: static text, dynamic text binds, nested elements, nested
         // selects (which become child levels and produce no static node).
         let mut tpl_children = Vec::new();
+        // Child levels this element mounts, with how many static children
+        // precede each: the first static child after it is its anchor.
+        let mut mounted: Vec<(usize, usize, usize)> = Vec::new();
         for c in &el.children {
             match c {
                 Content::Text(s) => tpl_children.push(Tpl::Static(s.clone())),
@@ -1577,6 +1581,7 @@ impl LevelWalk<'_> {
                     for l in &mut self.children[before..] {
                         l.slot = path.to_vec();
                     }
+                    mounted.push((before, self.children.len(), tpl_children.len()));
                 }
                 // Expansion replaced every call, or dropped it with a diagnostic.
                 Content::Component { .. } => {}
@@ -1592,7 +1597,15 @@ impl LevelWalk<'_> {
                     if let Some(mut level) = self.d.level(sel, &child_name, &chain) {
                         level.slot = path.to_vec();
                         self.children.push(level);
+                        mounted.push((self.children.len() - 1, self.children.len(), tpl_children.len()));
                     }
+                }
+            }
+        }
+        for (from, to, before) in mounted {
+            if before < tpl_children.len() {
+                for l in &mut self.children[from..to] {
+                    l.anchor = Some(before);
                 }
             }
         }

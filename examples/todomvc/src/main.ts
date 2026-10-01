@@ -53,6 +53,7 @@ const shape_main_unit_if1_visible: ShapeNode<HTMLElement> = {
   membershipView: "main#unit#if1#visible",
   orderView: "main#unit#if1#visible#order",
   slot: (root) => (root.childNodes[2] as HTMLElement),
+  slotKey: "2",
   template: (d, key) => {
     const e0 = d.clone(proto_shape_main_unit_if1_visible ??= build_shape_main_unit_if1_visible(d));
     e0.dataset.key = key;
@@ -71,9 +72,9 @@ const shape_main_unit_if1_visible: ShapeNode<HTMLElement> = {
     });
     ((e0.childNodes[1] as HTMLElement)).addEventListener("keydown", (ev) => {
       if (!["Enter"].includes((ev as KeyboardEvent).key)) return;
-      const v = encodeText((ev.currentTarget as HTMLInputElement).value);
+      const p_v = encodeText((ev.currentTarget as HTMLInputElement).value);
       const _ids: string[] = [];
-      _ids.push(...dispatch("EditTodo", { "t": key, "text": v }));
+      _ids.push(...dispatch("EditTodo", { "t": key, "text": p_v }));
       _ids.push(...dispatch("local#TodoItem#editing#set", { "t": key, "#value": encodeAtom("False") }));
     });
     ((e0.childNodes[1] as HTMLElement)).addEventListener("keydown", (ev) => {
@@ -83,9 +84,9 @@ const shape_main_unit_if1_visible: ShapeNode<HTMLElement> = {
       { const _i = ev.currentTarget as HTMLInputElement; _i.value = _i.defaultValue; }
     });
     ((e0.childNodes[1] as HTMLElement)).addEventListener("blur", (ev) => {
-      const v = encodeText((ev.currentTarget as HTMLInputElement).value);
+      const p_v = encodeText((ev.currentTarget as HTMLInputElement).value);
       const _ids: string[] = [];
-      _ids.push(...dispatch("EditTodo", { "t": key, "text": v }));
+      _ids.push(...dispatch("EditTodo", { "t": key, "text": p_v }));
       _ids.push(...dispatch("local#TodoItem#editing#set", { "t": key, "#value": encodeAtom("False") }));
     });
     return e0;
@@ -156,9 +157,9 @@ const shape_main_unit_if1: ShapeNode<HTMLElement> = {
     const e0 = d.clone(proto_shape_main_unit_if1 ??= build_shape_main_unit_if1(d));
     e0.dataset.key = key;
     ((e0.childNodes[0] as HTMLElement)).addEventListener("change", (ev) => {
-      const done = ((ev.currentTarget as HTMLInputElement).checked ? encodeAtom("True") : encodeAtom("False"));
+      const p_done = ((ev.currentTarget as HTMLInputElement).checked ? encodeAtom("True") : encodeAtom("False"));
       const _ids: string[] = [];
-      _ids.push(...dispatch("ToggleAll", { "done": done }));
+      _ids.push(...dispatch("ToggleAll", { "done": p_done }));
     });
     return e0;
   },
@@ -309,9 +310,9 @@ const shape_main_unit: ShapeNode<HTMLElement> = {
     { const el = ((e0.childNodes[0] as HTMLElement).childNodes[1] as HTMLElement); setTimeout(() => el.focus(), 0); }
     (((e0.childNodes[0] as HTMLElement).childNodes[1] as HTMLElement)).addEventListener("keydown", (ev) => {
       if (!["Enter"].includes((ev as KeyboardEvent).key)) return;
-      const text = encodeText((ev.currentTarget as HTMLInputElement).value);
+      const p_text = encodeText((ev.currentTarget as HTMLInputElement).value);
       const _ids: string[] = [];
-      _ids.push(...dispatch("AddTodo", { "text": text }));
+      _ids.push(...dispatch("AddTodo", { "text": p_text }));
       (ev.currentTarget as HTMLInputElement).value = "";
     });
     return e0;

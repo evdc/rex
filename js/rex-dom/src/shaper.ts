@@ -32,7 +32,7 @@ export class Shaper<El> {
   constructor(driver: DomDriver<El>, container: El, shapes: readonly ShapeNode<El>[]) {
     this.driver = driver;
     this.container = container;
-    const walk = (shape: ShapeNode<El>, parent: Level<El> | null, depth: number) => {
+    const walk = (shape: ShapeNode<El>, parent: Level<El> | null, depth: number): Level<El> => {
       const level: Level<El> = {
         shape,
         parent,
@@ -41,6 +41,9 @@ export class Shaper<El> {
         orderOf: new Map(),
         nodes: new Map(),
         order: new OrderIndex(shape.orderDesc ?? false),
+        kids: [],
+        later: [],
+        anchors: new Map(),
       };
       this.levels.push(level);
       if (this.levelByName.has(shape.name)) {
@@ -50,7 +53,13 @@ export class Shaper<El> {
       this.mirroredViews.add(shape.membershipView);
       if (shape.orderView) this.mirroredViews.add(shape.orderView);
       for (const a of shape.attrs) this.mirroredViews.add(a.view);
-      for (const child of shape.children) walk(child, level, depth + 1);
+      const kids = shape.children.map((child) => walk(child, level, depth + 1));
+      // A level's later siblings in its slot element, in source order.
+      level.kids = kids;
+      kids.forEach((kid, i) => {
+        kid.later = kids.slice(i + 1).filter((k) => (k.shape.slotKey ?? "") === (kid.shape.slotKey ?? ""));
+      });
+      return level;
     };
     for (const s of shapes) walk(s, null, 0);
     this.levels.sort((a, b) => a.depth - b.depth);
@@ -135,6 +144,7 @@ export class Shaper<El> {
         level.nodes.delete(child);
         level.parentOf.delete(child);
         level.orderOf.delete(child);
+        for (const kid of level.kids) kid.anchors.delete(child);
         let group = byParent.get(parentKey);
         if (!group) {
           group = { children: new Set(), els: [] };
@@ -193,7 +203,7 @@ export class Shaper<El> {
         // element just placed after it.
         level.order.insertMany(parentKey, items);
         const list = level.order.childrenOf(parentKey);
-        let ref: El | null = null;
+        let ref: El | null = this.tailRef(level, parentKey);
         for (let i = list.length - 1; i >= 0; i--) {
           const child = list[i]![1];
           if (plan.mounts.has(child) && !fresh.has(child)) {
@@ -285,6 +295,11 @@ export class Shaper<El> {
    *  and register it (not yet attached). */
   private build(level: Level<El>, child: string, parentKey: string): El {
     const el = level.shape.template(this.driver, child, this.ancestorKeys(level, parentKey));
+    // The template's static nodes are all there is right now; later, mounted
+    // levels shift their indices, so remember the ones levels must stay before.
+    for (const kid of level.kids) {
+      if (kid.shape.anchor) kid.anchors.set(child, kid.shape.anchor(el));
+    }
     for (const attr of level.shape.attrs) {
       const v = this.resolveOne(attr.view, child);
       if (attr.presence) attr.apply(this.driver, el, v);
@@ -362,6 +377,19 @@ export class Shaper<El> {
     return keys;
   }
 
+  /** What a level's last row goes before: the first mounted row of a later
+   *  level in the same slot element, else the static node that follows the
+   *  level in the template, else null (the end of the element). */
+  private tailRef(level: Level<El>, parentKey: string): El | null {
+    for (const sib of level.later) {
+      for (const entry of sib.order.childrenOf(parentKey)) {
+        const el = sib.nodes.get(entry[1]);
+        if (el !== undefined) return el;
+      }
+    }
+    return level.anchors.get(parentKey) ?? null;
+  }
+
   /** The next *mounted* sibling after (orderKey, child) — the insertBefore
    *  reference. Skips index entries not yet in the DOM (later mounts of the
    *  same batch). */
@@ -374,7 +402,7 @@ export class Shaper<El> {
     let probe: [string, string] = [orderKey, child];
     for (;;) {
       const next = level.order.successor(parentKey, probe[0], probe[1]);
-      if (next === null) return null;
+      if (next === null) return this.tailRef(level, parentKey);
       const el = level.nodes.get(next);
       const nextOrder = level.orderOf.get(next) ?? "";
       if (el !== undefined) return el;
@@ -394,6 +422,12 @@ interface Level<El> {
   /** Mounted elements. */
   nodes: Map<string, El>;
   order: OrderIndex;
+  /** Child levels, in source order. */
+  kids: Level<El>[];
+  /** Later sibling levels mounting into the same slot element. */
+  later: Level<El>[];
+  /** Per parent row: the static node this level's rows go before. */
+  anchors: Map<string, El | null>;
 }
 
 interface LevelPlan {

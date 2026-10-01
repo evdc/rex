@@ -357,3 +357,55 @@ describe("slot (S-90)", () => {
     expect(section.children[1]!.children).toEqual([]);
   });
 });
+
+describe("sibling order under one element", () => {
+  // section { <gate1> <gate2> footer } — levels flip on after the footer exists.
+  const gate = (name: string, tag: string): ShapeNode<SpyEl> => ({
+    name,
+    membershipView: name,
+    template: (d) => d.createElement(tag),
+    attrs: [],
+    children: [],
+    anchor: (root) => root.children[0] ?? null,
+  });
+  const app: ShapeNode<SpyEl> = {
+    name: "app",
+    membershipView: "app",
+    template: (d) => {
+      const root = d.createElement("section");
+      d.insertBefore(root, d.createElement("footer"), null);
+      return root;
+    },
+    attrs: [],
+    children: [gate("g1", "p"), gate("g2", "aside")],
+  };
+  const tags = (el: SpyEl) => el.children.map((c) => c.tag);
+
+  test("a level that mounts late goes before the static sibling that follows it", () => {
+    const driver = new SpyDriver();
+    const shaper = new Shaper(driver, driver.createElement("main"), [app]);
+    shaper.applyStep({ app: [["u", "u", 1]] });
+    shaper.applyStep({ g1: [["u", "u", 1]] });
+    expect(tags(shaper.el("app", "u")!)).toEqual(["p", "footer"]);
+  });
+
+  test("levels in one slot keep source order whichever mounts first", () => {
+    const driver = new SpyDriver();
+    const shaper = new Shaper(driver, driver.createElement("main"), [app]);
+    shaper.applyStep({ app: [["u", "u", 1]] });
+    shaper.applyStep({ g2: [["u", "u", 1]] });
+    shaper.applyStep({ g1: [["u", "u", 1]] });
+    expect(tags(shaper.el("app", "u")!)).toEqual(["p", "aside", "footer"]);
+    // Flipping one off and on again lands back in the same place.
+    shaper.applyStep({ g1: [["u", "u", -1]] });
+    shaper.applyStep({ g1: [["u", "u", 1]] });
+    expect(tags(shaper.el("app", "u")!)).toEqual(["p", "aside", "footer"]);
+  });
+
+  test("levels that mount in one batch are in source order", () => {
+    const driver = new SpyDriver();
+    const shaper = new Shaper(driver, driver.createElement("main"), [app]);
+    shaper.applyStep({ app: [["u", "u", 1]], g2: [["u", "u", 1]], g1: [["u", "u", 1]] });
+    expect(tags(shaper.el("app", "u")!)).toEqual(["p", "aside", "footer"]);
+  });
+});

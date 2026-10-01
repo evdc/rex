@@ -799,13 +799,13 @@ just the root. A `select` directly under a `Unit` level takes membership
 get distinct names (`…#todo`, `…#todo2`); `collect_child_levels` and the
 walk number them in the same document order.
 
-*Known limitation (not fixed — needs shaper work, and the plan expected
-`rex-dom` untouched):* sibling levels under one parent element append in
-mount order, so a gate that flips *after* a later static/level sibling is
-already present mounts after it. TodoMVC's `if`s are the last children of
-their parents (and `section.main`/`footer` flip together, in tree order), so
-it is unaffected; an `if` *followed* by siblings is not covered. The fix is a
-sibling-position anchor in the shaper; write it before an app needs it.
+*Sibling order (fixed later):* levels mounting into one element used to append
+in mount order, so a gate that flipped after a later sibling was already there
+landed out of source order. `ShapeLevel.anchor` (the first static child that
+follows the level) and `slotKey` (which levels share an element) now reach the
+shaper, which puts a level's last row before the first mounted row of a later
+same-slot level, else before the anchor. Tests: `rex-dom/test/shaper.test.ts`
+("sibling order under one element"), `rex-codegen/tests/handlers.rs`.
 
 *Acceptance:* `unit_root.rs` checks the root is one level with the one-point
 membership; the gate asserts exactly one assertion at the root key when the

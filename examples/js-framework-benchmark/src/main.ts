@@ -59,6 +59,7 @@ const shape_main_unit_row: ShapeNode<HTMLElement> = {
   membershipView: "main#unit#row",
   orderView: "main#unit#row#order",
   slot: (root) => ((root.childNodes[1] as HTMLElement).childNodes[0] as HTMLElement),
+  slotKey: "1.0",
   template: (d, key) => {
     const e0 = d.clone(proto_shape_main_unit_row ??= build_shape_main_unit_row(d));
     e0.dataset.key = key;
@@ -192,21 +193,21 @@ const shape_main_unit: ShapeNode<HTMLElement> = {
     const e0 = d.clone(proto_shape_main_unit ??= build_shape_main_unit(d));
     e0.dataset.key = key;
     (((((((e0.childNodes[0] as HTMLElement).childNodes[0] as HTMLElement).childNodes[1] as HTMLElement).childNodes[0] as HTMLElement).childNodes[0] as HTMLElement).childNodes[0] as HTMLElement)).addEventListener("click", (ev) => {
-      const labels = encodeRel(utils.randomLabels(1000), encodeText);
+      const p_labels = encodeRel(utils.randomLabels(1000), encodeText);
       const _ids: string[] = [];
-      _ids.push(...dispatch("Run", { "n": "i:1000", "labels": labels }));
+      _ids.push(...dispatch("Run", { "n": "i:1000", "labels": p_labels }));
       maybeRebalance(app, apply, shaper, "main#unit#row", key, "pos", encodeText);
     });
     (((((((e0.childNodes[0] as HTMLElement).childNodes[0] as HTMLElement).childNodes[1] as HTMLElement).childNodes[0] as HTMLElement).childNodes[1] as HTMLElement).childNodes[0] as HTMLElement)).addEventListener("click", (ev) => {
-      const labels = encodeRel(utils.randomLabels(10000), encodeText);
+      const p_labels = encodeRel(utils.randomLabels(10000), encodeText);
       const _ids: string[] = [];
-      _ids.push(...dispatch("Run", { "n": "i:10000", "labels": labels }));
+      _ids.push(...dispatch("Run", { "n": "i:10000", "labels": p_labels }));
       maybeRebalance(app, apply, shaper, "main#unit#row", key, "pos", encodeText);
     });
     (((((((e0.childNodes[0] as HTMLElement).childNodes[0] as HTMLElement).childNodes[1] as HTMLElement).childNodes[0] as HTMLElement).childNodes[2] as HTMLElement).childNodes[0] as HTMLElement)).addEventListener("click", (ev) => {
-      const labels = encodeRel(utils.randomLabels(1000), encodeText);
+      const p_labels = encodeRel(utils.randomLabels(1000), encodeText);
       const _ids: string[] = [];
-      _ids.push(...dispatch("Add", { "labels": labels }));
+      _ids.push(...dispatch("Add", { "labels": p_labels }));
       maybeRebalance(app, apply, shaper, "main#unit#row", key, "pos", encodeText);
     });
     (((((((e0.childNodes[0] as HTMLElement).childNodes[0] as HTMLElement).childNodes[1] as HTMLElement).childNodes[0] as HTMLElement).childNodes[3] as HTMLElement).childNodes[0] as HTMLElement)).addEventListener("click", (ev) => {

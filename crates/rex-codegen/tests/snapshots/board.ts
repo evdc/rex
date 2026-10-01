@@ -48,9 +48,9 @@ const shape_board_list_card: ShapeNode<HTMLElement> = {
     e0.dataset.key = key;
     makeDraggable(e0, key);
     ((e0.childNodes[0] as HTMLElement)).addEventListener("change", (ev) => {
-      const v = encodeText((ev.currentTarget as HTMLInputElement).value);
+      const p_v = encodeText((ev.currentTarget as HTMLInputElement).value);
       const _ids: string[] = [];
-      _ids.push(...dispatch("RenameCard", { "card": key, "title": v }));
+      _ids.push(...dispatch("RenameCard", { "card": key, "title": p_v }));
     });
     ((e0.childNodes[1] as HTMLElement)).addEventListener("click", (ev) => {
       const _ids: string[] = [];
@@ -95,16 +95,16 @@ const shape_board_list: ShapeNode<HTMLElement> = {
     e0.dataset.key = key;
     makeDropTarget(e0);
     (e0).addEventListener("drop", (ev) => {
-      const card = dragValue(ev);
-      const pos = encodeText(dropPos(shaper, "board#list#card", key, (ev as DragEvent).clientY, card));
+      const p_card = dragValue(ev);
+      const p_pos = encodeText(dropPos(shaper, "board#list#card", key, (ev as DragEvent).clientY, p_card));
       const _ids: string[] = [];
-      _ids.push(...dispatch("MoveCard", { "card": card, "list": key, "pos": pos }));
+      _ids.push(...dispatch("MoveCard", { "card": p_card, "list": key, "pos": p_pos }));
       maybeRebalance(app, apply, shaper, "board#list#card", key, "pos", encodeText);
     });
     (((e0.childNodes[0] as HTMLElement).childNodes[1] as HTMLElement)).addEventListener("click", (ev) => {
-      const pos = encodeText(endOf(shaper, "board#list#card", key));
+      const p_pos = encodeText(endOf(shaper, "board#list#card", key));
       const _ids: string[] = [];
-      _ids.push(...dispatch("AddCard", { "list": key, "pos": pos }));
+      _ids.push(...dispatch("AddCard", { "list": key, "pos": p_pos }));
       for (const _id of _ids) { const _el = shaper.el("board#list#card", _id); if (_el) { (_el.querySelector("input, textarea") as HTMLElement | null)?.focus(); break; } }
       maybeRebalance(app, apply, shaper, "board#list#card", key, "pos", encodeText);
     });

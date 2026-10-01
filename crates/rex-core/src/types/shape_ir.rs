@@ -52,6 +52,11 @@ pub struct ShapeLevel {
     /// level mounts into (`ul(class="list") { … select … }`); empty means the
     /// parent's root element.
     pub slot: Vec<usize>,
+    /// Index, in the slot element's template children, of the first static
+    /// child that follows this level in the source. Rows of this level mount
+    /// before it, so a level that appears while a later static sibling is
+    /// already there lands in source order rather than at the end.
+    pub anchor: Option<usize>,
     /// The static DOM skeleton for one row's element.
     pub template: Tpl,
     /// Dynamic value bindings, each with a child-index path to its target.

@@ -147,6 +147,15 @@ impl Emit {
         }
         if !level.slot.is_empty() {
             self.line(&format!("  slot: (root) => {},", nav_expr("root", &level.slot)));
+            self.line(&format!("  slotKey: {},", js_str(&slot_key(&level.slot))));
+        }
+        if let Some(n) = level.anchor {
+            let mut path = level.slot.clone();
+            path.push(n);
+            self.line(&format!(
+                "  anchor: (root) => ({} as HTMLElement | undefined) ?? null,",
+                nav_expr("root", &path)
+            ));
         }
         self.template(level);
         self.attrs(level);
@@ -202,7 +211,7 @@ impl Emit {
         for a in &ev.params {
             let expr = self.arg_expr(level, a);
             self.out
-                .push_str(&format!("      const {} = {expr};\n", a.name));
+                .push_str(&format!("      const {} = {expr};\n", param_local(&a.name)));
         }
         // One dispatch per `do`, each its own transaction; ids minted by any
         // of them feed the `focus(c)` action.
@@ -272,7 +281,7 @@ impl Emit {
             Extractor::DropPos { level, exclude } => format!(
                 "dropPos(shaper, {}, key, (ev as DragEvent).clientY, {})",
                 js_str(level),
-                exclude
+                param_local(exclude)
             ),
             Extractor::EndOf(level) => format!("endOf(shaper, {}, key)", js_str(level)),
             // The call is DOM-layer JS; its result is encoded to the wire
@@ -452,13 +461,20 @@ fn js_expr_lit(e: &rex::ast::Expr) -> String {
     }
 }
 
+/// The JS local a handler param is bound to. Prefixed so a user's name can
+/// never shadow what the listener body itself uses (`ev`, `key`, `e0`,
+/// `ancestors`, `shaper`, …) or be a JS reserved word.
+fn param_local(name: &str) -> String {
+    format!("p_{name}")
+}
+
 /// The listener-local expression for a dispatch argument.
 fn arg_ref(a: &ArgRef) -> String {
     match a {
         ArgRef::SelfKey => "key".to_string(),
         // `ancestors[0]` is the parent row's key, `[1]` its parent's, …
         ArgRef::Ancestor(n) => format!("ancestors[{}]", n - 1),
-        ArgRef::Param(p) => p.clone(),
+        ArgRef::Param(p) => param_local(p),
         ArgRef::Lit(l) => js_lit(l),
     }
 }
@@ -517,6 +533,12 @@ fn nav_expr(root: &str, path: &[usize]) -> String {
         expr = format!("({expr}.childNodes[{i}] as HTMLElement)");
     }
     expr
+}
+
+/// Identifies a slot element among a level's children: levels with equal keys
+/// share one element, so the shaper keeps them in source order.
+fn slot_key(path: &[usize]) -> String {
+    path.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(".")
 }
 
 /// A JS/TS-safe variable name for a `#`/`@`-separated level name.
