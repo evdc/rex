@@ -479,8 +479,8 @@ impl Node {
                     let mut sum = prev.sum;
                     let mut count = prev.count;
                     for (_, v, w) in drow {
-                        sum += v.as_i64().unwrap_or(0) * w;
-                        count += w;
+                        sum = sum.wrapping_add(v.as_i64().unwrap_or(0).wrapping_mul(*w));
+                        count = count.wrapping_add(*w);
                     }
                     // Presence must match batch exactly: a key is emitted iff
                     // its merged image has any nonzero-weight entry (mixed-sign
@@ -495,7 +495,7 @@ impl Node {
                             AggKind::Avg => {
                                 // Mirrors the batch kernel's `continue` on an
                                 // empty count; always Money, i64 division.
-                                if count == 0 { None } else { Some(Value::Money(sum / count)) }
+                                if count == 0 { None } else { Some(crate::eval::algebra::avg_value(sum, count, *money)) }
                             }
                             // No inverse (SPEC §5): rescan this key's merged
                             // image, mirroring the batch accumulator.

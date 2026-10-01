@@ -69,6 +69,14 @@ export class IndexedDbAdapter implements PersistenceAdapter {
     await finished(tx);
   }
 
+  async reset(): Promise<void> {
+    const db = await this.open();
+    const tx = db.transaction([SNAPSHOT, EVENTS], "readwrite");
+    tx.objectStore(SNAPSHOT).clear();
+    tx.objectStore(EVENTS).clear();
+    await finished(tx);
+  }
+
   async eventsSince(seq: number): Promise<LoggedEvent[]> {
     const db = await this.open();
     const all = await done(

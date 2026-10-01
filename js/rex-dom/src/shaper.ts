@@ -41,6 +41,8 @@ export class Shaper<El> {
         orderOf: new Map(),
         nodes: new Map(),
         order: new OrderIndex(shape.orderDesc ?? false),
+        memberOf: new Map(),
+        membersOf: new Map(),
         kids: [],
         later: [],
         anchors: new Map(),
@@ -99,21 +101,67 @@ export class Shaper<El> {
       touchedAttrs.set(view, touched);
     }
 
-    // Phase 0b: classify structural changes per level from membership deltas.
+    // Phase 0b: classify structural changes per level. A row is *shown* iff
+    // its membership row exists and its parent row is shown — so what changes
+    // a level is not only its own membership delta but its parent level's
+    // plan: a parent that mounts brings in every child that already named it
+    // (a nested level under an `if` or a filtered level, whose own membership
+    // never changed), and one that leaves takes its children's elements with
+    // it. Levels are depth-sorted, so a parent's plan is ready first.
     const plans = new Map<Level<El>, LevelPlan>();
     for (const level of this.levels) {
-      const rows = deltas[level.shape.membershipView];
       const plan: LevelPlan = { mounts: new Map(), removes: new Set(), reparents: new Map() };
       plans.set(level, plan);
-      if (!rows || rows.length === 0) continue;
-      const touched = new Set<string>();
-      for (const [child] of rows) touched.add(child);
-      for (const child of touched) {
+      const candidates = new Set<string>();
+
+      // Integrate this level's membership into `memberOf`/`membersOf`: every
+      // row, shown or not.
+      const rows = deltas[level.shape.membershipView];
+      if (rows && rows.length > 0) {
+        for (const [child] of rows) candidates.add(child);
+        for (const child of candidates) {
+          // Root levels ignore the membership view's value column: presence
+          // is what matters, and every root child shares the container ("").
+          let now = this.resolveOne(level.shape.membershipView, child);
+          if (!level.parent && now !== undefined) now = "";
+          const was = level.memberOf.get(child);
+          if (was === now) continue;
+          if (was !== undefined) {
+            const set = level.membersOf.get(was)!;
+            set.delete(child);
+            if (set.size === 0) level.membersOf.delete(was);
+          }
+          if (now === undefined) {
+            level.memberOf.delete(child);
+          } else {
+            level.memberOf.set(child, now);
+            let set = level.membersOf.get(now);
+            if (!set) level.membersOf.set(now, (set = new Set()));
+            set.add(child);
+          }
+        }
+      }
+
+      const parentPlan = level.parent ? plans.get(level.parent)! : undefined;
+      if (parentPlan) {
+        // Children of parents arriving or leaving this batch.
+        for (const parentKey of parentPlan.mounts.keys()) {
+          for (const child of level.membersOf.get(parentKey) ?? []) candidates.add(child);
+        }
+        for (const parentKey of parentPlan.removes) {
+          for (const child of level.order.childrenOf(parentKey)) candidates.add(child[1]);
+        }
+      }
+
+      const parentShown = (parentKey: string): boolean => {
+        if (!level.parent) return true;
+        if (parentPlan!.mounts.has(parentKey)) return true;
+        return level.parent.nodes.has(parentKey) && !parentPlan!.removes.has(parentKey);
+      };
+      for (const child of candidates) {
         const oldParent = level.parentOf.get(child);
-        // Root levels ignore the membership view's value column: presence is
-        // what matters, and every root child shares the container ("").
-        let newParent = this.resolveOne(level.shape.membershipView, child);
-        if (!level.parent && newParent !== undefined) newParent = "";
+        const named = level.memberOf.get(child);
+        const newParent = named !== undefined && parentShown(named) ? named : undefined;
         if (oldParent === undefined && newParent !== undefined) {
           plan.mounts.set(child, newParent);
         } else if (oldParent !== undefined && newParent === undefined) {
@@ -356,7 +404,12 @@ export class Shaper<El> {
     let lvl = level.parent;
     let key: string | undefined = parentKey;
     while (lvl && key !== undefined) {
-      if (plans.get(lvl)!.removes.has(key)) return true;
+      const plan = plans.get(lvl)!;
+      if (plan.removes.has(key)) return true;
+      // A row reparenting this batch keeps its element: it is carried to
+      // its new parent in phase 4, so whatever sat above it before — even a
+      // parent being removed right now — does not take its children away.
+      if (plan.reparents.has(key)) return false;
       key = lvl.parentOf.get(key);
       lvl = lvl.parent;
     }
@@ -415,8 +468,13 @@ interface Level<El> {
   readonly shape: ShapeNode<El>;
   readonly parent: Level<El> | null;
   readonly depth: number;
-  /** Integrated membership: child -> parent key. */
+  /** Where each *mounted* child is: child -> the parent key it sits under. */
   parentOf: Map<string, string>;
+  /** Integrated membership, shown or not: child -> the parent key it names
+   *  ("" at a root level). */
+  memberOf: Map<string, string>;
+  /** `memberOf` inverted: parent key -> the children naming it. */
+  membersOf: Map<string, Set<string>>;
   /** Integrated order keys: child -> fractional key ("" when unordered). */
   orderOf: Map<string, string>;
   /** Mounted elements. */

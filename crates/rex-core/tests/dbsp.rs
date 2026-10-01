@@ -668,7 +668,8 @@ fn avg_key_disappears_when_group_empties() {
     circuit.step(&tx);
     assert_eq!(
         circuit.integral(out).to_sorted_vec(),
-        vec![(int(1), Value::Money(4), 1)]
+        // The mean of the Int 4 is four whole units: $4.00, in cents.
+        vec![(int(1), Value::Money(400), 1)]
     );
 
     let mut retract = Transaction::new();

@@ -423,7 +423,7 @@ pub fn predicate(pred: &Pred) -> Box<dyn Fn(&Value) -> bool> {
 /// `a * b` on the shared numeric scale, tagged `Money` or `Int`. Shared with
 /// the incremental backend's co-keyed kernel.
 pub fn mul_values(a: &Value, b: &Value, money: bool) -> Value {
-    let n = a.as_i64().unwrap_or(0) * b.as_i64().unwrap_or(0);
+    let n = a.as_i64().unwrap_or(0).wrapping_mul(b.as_i64().unwrap_or(0));
     if money {
         Value::Money(n)
     } else {
@@ -440,6 +440,12 @@ pub fn mul_values(a: &Value, b: &Value, money: bool) -> Value {
 /// would silently scale a pure `Int + Int` by 100. Division by zero yields 0
 /// (a relation has no place for a runtime error; the checker may later
 /// reject non-grounded divisors).
+///
+/// Arithmetic is on `i64` and **wraps** on overflow, here and in every
+/// aggregate. Wrapping is the only choice that keeps the incremental engine
+/// equal to batch evaluation: sums are maintained by adding and subtracting
+/// deltas, which is exact in the ring ℤ/2⁶⁴ and would not be under
+/// saturation or a trap. It also makes debug, release and wasm builds agree.
 pub fn arith_values(kind: crate::types::typed::ArithKind, a: &Value, b: &Value, money: bool) -> Value {
     use crate::types::typed::ArithKind::*;
     let (x, y) = if money {
@@ -448,10 +454,10 @@ pub fn arith_values(kind: crate::types::typed::ArithKind, a: &Value, b: &Value, 
         (a.as_i64().unwrap_or(0), b.as_i64().unwrap_or(0))
     };
     let n = match kind {
-        Add => x + y,
-        Sub => x - y,
-        Div => if y == 0 { 0 } else { x / y },
-        Mod => if y == 0 { 0 } else { x % y },
+        Add => x.wrapping_add(y),
+        Sub => x.wrapping_sub(y),
+        Div => if y == 0 { 0 } else { x.wrapping_div(y) },
+        Mod => if y == 0 { 0 } else { x.wrapping_rem(y) },
     };
     if money {
         Value::Money(n)
@@ -473,7 +479,7 @@ pub fn concat_values(a: &Value, b: &Value) -> Value {
 /// incremental backend's co-keyed kernel.
 pub fn compare_values(op: crate::ast::CmpOp, a: &Value, b: &Value) -> bool {
     use crate::ast::CmpOp::*;
-    if let (Some(x), Some(y)) = (a.as_cents(), b.as_cents()) {
+    if let (Some(x), Some(y)) = (a.as_cents_exact(), b.as_cents_exact()) {
         return match op {
             Eq => x == y,
             Ne => x != y,

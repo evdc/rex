@@ -409,3 +409,72 @@ describe("sibling order under one element", () => {
     expect(tags(shaper.el("app", "u")!)).toEqual(["p", "aside", "footer"]);
   });
 });
+
+describe("rows whose parent is not shown", () => {
+  const item: ShapeNode<SpyEl> = {
+    name: "item",
+    membershipView: "item",
+    template: (d) => d.createElement("li"),
+    attrs: [{ view: "item_text", apply: (d, el, v) => d.setText(el, v) }],
+    children: [],
+  };
+  const group: ShapeNode<SpyEl> = {
+    name: "group",
+    membershipView: "group",
+    template: (d) => d.createElement("ul"),
+    attrs: [],
+    children: [item],
+  };
+  const fresh = () => {
+    const driver = new SpyDriver();
+    const root = driver.createElement("main");
+    return { driver, root, shaper: new Shaper(driver, root, [group]) };
+  };
+  const texts = (root: SpyEl) => root.children.map((g) => g.children.map((i) => i.text));
+
+  test("a child of a parent that is not in the parent level is not mounted, and is not an error", () => {
+    // A nested `select` under a filtered level: the child's membership names
+    // a parent the filter left out.
+    const { root, shaper } = fresh();
+    shaper.applyStep({ group: [["g1", "u", 1]], item: [["a", "g1", 1], ["b", "g2", 1]], item_text: [["a", "A", 1], ["b", "B", 1]] });
+    expect(texts(root)).toEqual([["A"]]);
+    expect(shaper.el("item", "b")).toBeUndefined();
+  });
+
+  test("it mounts when the parent arrives, with the values it already had", () => {
+    const { root, shaper } = fresh();
+    shaper.applyStep({ item: [["b", "g2", 1]], item_text: [["b", "B", 1]] });
+    expect(texts(root)).toEqual([]);
+    shaper.applyStep({ group: [["g2", "u", 1]] });
+    expect(texts(root)).toEqual([["B"]]);
+  });
+
+  test("a parent that leaves and returns gets its children back", () => {
+    // An `if (open) { ul { Item as i select … } }`: toggling `open` changes
+    // only the gate's membership, never the items'.
+    const { root, shaper } = fresh();
+    shaper.applyStep({ group: [["g1", "u", 1]], item: [["a", "g1", 1], ["b", "g1", 1]], item_text: [["a", "A", 1], ["b", "B", 1]] });
+    shaper.applyStep({ group: [["g1", "u", -1]] });
+    expect(texts(root)).toEqual([]);
+    // An item changes while its parent is away.
+    shaper.applyStep({ item_text: [["a", "A", -1], ["a", "A2", 1]] });
+    shaper.applyStep({ group: [["g1", "u", 1]] });
+    expect(texts(root)).toEqual([["A2", "B"]]);
+  });
+
+  test("a removed child of a row that is reparented out of a removed parent is really removed", () => {
+    // g1 goes, its item moves to g2 (same element), and that item's own
+    // child goes too: it must not survive inside the reused element.
+    const leaf: ShapeNode<SpyEl> = { name: "leaf", membershipView: "leaf", template: (d) => d.createElement("b"), attrs: [], children: [] };
+    const driver = new SpyDriver();
+    const root = driver.createElement("main");
+    const shaper = new Shaper(driver, root, [{ ...group, children: [{ ...item, children: [leaf] }] }]);
+    shaper.applyStep({ group: [["g1", "u", 1], ["g2", "u", 1]], item: [["a", "g1", 1]], leaf: [["x", "a", 1]] });
+    const a = shaper.el("item", "a")!;
+    expect(a.children.map((c) => c.tag)).toEqual(["b"]);
+    shaper.applyStep({ group: [["g1", "u", -1]], item: [["a", "g1", -1], ["a", "g2", 1]], leaf: [["x", "a", -1]] });
+    expect(shaper.el("item", "a")).toBe(a);
+    expect(a.parent).toBe(shaper.el("group", "g2"));
+    expect(a.children).toEqual([]);
+  });
+});

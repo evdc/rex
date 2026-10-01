@@ -31,6 +31,28 @@ V ::= Unit | Scalar | ID-sort | (V × V) | (V + V)
 - Products `(V × V)`: created by the fork combinator; the right column of a relation can be a nested pair.
 - Coproducts `(V + V)`: included from v1 even though their main consumer (outer join → `Option`) is parked. **There is no NULL.** "Maybe a value" is `(V + Unit)`. Retrofitting coproducts later is painful; including them now is cheap. This makes the value algebra a **distributive/bicartesian** category.
 
+### 2.1 Scalars: what the numbers do (decided 2026-09-30)
+
+`Int` and `Money` are 64-bit signed integers (`Money` in minor units). The rules
+below are pinned by `crates/rex-core/tests/adversarial.rs`.
+
+- **Arithmetic wraps.** `+ - *`, and every `sum`, are arithmetic in ℤ/2⁶⁴. This
+  is not a convenience: a maintained sum is *old + Δ*, and adding and
+  subtracting deltas is exact only in a ring. Saturating or trapping
+  arithmetic would make the incremental value differ from batch evaluation
+  after an overflow and a retraction. It also makes debug, release and wasm
+  builds agree.
+- **Division and remainder are total**: by zero is `0`; they truncate toward
+  zero (`-7 / 2 = -3`, `-7 % 3 = -1`), and `MIN / -1` wraps to `MIN`.
+- **Comparison is exact.** `Int` and `Money` compare on a common scale (an
+  `Int` is whole units: `Money > 2` reads "more than 2.00") computed without
+  overflow, so order and equality are never artefacts of wrapping.
+- **`Money * Money` is a type error** (money squared has no unit); one side
+  must be an `Int`. `avg` of either numeric image is `Money` — the mean of
+  `Int`s `1` and `2` is `1.50` — truncated toward zero to the minor unit.
+- **Literals** out of range are errors, not truncations. A date is `yyyy-mm-dd`
+  and must be a real calendar date; any other `a-b-c` is subtraction.
+
 ---
 
 ## 3. Relations and the categorical core

@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 66c27ddb1dd90c29f8e740c7f8bfb5e7bc1b20bbd432640c690bfeee8491e45f # shrinks to ops = [Run(9223372036854775807, []), Add([(0, "a", 1), (1, "a", 1), (2, "a", 1)]), SwapRows]
+cc 0b011366e40ed9c25a285ad87033396ccc6a09f855d9decbc03cabb8fa947ce9 # shrinks to ops = [Stock("a", 0, 0, 2), Twice(2)]
+cc edefe22ace38d76fd2b760591c8d886cabb4f2b5f43fe0884154568e7571f4df # shrinks to ops = [Run(0, [(0, "a", 1), (1, "a", 1), (2, "a", 1), (3, "a", 1), (4, "a", 1)]), Run(0, [(0, "a", 1), (1, "a", 1), (2, "a", 1)]), Select(7), Select(7)]
+cc b23dd82a2e0f017f4e9724794ded02ef58274a0b07922da76f778a5d0b779cad # shrinks to ops = [Run(0, [(2, "a", 1), (0, "a", 1)])]

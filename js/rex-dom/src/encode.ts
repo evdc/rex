@@ -30,14 +30,27 @@ export function decodeText(v: string): string {
   return v.startsWith("t:") ? unescape(v.slice(2)) : v;
 }
 
-/** Encode an Int value: `i:<n>`. */
-export function encodeInt(n: number): string {
-  return "i:" + Math.trunc(n).toString();
+/** The decimal digits of a whole number, for the wire. A `number` must be
+ *  a safe integer after truncation: `(1e21).toString()` is `"1e+21"` and
+ *  `NaN` is `"NaN"`, neither of which the engine reads, and past 2^53 a
+ *  number is no longer the integer it looks like. Pass a `bigint` for those. */
+function digits(n: number | bigint, what: string): string {
+  if (typeof n === "bigint") return n.toString();
+  const whole = Math.trunc(n);
+  if (!Number.isSafeInteger(whole)) {
+    throw new RangeError(`${what}: ${n} is not a safe integer (pass a bigint for values past 2^53)`);
+  }
+  return (whole === 0 ? 0 : whole).toString(); // -0 is 0
+}
+
+/** Encode an Int value: `i:<n>`. A fraction truncates toward zero. */
+export function encodeInt(n: number | bigint): string {
+  return "i:" + digits(n, "encodeInt");
 }
 
 /** Encode a Money value in minor units (cents): `m:<cents>`. */
-export function encodeMoney(cents: number): string {
-  return "m:" + Math.trunc(cents).toString();
+export function encodeMoney(cents: number | bigint): string {
+  return "m:" + digits(cents, "encodeMoney");
 }
 
 /** Encode a scalar atom: `@<escaped>`. */
@@ -51,14 +64,23 @@ export function encodeRel<T>(values: readonly T[], enc: (v: T) => string): [stri
   return values.map((v, i) => [encodeInt(i), enc(v), 1]);
 }
 
-/** Decode an `i:` Int value back to a number (passes non-`i:` through as-is). */
-export function decodeInt(v: string): number {
-  return v.startsWith("i:") ? Number(v.slice(2)) : Number(v);
+/** A decoded whole number: a `number` when that is exact, a `bigint` past
+ *  2^53 (the engine's integers are 64-bit). `String(…)` of either is the
+ *  exact digits, which is all a text bind needs. */
+function whole(text: string): number | bigint {
+  const n = Number(text);
+  if (Number.isSafeInteger(n) || !/^-?\d+$/.test(text)) return n;
+  return BigInt(text);
+}
+
+/** Decode an `i:` Int value (passes non-`i:` through as-is). */
+export function decodeInt(v: string): number | bigint {
+  return whole(v.startsWith("i:") ? v.slice(2) : v);
 }
 
 /** Decode an `m:` Money value back to its minor units (cents). */
-export function decodeMoney(v: string): number {
-  return v.startsWith("m:") ? Number(v.slice(2)) : Number(v);
+export function decodeMoney(v: string): number | bigint {
+  return whole(v.startsWith("m:") ? v.slice(2) : v);
 }
 
 /** Decode an `@` atom value back to its bare (unescaped) name, for display as text. */

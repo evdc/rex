@@ -50,11 +50,19 @@ shaper treats as opaque identity (it never decodes a key):
 | Encoding | Meaning | JS helper |
 |---|---|---|
 | `t:hello` | Text (`\ , ( )` backslash-escaped) | `encodeText` / `decodeText` |
-| `i:42` | Int | `encodeInt` / `decodeInt` |
-| `m:1999` | Money, in minor units | `encodeMoney` / `decodeMoney` |
+| `i:42` | Int (64-bit) | `encodeInt` / `decodeInt` |
+| `m:1999` | Money, in minor units (64-bit) | `encodeMoney` / `decodeMoney` |
 | `@Active` | Atom (a constructor of a `type`, or a Bool: `@True`) | `encodeAtom` / `decodeAtom` |
 | `#3:7` | An entity id: sort 3, row 7 (minted by the engine) | pass through verbatim |
 | `u` | Unit | — |
+
+The integer helpers are exact: `encodeInt` takes a `number` or a `bigint` and
+throws a `RangeError` for a number that is not a safe integer (`1e21` would
+otherwise be written `1e+21`); `decodeInt` returns a `number` when that is
+exact and a `bigint` past 2^53. The fixture
+[`crates/rex-core/tests/fixtures/encoding.json`](../../crates/rex-core/tests/fixtures/encoding.json),
+written by the engine's own encoder, is what
+[`test/encoding.test.ts`](test/encoding.test.ts) holds these to.
 
 A real step — renaming a card, from
 [`crates/rex-core/tests/fixtures/steps/01-rename.json`](../../crates/rex-core/tests/fixtures/steps/01-rename.json):
@@ -93,8 +101,14 @@ without a value.
 One call, one synchronous DOM transaction, in this order:
 
 0. **Integrate and classify.** Every mirrored view's rows are folded into the
-   shaper's own copy of that view, and each level's membership delta is sorted
-   into mounts, removes and reparents.
+   shaper's own copy of that view, and each level's changes are sorted into
+   mounts, removes and reparents. **A row is shown iff its membership row
+   exists and its parent row is shown** — so a level changes not only with its
+   own membership but with its parent's: a child naming a parent that is not
+   in the parent level (a nested `select` under a filtered level or an `if`)
+   is simply not mounted, it mounts when that parent arrives, and a parent
+   that leaves and comes back gets its children back, with whatever values
+   they have by then.
 1. **Removes**, top-down and subtree-coalesced: one `removeChild` per dead
    subtree root, grouped by parent — and a single `clear` when a batch removes
    every child a parent has.

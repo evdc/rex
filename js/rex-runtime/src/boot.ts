@@ -42,6 +42,10 @@ export type PersistedEngine = Engine & {
  *    A page killed before its first snapshot has only the log; the log's
  *    genesis events rebuild the seed.
  *
+ * If what is stored does not load, `boot` reports it through `onError` and
+ * recovers with as much as it can (see the fallbacks in the body) rather than
+ * leaving the page dead.
+ *
  * Afterwards each `dispatch`/`rebalance` appends the engine's new log tail.
  * Returns the typed `Engine`, which is what generated code hands to the
  * shaper as its `EnginePort`.
@@ -59,16 +63,73 @@ export async function boot<A extends EngineApp>(opts: BootOptions<A>): Promise<P
    *  append moves it, so a failed batch is re-read and retried by the next
    *  append rather than leaving a hole in the stored log. */
   let cursor: number;
+  /** A snapshot to write back once the store has been reset (recovery). */
+  let resave: { json: string; cursor: number } | null = null;
+  /** Take a new snapshot right after boot, over one that would not load. */
+  let refresh = false;
   if (!snap && tail.length === 0) {
     app = new RexApp(program); // logs the genesis events from seq 0
     cursor = 0;
   } else {
-    app = RexApp.forRestore(program);
-    cursor = snap?.cursor ?? 0;
-    if (snap) app.restore(snap.json);
-    if (tail.length > 0) {
-      app.replay(JSON.stringify(tail), true);
-      cursor = Math.max(cursor, tail[tail.length - 1]!.seq + 1);
+    // What is stored may not load: a snapshot or log that was damaged, cut
+    // short, or written by something else is refused by the engine (it
+    // validates both). Each attempt gets a fresh engine — a failed replay
+    // leaves one half-applied — and each falls back to less:
+    //   1. the snapshot plus the events after it   (the normal reload)
+    //   2. the whole log, from empty               (the snapshot was bad)
+    //   3. the snapshot alone                      (an event after it was bad)
+    //   4. a first load                            (nothing stored loads)
+    // 3 and 4 lose work, so they are reported, and the store is reset to
+    // match what the app now holds — otherwise the next reload fails again.
+    const load = (s: typeof snap, events: readonly LoggedEvent[]): A => {
+      const fresh = RexApp.forRestore(program);
+      if (s) fresh.restore(s.json);
+      if (events.length > 0) fresh.replay(JSON.stringify(events), true);
+      return fresh;
+    };
+    const after = (events: readonly LoggedEvent[], from: number) =>
+      events.length > 0 ? Math.max(from, events[events.length - 1]!.seq + 1) : from;
+    let loaded: { app: A; cursor: number } | null = null;
+    try {
+      loaded = { app: load(snap, tail), cursor: after(tail, snap?.cursor ?? 0) };
+    } catch (first) {
+      onError(first);
+      let recovered = false;
+      if (snap) {
+        try {
+          const all = await adapter.eventsSince(0);
+          // Only a log that reaches back to the start can stand alone.
+          if (all.length > 0 && all[0]!.seq === 0) {
+            loaded = { app: load(null, all), cursor: after(all, 0) };
+            recovered = true;
+            refresh = true; // replace the snapshot that would not load
+          }
+        } catch (second) {
+          onError(second);
+        }
+        if (!loaded) {
+          try {
+            loaded = { app: load(snap, []), cursor: snap.cursor };
+            resave = { json: snap.json, cursor: snap.cursor };
+          } catch (third) {
+            onError(third);
+          }
+        }
+      }
+      if (!recovered) {
+        try {
+          await adapter.reset?.();
+        } catch (e) {
+          onError(e);
+        }
+      }
+    }
+    if (loaded) {
+      app = loaded.app;
+      cursor = loaded.cursor;
+    } else {
+      app = new RexApp(program);
+      cursor = 0;
     }
   }
 
@@ -117,7 +178,12 @@ export async function boot<A extends EngineApp>(opts: BootOptions<A>): Promise<P
     return enqueue(() => adapter.saveSnapshot({ json, cursor: at }));
   };
 
+  if (resave) {
+    const kept = resave;
+    void enqueue(() => adapter.saveSnapshot(kept));
+  }
   persistTail(); // the genesis events on a first load
+  if (refresh) void saveSnapshot();
 
   const engine = new Engine(app, { afterWrite: persistTail, profiler: opts.profiler });
   const target = engine as PersistedEngine;

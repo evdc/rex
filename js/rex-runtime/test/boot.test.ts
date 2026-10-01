@@ -41,14 +41,19 @@ class FakeApp implements EngineApp {
   base_snapshot(): string {
     return JSON.stringify({ cursor: this.next, items: this.items });
   }
+  /** Like the engine: refuses an event it cannot apply — after applying the
+   *  ones before it, so a failed replay leaves this app half-loaded. */
   replay(json: string, _silent: boolean): void {
-    for (const e of JSON.parse(json) as { seq: number; args: Record<string, string> }[]) {
-      this.items.push(e.args.item!);
+    for (const e of JSON.parse(json) as { seq: number; name: string; args: Record<string, string> }[]) {
+      if (e.name === "@damaged" || e.args?.item === undefined) throw new Error(`cannot replay seq ${e.seq}`);
+      this.items.push(e.args.item);
       this.next = Math.max(this.next, e.seq + 1);
     }
   }
+  /** Like the engine: refuses a snapshot that is not one of its own. */
   restore(json: string): void {
     const s = JSON.parse(json) as { cursor: number; items: string[] };
+    if (!Array.isArray(s.items) || typeof s.cursor !== "number") throw new Error("not a snapshot");
     this.items = [...s.items];
     this.next = s.cursor;
   }
@@ -198,6 +203,117 @@ describe("boot", () => {
     fail = false;
     await app.flush();
     expect(a.events.size).toBe(3);
+  });
+});
+
+describe("boot when what is stored does not load", () => {
+  /** A store holding seed1, seed2, x, y, with a snapshot covering the first three. */
+  async function stored() {
+    const a = new MemoryAdapter();
+    const app = await boot(opts(a, { snapshotEvery: 3 }));
+    add(app, "x"); // third event: the snapshot is taken at cursor 3
+    await app.flush();
+    add(app, "y");
+    await app.flush();
+    expect(a.snapshot?.cursor).toBe(3);
+    expect(a.events.size).toBe(4);
+    return a;
+  }
+  const errors = () => {
+    const seen: unknown[] = [];
+    return { seen, onError: (e: unknown) => seen.push(e) };
+  };
+
+  test("a damaged snapshot: the whole log rebuilds everything, and the snapshot is replaced", async () => {
+    const a = await stored();
+    a.snapshot = { json: "{garbage", cursor: 3 };
+    const e = errors();
+    const app = await boot(opts(a, e));
+    expect(itemsOf(app)).toEqual(["seed1", "seed2", "x", "y"]);
+    expect(e.seen).toHaveLength(1);
+    await app.flush();
+    // The next reload is a normal one again.
+    expect(a.snapshot?.cursor).toBe(4);
+    const again = errors();
+    expect(itemsOf(await boot(opts(a, again)))).toEqual(["seed1", "seed2", "x", "y"]);
+    expect(again.seen).toHaveLength(0);
+  });
+
+  test("a damaged event after the snapshot: the snapshot alone, and the store is reset to it", async () => {
+    const a = await stored();
+    a.events.set(3, { seq: 3, name: "@damaged", args: {} });
+    const e = errors();
+    const app = await boot(opts(a, e));
+    // Not half of the tail on top of a half-loaded engine: exactly the snapshot.
+    expect(itemsOf(app)).toEqual(["seed1", "seed2", "x"]);
+    expect(e.seen.length).toBeGreaterThan(0);
+    add(app, "z");
+    await app.flush();
+    expect([...a.events.keys()]).toEqual([3]);
+    expect(a.snapshot?.cursor).toBe(3);
+    const again = errors();
+    expect(itemsOf(await boot(opts(a, again)))).toEqual(["seed1", "seed2", "x", "z"]);
+    expect(again.seen).toHaveLength(0);
+  });
+
+  test("a damaged log and no snapshot: a first load, and the store is reset", async () => {
+    const a = new MemoryAdapter();
+    const first = await boot(opts(a, { snapshotEvery: 1000 }));
+    add(first, "x");
+    await first.flush();
+    a.events.set(1, { seq: 1, name: "@damaged", args: {} });
+    const e = errors();
+    const app = await boot(opts(a, e));
+    expect(itemsOf(app)).toEqual(["seed1", "seed2"]);
+    expect(e.seen).toHaveLength(1);
+    await app.flush();
+    expect([...a.events.values()].map((ev) => ev.name)).toEqual(["@genesis", "@genesis"]);
+    expect(itemsOf(await boot(opts(a)))).toEqual(["seed1", "seed2"]);
+  });
+
+  test("a damaged snapshot and a damaged log: a first load", async () => {
+    const a = await stored();
+    a.snapshot = { json: "null", cursor: 3 };
+    a.events.set(0, { seq: 0, name: "@damaged", args: {} });
+    const e = errors();
+    const app = await boot(opts(a, e));
+    expect(itemsOf(app)).toEqual(["seed1", "seed2"]);
+    expect(e.seen.length).toBeGreaterThanOrEqual(2);
+    add(app, "new");
+    await app.flush();
+    expect(itemsOf(await boot(opts(a)))).toEqual(["seed1", "seed2", "new"]);
+  });
+
+  test("a log that does not start at 0 cannot stand in for a bad snapshot", async () => {
+    const a = await stored();
+    a.snapshot = { json: "{garbage", cursor: 3 };
+    a.events.delete(0);
+    const app = await boot(opts(a, errors()));
+    expect(itemsOf(app)).toEqual(["seed1", "seed2"]);
+  });
+
+  test("an adapter that cannot reset still boots, every time", async () => {
+    const a = await stored();
+    a.events.set(3, { seq: 3, name: "@damaged", args: {} });
+    (a as { reset?: unknown }).reset = undefined;
+    for (let i = 0; i < 2; i++) {
+      const e = errors();
+      const app = await boot(opts(a, e));
+      expect(itemsOf(app)).toEqual(["seed1", "seed2", "x"]);
+      expect(e.seen.length).toBeGreaterThan(0);
+      await app.flush();
+    }
+  });
+
+  test("an adapter whose reset fails still boots", async () => {
+    const a = await stored();
+    a.events.set(3, { seq: 3, name: "@damaged", args: {} });
+    a.reset = async () => {
+      throw new Error("blocked");
+    };
+    const e = errors();
+    expect(itemsOf(await boot(opts(a, e)))).toEqual(["seed1", "seed2", "x"]);
+    expect(e.seen.map(String).some((m) => m.includes("blocked"))).toBe(true);
   });
 });
 

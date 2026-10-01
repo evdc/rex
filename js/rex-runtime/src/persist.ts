@@ -35,6 +35,11 @@ export interface PersistenceAdapter {
   appendEvents(events: readonly LoggedEvent[]): Promise<void>;
   /** Every stored event with `seq >= seq`, in `seq` order. */
   eventsSince(seq: number): Promise<LoggedEvent[]>;
+  /** Forget everything stored. Optional: `boot` calls it when what is stored
+   *  cannot be loaded and it has to start from less (see `boot`). Without it,
+   *  a store that cannot be loaded is left as it is, and every later boot
+   *  recovers the same way. */
+  reset?(): Promise<void>;
 }
 
 /** A stable short key for a program's source, so a changed program never

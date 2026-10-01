@@ -290,6 +290,26 @@ first input of the row the preceding `do` created at level `c`;
 | `local s = d` in `Name(x: E)` | hidden entity keyed by `E` with field `s`, defaulted via `except` |
 | `on click(p = ex) { do E(a); focus(c) }` | listener: run extractors, `dispatch("E", {…})`, then actions |
 
+## 8a. Limits and name rules
+
+- **Nesting is limited to 128 levels** — parentheses, prefix operators, the
+  length of one operator chain (`a | b | c …` is a tree as deep as it is
+  long), elements inside elements; an `if`/`match` counts as four. Past it the
+  parser says so. Every later pass recurses over the tree, and the stack is
+  1 MB where Rex runs; name a sub-expression with `let`, or use a component.
+  A `match` may have any number of arms (its union is built balanced).
+- **A name is declared once.** Entities, types, constructors, states, `rel`s
+  and `let`s share one namespace; views (roots and components) another. An
+  entity has each field once, and a `new`/`update` sets each field once. The
+  built-in type names (`Int Text Money Date Bool Unit`) cannot be redefined.
+  Two exceptions, both deliberate: a `let` may shadow `unit` or a constructor.
+- **`.a . name`**: a `.name` hop is a field first. Where the entity has no
+  such field but `name` is a relation in scope, it is the join it looks like
+  (`.list . titles`). A field of that name still wins; write `(.list) . titles`
+  to force the join.
+- **A constructor is a literal** wherever an atom is: `.kind in (Food | Toy)`.
+- A leading byte-order mark is ignored.
+
 ## 9. Open questions
 
 1. **Empty groups**: `count(Card by .list)` has no row for an empty list, so

@@ -86,8 +86,16 @@ impl Env {
         id
     }
 
+    /// A sort's name. Total: a sort number the program never minted (it can
+    /// arrive in a value from a host, or from damaged storage) has a
+    /// placeholder name rather than a panic.
     pub fn sort_name(&self, sort: SortId) -> &str {
-        &self.sort_names[sort.0]
+        self.sort_names.get(sort.0).map_or("<no such sort>", String::as_str)
+    }
+
+    /// Whether `sort` is one this program declared.
+    pub fn has_sort(&self, sort: SortId) -> bool {
+        sort.0 < self.sort_names.len()
     }
 
     /// Resolve an entity name (`Customer`) or a sort name (`CustomerID`) to its sort.

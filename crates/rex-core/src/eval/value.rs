@@ -63,16 +63,27 @@ impl Value {
             cents_str.push('0');
         }
         let cents: i64 = cents_str.parse().unwrap_or(0);
-        let magnitude = whole.abs() * 100 + cents;
-        Value::Money(if negative { -magnitude } else { magnitude })
+        let magnitude = whole.wrapping_abs().wrapping_mul(100).wrapping_add(cents);
+        Value::Money(if negative { magnitude.wrapping_neg() } else { magnitude })
     }
 
     /// Numeric value on a common scale (cents): `Int` counts are promoted to
     /// whole units so `Money > 30` reads as "$30". Returns `None` if non-numeric.
     pub fn as_cents(&self) -> Option<i64> {
         match self {
-            Value::Int(n) => Some(n * 100),
+            Value::Int(n) => Some(n.wrapping_mul(100)),
             Value::Money(c) => Some(*c),
+            _ => None,
+        }
+    }
+
+    /// The same common scale, widened so it cannot overflow: what a
+    /// *comparison* uses. On the wrapping `i64` scale, `i64::MIN + 2` whole
+    /// units is 200 cents and would equal `2`.
+    pub fn as_cents_exact(&self) -> Option<i128> {
+        match self {
+            Value::Int(n) => Some(*n as i128 * 100),
+            Value::Money(c) => Some(*c as i128),
             _ => None,
         }
     }
@@ -96,7 +107,7 @@ impl std::fmt::Display for Value {
             Value::Int(n) => write!(f, "{n}"),
             Value::Money(c) => {
                 let sign = if *c < 0 { "-" } else { "" };
-                let c = c.abs();
+                let c = c.unsigned_abs();
                 write!(f, "{sign}${}.{:02}", c / 100, c % 100)
             }
             Value::Text(s) => write!(f, "{:?}", s.as_str()),

@@ -1242,6 +1242,47 @@ through a failed build. `run` no longer prints the s-expression unless `--ast`.
 more from the row's own bind (a cascade, now at real positions); there is no
 `--format json`, and `rex check` does not read stdin.
 
+#### Hardening pass: oracle, model and fuzz suites — **done 2026-10-01**
+*Not a planned story:* asked for after S-31, to "rigorously challenge the
+language". The suites are listed in README *Test coverage*; the rules they
+settled are SPEC §2.1 and SYNTAX §8a. What they found, all fixed and each
+pinned by a named test (`rex-core/tests/adversarial.rs` unless noted):
+- **Engine/semantics:** integer overflow panicked (debug) or differed by build —
+  arithmetic now wraps, by design (a maintained sum is exact only in a ring);
+  `where .pos = 2` matched a row at `i64::MIN + 2` (comparison went through a
+  wrapping cents scale); `avg` of `Int`s was off by 100×; `Money * Money` was
+  accepted and wrong; a view naming a seed row (`C[(.list) . done]`) panicked
+  on a restoring boot, i.e. the app would not start after a reload.
+- **Front end:** deep nesting overflowed the stack at ~130–800 levels (now a
+  diagnostic at 128); a many-armed `match` did too (its union is now
+  balanced); `"\é"` left the lexer mid-character and the next token panicked;
+  out-of-range decimals became `$0.99`; `2024-02-30` was a date; duplicate
+  fields, states, views, `let`s, `new` fields and built-in type names were
+  silently accepted (a duplicated `state` broke the engine's base invariant);
+  a constructor was not a literal in an `in` set; `.p . view` was an "unknown
+  field" error.
+- **Boundary/persistence** (`rex-wasm/tests/boundary.rs`, `rex-runtime`'s
+  `boot.test.ts`): replay did not type-check logged arguments, and `restore`
+  loaded any well-formed JSON — a damaged store panicked (an abort, in wasm)
+  on load or several events later. Snapshots and logs are now validated, and
+  `boot` falls back (whole log → snapshot alone → first load) and resets the
+  store. `rex-wasm` was split into a plain-Rust core (`App`) and a thin
+  binding so this is testable natively; it had no tests before.
+- **JS** (`rex-dom/test/shaper.fuzz.test.ts`, `encoding.test.ts`): the shaper
+  threw on a child whose parent was not in the parent level, and never
+  re-mounted children when a parent left and returned — any nested `select`
+  under an `if` or a filtered level; a removed child of a row reparented out
+  of a removed parent stayed in the DOM (older than this pass);
+  `encodeInt(1e21)` wrote `i:1e+21` and `decodeInt` rounded past 2^53;
+  generated string literals did not escape CR or U+2028.
+The suites were themselves mutation-tested: 15 bugs planted one at a time in
+the engine, the dispatcher and the shaper were all caught — after one
+(an inverted arg-dependent `where` predicate) showed that no model covered
+that handler form, and `models.rs` gained the stockroom.
+*Left as found:* a `Money` text bind shows minor units (`250`, not `2.50`);
+the TodoMVC example accepts empty todos; an `in` set or operator chain longer
+than 128 hits the nesting limit.
+
 #### S-94 Docs pass (S, deps everything above)
 *Subtasks:* `README.md` status + "What's left" rewritten; `SYNTAX.md` is the
 v1 surface reference (from S-02, updated); SPEC gets the `Unit`, event-log,

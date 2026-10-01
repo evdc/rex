@@ -16,6 +16,10 @@ export class MemoryAdapter implements PersistenceAdapter {
   async appendEvents(events: readonly LoggedEvent[]): Promise<void> {
     for (const e of events) if (!this.events.has(e.seq)) this.events.set(e.seq, e);
   }
+  async reset(): Promise<void> {
+    this.snapshot = null;
+    this.events.clear();
+  }
   async eventsSince(seq: number): Promise<LoggedEvent[]> {
     return [...this.events.values()].filter((e) => e.seq >= seq).sort((a, b) => a.seq - b.seq);
   }

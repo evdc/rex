@@ -8,8 +8,8 @@
 //! The desugarer has already rejected `do` cycles, so expansion terminates.
 
 use crate::dbsp::{
-    ArgValue, Circuit, DispatchOp, Engine, Event, InputKey, StepResult, GENESIS, GENESIS_SORT, REBALANCE,
-    REBALANCE_FIELD, REBALANCE_ROWS,
+    ArgValue, BaseSnapshot, Circuit, DispatchOp, Engine, Event, InputKey, StepResult, GENESIS, GENESIS_SORT,
+    REBALANCE, REBALANCE_FIELD, REBALANCE_ROWS,
 };
 use crate::eval::interp::{arith_values, compare_values, lit_value};
 use crate::eval::intern::intern;
@@ -69,7 +69,8 @@ pub fn dispatch_event(
 /// program statement, then this) in log order: a [`GENESIS`] event (a
 /// program-setup `new`, S-21 subtask 3) mints directly from its tagged sort;
 /// every other event re-derives its dispatch ops from the same declared
-/// handler `dispatch_event` used to produce it, then applies them. Doesn't
+/// handler `dispatch_event` used to produce it (arguments checked the same
+/// way: the log comes from storage), then applies them. Doesn't
 /// re-append to `engine`'s log — the caller already has one (this *is* it).
 ///
 /// `silent` skips per-step delta collection (`Circuit::step_silent`): the
@@ -82,11 +83,21 @@ pub fn replay(
     log: &[Event],
     silent: bool,
 ) -> Result<(), String> {
+    // Check the whole log's numbering before touching the engine: a refused
+    // log must leave it as it was, and a seq the host cannot represent would
+    // poison every later event's.
+    let mut next = engine.cursor();
+    for event in log {
+        if event.seq < next || event.seq >= MAX_SEQ {
+            return Err(format!("event log is out of order or out of range at seq {} (expected {next} or later)", event.seq));
+        }
+        next = event.seq + 1;
+    }
     for event in log {
         if event.name == GENESIS {
-            replay_genesis(engine, event, silent)?;
+            replay_genesis(engine, env, event, silent)?;
         } else if event.name == REBALANCE {
-            replay_rebalance(engine, event, silent)?;
+            replay_rebalance(engine, env, event, silent)?;
         } else {
             let ops = ops_for_event(env, &engine.circuit, events, event)?;
             if silent {
@@ -100,7 +111,7 @@ pub fn replay(
     Ok(())
 }
 
-fn replay_genesis(engine: &mut Engine, event: &Event, silent: bool) -> Result<(), String> {
+fn replay_genesis(engine: &mut Engine, env: &Env, event: &Event, silent: bool) -> Result<(), String> {
     let mut sort = None;
     let mut fields = Vec::new();
     for (name, arg) in &event.args {
@@ -117,6 +128,15 @@ fn replay_genesis(engine: &mut Engine, event: &Event, silent: bool) -> Result<()
         }
     }
     let sort = sort.ok_or_else(|| "genesis event missing sort tag".to_string())?;
+    if !env.has_sort(sort) {
+        return Err(format!("genesis event names sort {}, which this program does not have", sort.0));
+    }
+    for (i, (field, value)) in fields.iter().enumerate() {
+        check_field(env, sort, field, value)?;
+        if fields[..i].iter().any(|(f, _)| f == field) {
+            return Err(format!("genesis event sets `{field}` twice"));
+        }
+    }
     if silent {
         engine.apply_new_silent(sort, &fields);
     } else {
@@ -128,7 +148,7 @@ fn replay_genesis(engine: &mut Engine, event: &Event, silent: bool) -> Result<()
 /// Replay a logged [`REBALANCE`] system event: rebuild the same `Set` ops
 /// [`Engine::apply_rebalance`] built (never re-logged — same "the caller
 /// already has the log" rule as [`replay_genesis`]).
-fn replay_rebalance(engine: &mut Engine, event: &Event, silent: bool) -> Result<(), String> {
+fn replay_rebalance(engine: &mut Engine, env: &Env, event: &Event, silent: bool) -> Result<(), String> {
     let mut field = None;
     let mut rows = None;
     for (name, arg) in &event.args {
@@ -150,6 +170,7 @@ fn replay_rebalance(engine: &mut Engine, event: &Event, silent: bool) -> Result<
     }
     let field = field.ok_or_else(|| "rebalance event missing field".to_string())?;
     let rows = rows.ok_or_else(|| "rebalance event missing rows".to_string())?;
+    check_rebalance(env, &field, &rows)?;
     let ops = Engine::rebalance_ops(&field, &rows);
     if silent {
         engine.dispatch_silent(&ops);
@@ -160,20 +181,26 @@ fn replay_rebalance(engine: &mut Engine, event: &Event, silent: bool) -> Result<
 }
 
 /// Rebuild an event's dispatch ops from its logged args: the same
-/// bind-then-[`expand`] `dispatch_event` runs, minus `check_param` — the log
-/// was produced by an already-checked dispatch, so replay is pure engine
-/// cost (MVP-PLAN §2.2/§2.10).
+/// bind-check-[`expand`] `dispatch_event` runs. The check is not skipped: a
+/// log is read back from storage, and an argument of the wrong type would
+/// otherwise reach the engine's write path, which trusts its input.
 fn ops_for_event(env: &Env, circuit: &Circuit, events: &[EventDef], event: &Event) -> Result<Vec<DispatchOp>, String> {
     let def = find(events, &event.name)?;
     let mut bound = HashMap::new();
     let mut rel_bound: RelArgs = HashMap::new();
-    for (name, arg) in &event.args {
+    for p in &def.params {
+        let (_, arg) = event
+            .args
+            .iter()
+            .find(|(name, _)| *name == p.name)
+            .ok_or_else(|| format!("logged event `{}` (seq {}) is missing arg `{}`", event.name, event.seq, p.name))?;
+        check_param(env, &event.name, &p.name, &p.ty, arg)?;
         match arg {
             ArgValue::Value(v) => {
-                bound.insert(name.clone(), v.clone());
+                bound.insert(p.name.clone(), v.clone());
             }
             ArgValue::Rel(rel) => {
-                rel_bound.insert(name.clone(), rel.clone());
+                rel_bound.insert(p.name.clone(), rel.clone());
             }
         }
     }
@@ -486,4 +513,103 @@ pub fn admits(ty: &ValueTy, v: &Value) -> bool {
         (ValueTy::Product(x, y), Value::Pair(a, b)) => admits(x, a) && admits(y, b),
         _ => false,
     }
+}
+
+/// The largest event seq, id sequence number or log cursor a host can hold:
+/// they cross the boundary as JSON numbers and key the persisted log, and a
+/// JavaScript number is exact only below 2^53.
+pub const MAX_SEQ: u64 = 1 << 53;
+
+/// Reject a rebalance — `[(id, new key)]` for `field` — that is not a set of
+/// writes to one field of rows of one entity: an id that is not an entity id,
+/// a sort the program does not have, a field that sort lacks, a key of the
+/// wrong type. Shared by the live path and by replay, which must refuse a
+/// logged `@rebalance` exactly when the live call would have.
+pub fn check_rebalance(env: &Env, field: &str, rows: &[(Value, Value)]) -> Result<(), String> {
+    for (id, value) in rows {
+        let Value::Id(sort, _) = id else {
+            return Err("rebalance target is not an entity id".to_string());
+        };
+        if !env.has_sort(*sort) {
+            return Err(format!("rebalance target {} is of a sort this program does not have", encode_value(id)));
+        }
+        check_field(env, *sort, field, value)?;
+    }
+    Ok(())
+}
+
+/// Load a [`BaseSnapshot`] into a freshly booted engine — [`Engine::restore`]
+/// behind a check that the snapshot is a state this program could have
+/// reached. A snapshot comes from storage: it may be truncated, written by
+/// another version, or simply damaged, and loading one that breaks the
+/// engine's base invariant gives wrong views or a panic several events later.
+/// Refused snapshots leave the engine untouched.
+pub fn restore(engine: &mut Engine, env: &Env, snap: &BaseSnapshot) -> Result<(), String> {
+    check_snapshot(env, snap)?;
+    engine.restore(snap);
+    Ok(())
+}
+
+/// The base invariant, checked on a snapshot before it is loaded: every table
+/// belongs to a sort and field the program declares; an identity row is
+/// `(id, id)` at weight 1 for an id already minted; a field holds at most one
+/// row per id, at weight 1, of the field's type, and only for a live id.
+pub fn check_snapshot(env: &Env, snap: &BaseSnapshot) -> Result<(), String> {
+    use std::collections::{HashMap as Map, HashSet};
+    if snap.cursor >= MAX_SEQ {
+        return Err(format!("snapshot cursor {} is out of range", snap.cursor));
+    }
+    let mut minted: Map<SortId, u64> = Map::new();
+    for (sort, n) in &snap.next_id {
+        if !env.has_sort(*sort) {
+            return Err(format!("snapshot counts ids for sort {}, which this program does not have", sort.0));
+        }
+        if *n >= MAX_SEQ || minted.insert(*sort, *n).is_some() {
+            return Err(format!("snapshot id counter for `{}` is out of range or repeated", env.sort_name(*sort)));
+        }
+    }
+    let mut tables: HashSet<InputKey> = HashSet::new();
+    let mut live: Map<SortId, HashSet<&Value>> = Map::new();
+    for (key, rows) in &snap.inputs {
+        if !tables.insert(*key) {
+            return Err(format!("snapshot holds table {key:?} twice"));
+        }
+        let InputKey::Identity(sort) = key else { continue };
+        if !env.has_sort(*sort) {
+            return Err(format!("snapshot holds rows of sort {}, which this program does not have", sort.0));
+        }
+        let ids = live.entry(*sort).or_default();
+        for (l, r, w) in rows {
+            let ok = matches!(l, Value::Id(s, n) if s == sort && *n < minted.get(sort).copied().unwrap_or(0));
+            if !ok || l != r || *w != 1 || !ids.insert(l) {
+                return Err(format!(
+                    "snapshot identity row ({}, {}, {w}) of `{}` is not a live, minted id held once",
+                    encode_value(l),
+                    encode_value(r),
+                    env.sort_name(*sort)
+                ));
+            }
+        }
+    }
+    for (key, rows) in &snap.inputs {
+        let InputKey::Field(sort, field) = key else { continue };
+        if !env.has_sort(*sort) {
+            return Err(format!("snapshot holds a field of sort {}, which this program does not have", sort.0));
+        }
+        let mut seen: HashSet<&Value> = HashSet::new();
+        for (l, r, w) in rows {
+            check_field(env, *sort, field.as_str(), r)?;
+            let alive = live.get(sort).is_some_and(|ids| ids.contains(l));
+            if !alive || *w != 1 || !seen.insert(l) {
+                return Err(format!(
+                    "snapshot field row ({}, {}, {w}) of `{}`.`{}` is not one value of a live row",
+                    encode_value(l),
+                    encode_value(r),
+                    env.sort_name(*sort),
+                    field.as_str()
+                ));
+            }
+        }
+    }
+    Ok(())
 }

@@ -163,8 +163,17 @@ pub enum Agg {
     Max,
 }
 
-/// Aggregate `image : K -> V` into `K -> M`. `money` selects whether numeric
-/// results are tagged `Money` (else `Int`); `avg` is always `Money`.
+/// The mean of a group as `Money`: `sum / count` in cents, truncating toward
+/// zero. An `Int` image is in whole units, so it is scaled to cents first
+/// (`avg` of 1 and 2 is `$1.50`, not `$0.01`). `count` is nonzero. Shared with
+/// the incremental backend's aggregate node.
+pub fn avg_value(sum: i64, count: i64, money: bool) -> Value {
+    let cents = if money { sum } else { sum.wrapping_mul(100) };
+    Value::Money(cents.wrapping_div(count))
+}
+
+/// Aggregate `image : K -> V` into `K -> M`. `money` says the image is
+/// `Money` (so numeric results are too, else `Int`); `avg` is always `Money`.
 pub fn aggregate(image: &dyn BinaryRelation, agg: Agg, money: bool) -> BTreeRelation {
     use std::collections::BTreeMap;
     // Per-key accumulator: (sum, count, min, max).
@@ -172,8 +181,8 @@ pub fn aggregate(image: &dyn BinaryRelation, agg: Agg, money: bool) -> BTreeRela
     for (k, v, w) in image.iter() {
         let n = v.as_i64().unwrap_or(0);
         let entry = acc.entry(k).or_insert((0, 0, None, None));
-        entry.0 += n * w;
-        entry.1 += w;
+        entry.0 = entry.0.wrapping_add(n.wrapping_mul(w));
+        entry.1 = entry.1.wrapping_add(w);
         // min/max ignore weight sign; they consider present values.
         if w > 0 {
             entry.2 = Some(entry.2.map_or(n, |m| m.min(n)));
@@ -198,7 +207,7 @@ pub fn aggregate(image: &dyn BinaryRelation, agg: Agg, money: bool) -> BTreeRela
                 if count == 0 {
                     continue;
                 }
-                Value::Money(sum / count)
+                avg_value(sum, count, money)
             }
             Agg::Min => match min {
                 Some(m) => mk(m, money),

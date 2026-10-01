@@ -301,36 +301,38 @@ event at N = 10k; Rex figures include delta JSON serialization):
 
 ## Test coverage
 
-Strong where it exists: lexer (18 cases), parser (precedence/associativity of
-every operator), checker (positive cases + the important negative diagnostics:
-unknown field/type, wrong `new` value type, atom-not-in-coproduct, ID-sort
-discipline, the `[]`-on-value-column type error, non-co-keyed comparisons),
-elaboration (field-hop resolution, `where`→`Filter` folding, semijoin preserved,
-`by`/agg), and algebra primitives + the §12 end-to-end eval.
+Unit tests cover each layer — lexer, parser (precedence and associativity of
+every operator), checker (positive cases and the diagnostics that matter),
+elaboration, the algebra kernels, each DBSP operator against its batch kernel
+under random insert/retract histories, codegen snapshots, the shaper's
+mutation counts — and Playwright covers the three apps in a real browser.
 
-Gaps:
+On top of those sits a set of **oracle and fuzz suites**, which is where to
+look (and add) when changing the language or the engine:
 
-- **Interpreter coverage is thin beyond §12.** No eval tests drive `antijoin`/
-  `except`, `distinct`, `intersect`, `inverse`, `in`-filter, `BinCompare`
-  (column-vs-column), fork end-to-end, or `count`/`avg`/`min`/`max` — only `sum`
-  is exercised at the interp level.
-- **Retraction is covered through the engine, not the interpreter.**
-  `tests/dbsp.rs`, `incremental.rs`, `nesting.rs` drive insert/retract
-  histories and oracle against batch; the interpreter itself still has no
-  program-level negative-weight test.
-- **UI layer:** vitest (shaper, spy-driver mutation counts) and Playwright
-  (`examples/kanban/e2e`) cover the one app; codegen has no unit tests beyond
-  the Kanban output staying in sync.
-- ~~No tests for the money bugs (negative parse/display).~~ **Added** in
-  `crates/rex-core/src/eval/value.rs`.
-- ~~No test asserting the operator table stays in sync.~~ **Added** in
-  `crates/rex-core/src/operator.rs`.
-- ~~No REPL tests.~~ **Partly added** in `crates/rex-cli/src/repl.rs` (session commit, scratch
-  eval, retraction, failed-line rollback, recursive-group extension); `/import`
-  is still untested.
-- **Recursion is covered end-to-end**: checker (self-reference, groups,
-  mandatory annotations, stratification rejections), elaboration
-  (`LetRec`/`RecVar`), batch eval (chain/cycle/mutual/empty), the incremental
-  engine (backfill, cycle-closing insert, retraction), and a property test
-  oracling the fix region against a batch Kleene closure under random
-  insert/retract histories (`tests/dbsp.rs`).
+| Suite | What it holds the system to |
+|---|---|
+| `rex-core/tests/histories.rs` | Random event histories with hostile arguments over the example apps and a graph program: after every event the base invariant holds, every view equals batch evaluation, each step's deltas are exactly the change, the log replays, and a mid-history snapshot plus the tail restores. |
+| `rex-core/tests/models.rs` | Hand-written reference models (TodoMVC, the benchmark, Kanban, a stockroom built around arg-dependent `where`): what a handler *means*, independent of the engine. |
+| `rex-core/tests/gen_queries.rs` | Randomly **generated queries** from a typed grammar (~90% check); every accepted one must be maintained exactly under random histories. |
+| `rex-core/tests/fuzz_frontend.rs` | Mutants of real programs, token soup, arbitrary text, every construct nested far past the limit, very wide programs: no panic, no stack overflow (on a 1 MB stack in release), every diagnostic renders — and a mutant that still checks is driven through the engine oracle. |
+| `rex-core/tests/encode_props.rs` | The wire encoding round-trips any value and is injective; emitted JSON parses and says what it should. Writes `fixtures/encoding.json`, which `rex-dom` is tested against. |
+| `rex-core/tests/adversarial.rs` | One named test per corner case the suites above found (see SPEC §2.1, SYNTAX §8a). |
+| `rex-wasm/tests/boundary.rs` | The wasm boundary, natively: sessions round-trip through their own JSON; hostile `dispatch`/`rebalance` calls fail cleanly; a damaged snapshot or log is refused. |
+| `rex-codegen/tests/hostile.rs` | Hostile text and names produce well-formed modules whose literals say the same thing; mutants never panic codegen. |
+| `rex-dom/test/shaper.fuzz.test.ts` | The shaper against a from-scratch render of random relational states: same DOM, same elements for surviving rows. |
+| `rex-dom/test/order.fuzz.test.ts`, `encoding.test.ts` | The order index against a sorted array; the comparator is a total order; the JS encoders agree with the engine's. |
+| `rex-runtime/test/boot.test.ts` | Boot recovers from storage that does not load. |
+| `examples/todomvc/e2e/fuzz.spec.ts` | A seeded random walk through the real app in a browser, with reloads, against a model. |
+
+They run in the ordinary `cargo test` / `vitest` / Playwright runs at modest
+sizes. For a soak: `REX_FUZZ_CASES=20000 cargo test --release -p rex` (the
+release build also runs the front end on the 1 MB stack a browser gives it),
+`REX_FUZZ_CASES=6000 npx vitest run` in `js/rex-dom`, and
+`REX_FUZZ_STEPS=800 npx playwright test e2e/fuzz.spec.ts` in `examples/todomvc`.
+A failing shaper seed replays with `REX_FUZZ_SEED=<n>`.
+
+Known gaps: the batch interpreter has few direct program-level tests of its own
+(it is the oracle, checked only against the algebra kernels); the Kanban and
+benchmark apps have no browser-level random walk; multi-tab use of one
+IndexedDB store is untested (and unsupported).

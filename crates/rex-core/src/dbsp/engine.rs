@@ -405,6 +405,25 @@ impl Engine {
         }
     }
 
+    /// Bind a program-setup `new`'s name to the id it was given on the first
+    /// boot, **without** creating the row — the restoring boot's counterpart
+    /// of [`apply_typed_stmt`](Self::apply_typed_stmt) for `new` statements
+    /// (the rows themselves come back from a snapshot or the log's genesis
+    /// events). A later view may name a seed row (`Card where .list =
+    /// l_todo`), so the name must mean the same id on every boot. It does:
+    /// seed rows are minted first, in program order, per sort from 0, which
+    /// `seeded` — the caller's per-sort count of `new`s seen so far —
+    /// reproduces. Any other statement is ignored.
+    pub fn bind_seed_id(stmt: &TStmt, seeded: &mut HashMap<SortId, u64>, values: &mut HashMap<String, Value>) {
+        if let TStmt::New { name, sort, .. } = stmt {
+            let n = seeded.entry(*sort).or_insert(0);
+            if let Some(name) = name {
+                values.insert(name.clone(), Value::Id(*sort, *n));
+            }
+            *n += 1;
+        }
+    }
+
     /// Apply one `let name = body`: lower the body onto the circuit, register
     /// the view, and backfill its whole subgraph over the data already
     /// integrated. Must be called in program order (a body's `View` references

@@ -20,6 +20,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # The oracle and fuzz suites again, optimised and at size. Release also
+      # runs the front end on a 1 MB stack (what wasm gets), where the debug
+      # run above uses 8 MB.
+      - name: Fuzz soak (release)
+        run: cargo test --release -p rex --test histories --test models --test gen_queries --test fuzz_frontend --test encode_props
+        env:
+          REX_FUZZ_CASES: 3000
 
   wasm-build:
     name: wasm build

@@ -4,6 +4,7 @@ pub mod check;
 pub mod component;
 pub mod env;
 pub mod ground;
+pub mod names;
 pub mod shape_ir;
 pub mod strat;
 pub mod ty;

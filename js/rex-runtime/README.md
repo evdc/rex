@@ -98,6 +98,7 @@ interface PersistenceAdapter {
   saveSnapshot(snapshot: StoredSnapshot): Promise<void>;
   appendEvents(events: readonly LoggedEvent[]): Promise<void>;
   eventsSince(seq: number): Promise<LoggedEvent[]>; // seq order
+  reset?(): Promise<void>;                          // forget everything (recovery)
 }
 ```
 
@@ -116,6 +117,17 @@ Appends are serialised, never throw into `dispatch`, and are reported through
 `onError`. A failed append is retried with the next one (so the stored log never
 has a hole), and `await engine.flush()` waits for everything issued so far — use
 it before navigating away in a test.
+
+**When what is stored does not load.** The engine validates a snapshot and a
+log before trusting them (a snapshot must be a state the program could have
+reached; every logged event's arguments are type-checked again), so storage
+that was damaged, cut short, or written by something else is refused rather
+than loaded. `boot` then reports through `onError` and falls back, with a fresh
+engine for each attempt: the whole log from empty (a bad snapshot costs
+nothing), else the snapshot alone (events after it are lost), else a first
+load. When it has to drop something it calls the adapter's optional `reset()`
+and rewrites the store to match what the app now holds, so the next reload is a
+normal one. The page always boots.
 
 Adapters shipped: `IndexedDbAdapter(name)` (one database per program,
 `rex:<name>`) and `MemoryAdapter` (for tests and `?ephemeral`). To write your

@@ -33,13 +33,15 @@ pub struct CheckResult {
 pub fn check(program: &Program) -> CheckResult {
     // Desugar `view`/`state` into ordinary entities + `let`s (plus the UI IR)
     // before type-checking; the checker only ever sees the core language.
+    let mut diagnostics = super::names::check_names(program);
     let desugared = super::view::desugar(program);
     let program = &desugared.program;
     let mut shapes = desugared.shapes;
+    diagnostics.extend(desugared.diagnostics);
 
     let mut cx = Checker {
         env: Env::new(),
-        diagnostics: desugared.diagnostics,
+        diagnostics,
         rec_names: Default::default(),
         bind_ctx: desugared.bind_ctx,
     };
@@ -927,6 +929,24 @@ impl Checker {
                         field: field.clone(),
                     });
                 }
+                // `.p . total` parses as the path `.p.total`, since a `.name`
+                // hop is a field first. When there is no such field but the
+                // name is a relation in scope, it is the join the spacing
+                // suggests: the path so far, composed with that relation (and
+                // with whatever follows, by the same field-then-name rule).
+                None if i > 0 && self.names_a_relation(field) => {
+                    let mut expr = Expr { kind: ExprKind::FieldPath(parts[..i].to_vec()), span };
+                    for name in &parts[i..] {
+                        expr = Expr {
+                            kind: ExprKind::Compose(
+                                Box::new(expr),
+                                Box::new(Expr { kind: ExprKind::Ident(name.clone()), span }),
+                            ),
+                            span,
+                        };
+                    }
+                    return self.check_rel(&expr, Some(dom));
+                }
                 None => {
                     return self.error(
                         span,
@@ -943,6 +963,15 @@ impl Checker {
             RelTy::new(dom, running),
             span,
         ))
+    }
+
+    /// Whether `name` means a relation on its own: a view, an entity's
+    /// identity, a declared constructor, or the built-in `unit`.
+    fn names_a_relation(&self, name: &str) -> bool {
+        self.env.binding(name).is_some()
+            || self.env.entity_sort(name).is_some()
+            || self.env.ctor_owner(name).is_some()
+            || name == UNIT
     }
 
     fn check_semijoin(
@@ -1014,6 +1043,12 @@ impl Checker {
                             self.env.show(&ta.ty.to),
                             self.env.show(&tb.ty.to)
                         ),
+                    );
+                }
+                if op == ArithOp::Mul && ta.ty.to == ValueTy::Money && tb.ty.to == ValueTy::Money {
+                    return self.error(
+                        span,
+                        "`*` of two `Money` values has no unit (it would be money squared); one side must be an `Int`",
                     );
                 }
                 if ta.ty.to == ValueTy::Money || tb.ty.to == ValueTy::Money {
@@ -1112,7 +1147,9 @@ impl Checker {
         dom: Option<ValueTy>,
         span: Span,
     ) -> TResult<TExpr> {
-        let Some(lits) = collect_lits(rhs) else {
+        // A declared constructor is its atom (S-50), in a set as anywhere.
+        let ctor = |name: &str| self.env.ctor_owner(name).is_some() && self.env.binding(name).is_none();
+        let Some(lits) = collect_lits(rhs, &ctor) else {
             return self.error(rhs.span, "an `in` set must be a set of literals");
         };
         // The set's element type, from the literals themselves — not from
@@ -1187,8 +1224,7 @@ impl Checker {
         self.warn_composite_cliff(args[0].span, &image.ty.to, func);
         let to = match agg {
             AggKind::Count => ValueTy::Int,
-            AggKind::Avg => ValueTy::Money,
-            AggKind::Sum | AggKind::Min | AggKind::Max => {
+            AggKind::Sum | AggKind::Min | AggKind::Max | AggKind::Avg => {
                 if !image.ty.to.is_numeric() {
                     return self.error(
                         args[0].span,
@@ -1198,7 +1234,9 @@ impl Checker {
                         ),
                     );
                 }
-                image.ty.to.clone()
+                // The mean of integers is rarely an integer; it is `Money`
+                // (two decimal places) for either numeric image.
+                if agg == AggKind::Avg { ValueTy::Money } else { image.ty.to.clone() }
             }
         };
         let ty = RelTy::new(image.ty.from.clone(), to);
@@ -1363,7 +1401,7 @@ impl Checker {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum ArithOp {
     Mul,
     Add,
@@ -1393,7 +1431,6 @@ impl ArithOp {
 fn gated_union(arms: &[(Expr, Expr)], default: Option<Expr>, span: Span) -> Expr {
     let node = |kind| Expr { kind, span };
     let compose = |a: Expr, b: Expr| node(ExprKind::Compose(Box::new(a), Box::new(b)));
-    let union = |a: Expr, b: Expr| node(ExprKind::Union(Box::new(a), Box::new(b)));
     // `id where c`, so the gate is a coreflexive on the ambient domain
     // whatever `c` is: composing a bare `Todo -> Bool` would thread `Bool`
     // through as the next domain instead of keeping `Todo`. It also routes
@@ -1401,35 +1438,33 @@ fn gated_union(arms: &[(Expr, Expr)], default: Option<Expr>, span: Span) -> Expr
     // implicit `= True`.
     let gate = |c: Expr| node(ExprKind::Where(Box::new(node(ExprKind::Id)), Box::new(c)));
 
-    let mut out: Option<Expr> = None;
-    for (cond, body) in arms {
-        let arm = compose(gate(cond.clone()), body.clone());
-        out = Some(match out {
-            Some(acc) => union(acc, arm),
-            None => arm,
-        });
-    }
+    let mut terms: Vec<Expr> = arms.iter().map(|(cond, body)| compose(gate(cond.clone()), body.clone())).collect();
     if let Some(body) = default {
         // The `_` gate: every key the named gates did not claim.
-        let mut claimed: Option<Expr> = None;
-        for (cond, _) in arms {
-            let g = gate(cond.clone());
-            claimed = Some(match claimed {
-                Some(acc) => union(acc, g),
-                None => g,
-            });
-        }
-        let gate = match claimed {
-            Some(c) => node(ExprKind::Except(Box::new(node(ExprKind::Id)), Box::new(c))),
-            None => node(ExprKind::Id),
+        let claimed: Vec<Expr> = arms.iter().map(|(cond, _)| gate(cond.clone())).collect();
+        let gate = if claimed.is_empty() {
+            node(ExprKind::Id)
+        } else {
+            node(ExprKind::Except(Box::new(node(ExprKind::Id)), Box::new(balanced_union(claimed, span))))
         };
-        let arm = compose(gate, body);
-        out = Some(match out {
-            Some(acc) => union(acc, arm),
-            None => arm,
-        });
+        terms.push(compose(gate, body));
     }
-    out.expect("at least one arm")
+    balanced_union(terms, span)
+}
+
+/// The union of `terms` as a balanced tree. Union is associative, so the
+/// shape is free — and a chain would be as deep as it is long, which for a
+/// `match` with many arms is deeper than the passes that recurse over the
+/// tree have stack for. Must not be empty.
+fn balanced_union(mut terms: Vec<Expr>, span: Span) -> Expr {
+    if terms.len() == 1 {
+        return terms.pop().expect("one term");
+    }
+    let right = terms.split_off(terms.len() / 2);
+    Expr {
+        kind: ExprKind::Union(Box::new(balanced_union(terms, span)), Box::new(balanced_union(right, span))),
+        span,
+    }
 }
 
 // --- literal helpers ------------------------------------------------------
@@ -1460,14 +1495,16 @@ fn lit_ty(lit: &Lit) -> ValueTy {
     }
 }
 
-/// Collect the literals of a set expression like `@west + @east`.
-fn collect_lits(expr: &Expr) -> Option<Vec<Lit>> {
+/// Collect the literals of a set expression like `@west | @east`, or
+/// `Red | Blue` where `is_ctor` says a bare name is a declared constructor.
+fn collect_lits(expr: &Expr, is_ctor: &dyn Fn(&str) -> bool) -> Option<Vec<Lit>> {
     match &expr.kind {
         ExprKind::Union(a, b) => {
-            let mut out = collect_lits(a)?;
-            out.extend(collect_lits(b)?);
+            let mut out = collect_lits(a, is_ctor)?;
+            out.extend(collect_lits(b, is_ctor)?);
             Some(out)
         }
+        ExprKind::Ident(name) if is_ctor(name) => Some(vec![Lit::Atom(name.clone())]),
         _ => Some(vec![lit_of(expr)?]),
     }
 }

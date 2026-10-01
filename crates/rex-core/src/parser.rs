@@ -60,10 +60,24 @@ const RBP_INVERSE: u8 = 70;
 /// that a top-level `,` separates arguments rather than building a fork.
 const BP_ARG: u8 = BP_FORK;
 
+/// How deeply a program may nest: parentheses, prefix operators, the length
+/// of an operator chain (`a | b | c …` is a tree as deep as it is long),
+/// elements within elements. Every later pass — the checker, lowering, the
+/// evaluator, even dropping the tree — recurses over the AST, so depth is
+/// stack, and stack is small where Rex runs (1 MB in the browser). Past this
+/// the parser reports an error instead of letting a later pass overflow.
+pub const MAX_NESTING: usize = 128;
+
+/// What an `if`/`match` costs against [`MAX_NESTING`]: each desugars to
+/// several nested core forms (gates, an `except`, a union).
+const BRANCH_NESTING: usize = 4;
+
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     diagnostics: Vec<Diagnostic>,
+    /// Nesting of the construct being parsed, against [`MAX_NESTING`].
+    depth: usize,
 }
 
 impl Parser {
@@ -72,7 +86,20 @@ impl Parser {
             tokens,
             pos: 0,
             diagnostics,
+            depth: 0,
         }
+    }
+
+    /// Go `levels` deeper, or report that the program nests too far. The
+    /// caller restores `depth` when its construct ends.
+    fn descend(&mut self, levels: usize) -> PResult<()> {
+        self.depth += levels;
+        if self.depth > MAX_NESTING {
+            return self.error(format!(
+                "this nests more than {MAX_NESTING} levels deep; name a part of it with `let` (or a component) and refer to that"
+            ));
+        }
+        Ok(())
     }
 
     // --- token cursor -----------------------------------------------------
@@ -179,6 +206,7 @@ impl Parser {
     fn parse_program(&mut self) -> Program {
         let mut stmts = Vec::new();
         while !self.at_eof() {
+            self.depth = 0;
             match self.parse_stmt() {
                 Ok(stmt) => stmts.push(stmt),
                 Err(Bail) => self.recover(),
@@ -657,6 +685,13 @@ impl Parser {
 
     /// `tag [( prop* )] ["text"] [{ child* }]`.
     fn parse_element(&mut self) -> PResult<ElementExpr> {
+        let outer = self.depth;
+        let element = self.descend(1).and_then(|()| self.parse_element_at());
+        self.depth = outer;
+        element
+    }
+
+    fn parse_element_at(&mut self) -> PResult<ElementExpr> {
         let start = self.span();
         let (tag, _) = self.expect_ident("an element tag")?;
         let mut modifiers = Vec::new();
@@ -793,7 +828,13 @@ impl Parser {
                     self.expect(&TokenKind::RParen, "to close the `if` condition")?;
                     self.expect(&TokenKind::LBrace, "to open the `if` body")?;
                     let mut inner = Vec::new();
+                    // An `if` body may hold another `if`: nesting, like an
+                    // element's. (An error leaves `depth` to the enclosing
+                    // element or statement to restore.)
+                    let outer = self.depth;
+                    self.descend(1)?;
                     self.parse_children(&mut inner)?;
+                    self.depth = outer;
                     self.expect(&TokenKind::RBrace, "to close the `if` body")?;
                     children.push(Content::If {
                         cond,
@@ -1021,6 +1062,13 @@ impl Parser {
     // --- types ------------------------------------------------------------
 
     fn parse_type(&mut self) -> PResult<Type> {
+        let outer = self.depth;
+        let ty = self.descend(1).and_then(|()| self.parse_type_at());
+        self.depth = outer;
+        ty
+    }
+
+    fn parse_type_at(&mut self) -> PResult<Type> {
         let left = self.parse_product_type()?;
         if self.eat(&TokenKind::Arrow) {
             let right = self.parse_type()?; // right-associative
@@ -1037,6 +1085,7 @@ impl Parser {
     fn parse_product_type(&mut self) -> PResult<Type> {
         let mut left = self.parse_atom_type()?;
         while self.eat(&TokenKind::Star) {
+            self.descend(1)?;
             let right = self.parse_atom_type()?;
             let span = left.span.to(right.span);
             left = Type {
@@ -1096,11 +1145,21 @@ impl Parser {
     // --- expressions (Pratt) ---------------------------------------------
 
     fn parse_expr(&mut self, min_bp: u8) -> PResult<Expr> {
+        let outer = self.depth;
+        let expr = self.parse_expr_at(min_bp);
+        self.depth = outer;
+        expr
+    }
+
+    fn parse_expr_at(&mut self, min_bp: u8) -> PResult<Expr> {
+        self.descend(1)?;
         let mut lhs = self.parse_prefix()?;
         while let Some(lbp) = self.infix_bp() {
             if lbp <= min_bp {
                 break;
             }
+            // Each operator applied here wraps `lhs` one level deeper.
+            self.descend(1)?;
             lhs = self.parse_infix(lhs, lbp)?;
         }
         Ok(lhs)
@@ -1189,6 +1248,7 @@ impl Parser {
             TokenKind::KwNew => self.parse_new(start),
             TokenKind::KwMatch => self.parse_match(start),
             TokenKind::KwIf => {
+                self.descend(BRANCH_NESTING)?;
                 self.bump();
                 let cond = self.parse_expr(0)?;
                 self.expect(&TokenKind::KwThen, "after the `if` condition")?;
@@ -1372,6 +1432,7 @@ impl Parser {
 
     /// `match e { pat => expr, … }` — arms separated by commas or newlines.
     fn parse_match(&mut self, start: Span) -> PResult<Expr> {
+        self.descend(BRANCH_NESTING)?;
         self.bump(); // `match`
         let scrutinee = self.parse_expr(0)?;
         self.expect(&TokenKind::LBrace, "to open the `match` arms")?;

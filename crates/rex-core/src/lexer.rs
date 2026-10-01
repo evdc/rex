@@ -28,7 +28,9 @@ impl<'a> Lexer<'a> {
         Lexer {
             src,
             bytes: src.as_bytes(),
-            pos: 0,
+            // A byte-order mark is how some editors begin a UTF-8 file; it is
+            // not part of the program. Spans stay offsets into `src`.
+            pos: if src.starts_with('\u{feff}') { '\u{feff}'.len_utf8() } else { 0 },
             tokens: Vec::new(),
             diagnostics: Vec::new(),
         }
@@ -160,11 +162,22 @@ impl<'a> Lexer<'a> {
                 while matches!(self.peek(), Some(b'0'..=b'9')) {
                     self.pos += 1;
                 }
-                let year = self.src[start..int_end].parse::<i32>().unwrap_or(0);
-                let month = self.src[month_start..month_end].parse::<u32>().unwrap_or(0);
-                let day = self.src[day_start..self.pos].parse::<u32>().unwrap_or(0);
-                self.push(TokenKind::Date { year, month, day }, start);
-                return;
+                // Only the `yyyy-mm-dd` shape is a date; anything else of the
+                // form `a-b-c` is arithmetic on integers (`10-2-3`).
+                let widths = (int_end - start, month_end - month_start, self.pos - day_start);
+                if widths == (4, 2, 2) {
+                    let year = self.src[start..int_end].parse::<i32>().unwrap_or(0);
+                    let month = self.src[month_start..month_end].parse::<u32>().unwrap_or(0);
+                    let day = self.src[day_start..self.pos].parse::<u32>().unwrap_or(0);
+                    if day == 0 || day > days_in_month(year, month) {
+                        self.diagnostics.push(Diagnostic::error(
+                            Span::new(start, self.pos),
+                            format!("`{}` is not a calendar date", &self.src[start..self.pos]),
+                        ));
+                    }
+                    self.push(TokenKind::Date { year, month, day }, start);
+                    return;
+                }
             }
             // Not a date shape; roll back to just the leading integer.
             self.pos = int_end;
@@ -180,6 +193,15 @@ impl<'a> Lexer<'a> {
                 self.pos += 1;
             }
             let text = self.src[start..self.pos].to_string();
+            // A decimal is money in cents: the whole part times 100 must fit,
+            // with headroom for a leading `-` applied by the parser.
+            let whole = text.split('.').next().unwrap_or("");
+            if whole.parse::<i64>().ok().and_then(|w| w.checked_mul(100)).and_then(|c| c.checked_add(99)).is_none() {
+                self.diagnostics.push(Diagnostic::error(
+                    Span::new(start, self.pos),
+                    format!("decimal literal `{text}` is out of range"),
+                ));
+            }
             self.push(TokenKind::Decimal(text), start);
             return;
         }
@@ -219,11 +241,15 @@ impl<'a> Lexer<'a> {
                     Some(b'n') => value.push('\n'),
                     Some(b't') => value.push('\t'),
                     Some(other) => {
+                        // The escaped character may be multibyte: take all
+                        // of it, or the next token starts inside it.
+                        let backslash = self.pos - 2;
+                        let ch = self.decode_char_at(self.pos - 1, other);
                         self.diagnostics.push(Diagnostic::error(
-                            Span::new(self.pos - 2, self.pos),
-                            format!("unknown escape `\\{}`", other as char),
+                            Span::new(backslash, self.pos),
+                            format!("unknown escape `\\{ch}`"),
                         ));
-                        value.push(other as char);
+                        value.push(ch);
                     }
                     None => {
                         self.diagnostics.push(Diagnostic::error(
@@ -332,4 +358,16 @@ fn is_ident_start(b: u8) -> bool {
 
 fn is_ident_continue(b: u8) -> bool {
     b == b'_' || b.is_ascii_alphanumeric()
+}
+
+/// Days in a month of the proleptic Gregorian calendar; 0 for a month that
+/// does not exist.
+fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        _ => 0,
+    }
 }

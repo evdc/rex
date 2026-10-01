@@ -556,7 +556,10 @@ fn program_name(import: &str) -> String {
     stem.strip_suffix(".rex").unwrap_or(stem).to_string()
 }
 
-/// A JSON/JS string literal.
+/// A JS string literal for any text — also valid JSON. Every control
+/// character is escaped, not only the ones with short forms: a raw carriage
+/// return ends a JS string literal, and U+2028/U+2029 are line terminators to
+/// older parsers and to anything that treats the module as text.
 fn js_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -565,8 +568,12 @@ fn js_str(s: &str) -> String {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            _ => out.push(ch),
+            c if (c as u32) < 0x20 || c == '\u{7f}' || c == '\u{2028}' || c == '\u{2029}' => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
         }
     }
     out.push('"');
