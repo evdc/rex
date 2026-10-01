@@ -1,4 +1,5 @@
-export { boot, type BootOptions, type EngineApp, type EngineClass, type PersistedApp } from "./boot.js";
+export { Engine, type EngineApp, type EngineHooks } from "./app.js";
+export { boot, type BootOptions, type EngineClass, type PersistedEngine } from "./boot.js";
 export {
   programKey,
   type LoggedEvent,

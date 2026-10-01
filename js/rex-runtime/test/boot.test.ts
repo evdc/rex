@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { boot, MemoryAdapter, programKey, type EngineApp } from "../src/index.js";
+import { boot, MemoryAdapter, programKey, type Engine, type EngineApp } from "../src/index.js";
 
 /**
  * A stand-in for the wasm `RexApp` with the same persistence surface: a log
@@ -27,10 +27,10 @@ class FakeApp implements EngineApp {
   }
   dispatch(name: string, argsJson: string): string {
     this.apply(name, JSON.parse(argsJson));
-    return "{}";
+    return '{"ids":[],"deltas":{"views":{}}}';
   }
   rebalance(): string {
-    return "{}";
+    return '{"views":{}}';
   }
   snapshot(): string {
     return JSON.stringify({ views: { items: this.items.map((i) => [i, "u", 1]) } });
@@ -62,14 +62,16 @@ const opts = (adapter: MemoryAdapter, extra = {}) => ({
   ...extra,
 });
 
-const add = (app: EngineApp, item: string) => app.dispatch("Add", JSON.stringify({ item }));
+const add = (app: Engine, item: string) => app.dispatch("Add", { item });
+/** The fake's state, read through the engine's raw-app escape hatch. */
+const itemsOf = (app: Engine) => (app.wasm as FakeApp).items;
 
 describe("boot", () => {
   test("a first load runs the program and persists its genesis events", async () => {
     const a = new MemoryAdapter();
     const app = await boot(opts(a));
     await app.flush();
-    expect(app.items).toEqual(["seed1", "seed2"]);
+    expect(itemsOf(app)).toEqual(["seed1", "seed2"]);
     expect([...a.events.values()].map((e) => e.name)).toEqual(["@genesis", "@genesis"]);
   });
 
@@ -82,7 +84,7 @@ describe("boot", () => {
     expect(a.snapshot).not.toBeNull();
 
     const second = await boot(opts(a));
-    expect(second.items).toEqual(["seed1", "seed2", "x", "y"]);
+    expect(itemsOf(second)).toEqual(["seed1", "seed2", "x", "y"]);
   });
 
   test("an event after the last snapshot is replayed", async () => {
@@ -95,7 +97,7 @@ describe("boot", () => {
     await first.flush();
 
     const second = await boot(opts(a));
-    expect(second.items).toEqual(["seed1", "seed2", "x", "late"]);
+    expect(itemsOf(second)).toEqual(["seed1", "seed2", "x", "late"]);
   });
 
   test("no snapshot at all: the log alone rebuilds the seed and the edits", async () => {
@@ -106,7 +108,7 @@ describe("boot", () => {
     expect(a.snapshot).toBeNull();
 
     const second = await boot(opts(a));
-    expect(second.items).toEqual(["seed1", "seed2", "x"]);
+    expect(itemsOf(second)).toEqual(["seed1", "seed2", "x"]);
   });
 
   test("seqs continue after a restore instead of colliding", async () => {
@@ -120,7 +122,7 @@ describe("boot", () => {
     const seqs = [...a.events.keys()].sort((p, q) => p - q);
     expect(seqs).toEqual([0, 1, 2, 3]);
     const third = await boot(opts(a));
-    expect(third.items).toEqual(["seed1", "seed2", "x", "y"]);
+    expect(itemsOf(third)).toEqual(["seed1", "seed2", "x", "y"]);
   });
 
   test("saveSnapshot() snapshots on demand (the page-hide path)", async () => {
@@ -152,7 +154,7 @@ describe("boot", () => {
     expect(() => add(app, "x")).not.toThrow();
     await app.flush();
     expect(errors.length).toBeGreaterThan(0);
-    expect(app.items).toContain("x");
+    expect(itemsOf(app)).toContain("x");
   });
 
   test("a failed append is retried, not skipped, so the log has no hole", async () => {
@@ -178,7 +180,7 @@ describe("boot", () => {
     expect([...a.events.keys()].sort((p, q) => p - q)).toEqual([0, 1, 2, 3]);
 
     const second = await boot(opts(a));
-    expect(second.items).toEqual(["seed1", "seed2", "lost", "after"]);
+    expect(itemsOf(second)).toEqual(["seed1", "seed2", "lost", "after"]);
   });
 
   test("flush() alone retries a failed append", async () => {
@@ -203,5 +205,29 @@ describe("programKey", () => {
   test("changes with the source, so a new program never replays an old log", () => {
     expect(programKey("todo", "a")).not.toBe(programKey("todo", "b"));
     expect(programKey("todo", "a")).toBe(programKey("todo", "a"));
+  });
+});
+
+describe("Engine", () => {
+  test("parses a dispatch into ids and per-view deltas, and a snapshot into deltas", async () => {
+    const engine = await boot(opts(new MemoryAdapter()));
+    const res = engine.dispatch("Add", { item: "x" });
+    expect(res).toEqual({ ids: [], deltas: {} });
+    expect(engine.snapshot()).toEqual({ items: [["seed1", "u", 1], ["seed2", "u", 1], ["x", "u", 1]] });
+  });
+
+  test("logSince reads the typed log", async () => {
+    const engine = await boot(opts(new MemoryAdapter()));
+    engine.dispatch("Add", { item: "x" });
+    expect(engine.logSince(2).map((e) => [e.seq, e.name])).toEqual([[2, "Add"]]);
+  });
+
+  test("a profiler sees the engine half in dispatch and the shaper half from the caller", async () => {
+    const { profiler } = await import("../src/profile.js");
+    const prof = profiler(true)!;
+    const engine = await boot(opts(new MemoryAdapter(), { profiler: prof }));
+    const res = engine.dispatch("Add", { item: "x" });
+    prof.shaper(() => void res);
+    expect(prof.timings.map((t) => t.name)).toEqual(["Add"]);
   });
 });

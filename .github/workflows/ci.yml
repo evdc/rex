@@ -37,11 +37,11 @@ jobs:
       - run: ./scripts/build-wasm.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: kanban-pkg
-          path: examples/kanban/src/pkg
+          name: rex-runtime-pkg
+          path: js/rex-runtime/pkg
 
   rex-dom:
-    name: rex-dom vitest
+    name: rex-dom (build, typecheck, vitest)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -49,22 +49,68 @@ jobs:
         with:
           node-version: 20
       - run: npm ci
+        working-directory: js/rex-dom
+      - run: npm run build
+        working-directory: js/rex-dom
+      - run: npx tsc --noEmit
         working-directory: js/rex-dom
       - run: npx vitest run
         working-directory: js/rex-dom
 
   rex-runtime:
-    name: rex-runtime vitest
+    name: rex-runtime (build, typecheck, vitest)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      # rex-runtime's types import rex-dom's, so rex-dom is built first.
+      - run: npm ci && npm run build
+        working-directory: js/rex-dom
       - run: npm ci
+        working-directory: js/rex-runtime
+      - run: npm run build
+        working-directory: js/rex-runtime
+      - run: npx tsc --noEmit
         working-directory: js/rex-runtime
       - run: npx vitest run
         working-directory: js/rex-runtime
+
+  packages:
+    name: npm pack (rex-dom, rex-runtime)
+    needs: wasm-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/download-artifact@v4
+        with:
+          name: rex-runtime-pkg
+          path: js/rex-runtime/pkg
+      - run: npm ci
+        working-directory: js/rex-dom
+      - run: npm ci
+        working-directory: js/rex-runtime
+      - name: Pack both and check what shipped
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/tarballs"
+          (cd js/rex-dom && npm pack --pack-destination "$RUNNER_TEMP/tarballs")
+          (cd js/rex-runtime && npm pack --pack-destination "$RUNNER_TEMP/tarballs")
+          dom=$(tar -tzf "$RUNNER_TEMP"/tarballs/rex-dom-*.tgz)
+          rt=$(tar -tzf "$RUNNER_TEMP"/tarballs/rex-runtime-*.tgz)
+          for f in package/dist/index.js package/dist/index.d.ts package/README.md; do
+            grep -qx "$f" <<<"$dom" || { echo "rex-dom tarball is missing $f"; exit 1; }
+          done
+          for f in package/dist/index.js package/dist/index.d.ts package/README.md \
+                   package/pkg/rex_wasm.js package/pkg/rex_wasm.d.ts package/pkg/rex_wasm_bg.wasm; do
+            grep -qx "$f" <<<"$rt" || { echo "rex-runtime tarball is missing $f"; exit 1; }
+          done
+          # Nothing from tests/ or src/ leaks into a tarball.
+          ! grep -E '^package/(src|test|examples)/' <<<"$dom"$'\n'"$rt"
 
   examples:
     name: examples (build + Playwright)
@@ -77,18 +123,20 @@ jobs:
           node-version: 20
       - uses: actions/download-artifact@v4
         with:
-          name: kanban-pkg
-          path: examples/kanban/src/pkg
+          name: rex-runtime-pkg
+          path: js/rex-runtime/pkg
+      - name: Build the JS packages the examples link to
+        run: |
+          set -euo pipefail
+          (cd js/rex-dom && npm ci)
+          (cd js/rex-runtime && npm ci)
+          ./scripts/build-js.sh
       - name: Build and test every example
         run: |
           set -euo pipefail
           for dir in examples/*/; do
             if [ -f "$dir/package.json" ]; then
               echo "::group::$dir"
-              if [ "${dir%/}" != examples/kanban ]; then
-                rm -rf "$dir/src/pkg"
-                cp -r examples/kanban/src/pkg "$dir/src/pkg"
-              fi
               (
                 cd "$dir"
                 npm ci

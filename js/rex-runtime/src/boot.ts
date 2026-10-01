@@ -1,16 +1,8 @@
+import { Engine, type EngineApp } from "./app.js";
 import type { LoggedEvent, PersistenceAdapter } from "./persist.js";
+import type { Profiler } from "./profile.js";
 
-/** The slice of the wasm `RexApp` the runtime drives. */
-export interface EngineApp {
-  dispatch(name: string, argsJson: string): string;
-  rebalance(field: string, rowsJson: string): string;
-  snapshot(): string;
-  log_since(seq: bigint): string;
-  base_snapshot(): string;
-  replay(eventsJson: string, silent: boolean): void;
-  restore(baseJson: string): void;
-}
-
+/** The wasm-bindgen `RexApp` class: a constructor and the restoring boot. */
 export interface EngineClass<A extends EngineApp> {
   new (source: string): A;
   forRestore(source: string): A;
@@ -20,6 +12,8 @@ export interface BootOptions<A extends EngineApp> {
   RexApp: EngineClass<A>;
   program: string;
   adapter: PersistenceAdapter;
+  /** `profiler(true)` to time each dispatch's engine / parse / shaper split. */
+  profiler?: Profiler | null;
   /** Save a snapshot after this many appended events (default 50). */
   snapshotEvery?: number;
   /** Where to hook `visibilitychange`/`pagehide` (default: `document`/`window`
@@ -28,10 +22,8 @@ export interface BootOptions<A extends EngineApp> {
   onError?: (err: unknown) => void;
 }
 
-/** A booted app: the engine, with every write also persisted. `dispatch` and
- *  `rebalance` are the engine's own (same signature, same return), so
- *  generated code and `rex-dom` helpers use it as they would a bare `RexApp`. */
-export type PersistedApp<A extends EngineApp> = A & {
+/** A booted engine: the typed `Engine`, with every write also persisted. */
+export type PersistedEngine = Engine & {
   /** Resolves when every append issued so far has reached the adapter, first
    *  retrying any events an earlier failed append left unsaved. */
   flush(): Promise<void>;
@@ -51,8 +43,10 @@ export type PersistedApp<A extends EngineApp> = A & {
  *    genesis events rebuild the seed.
  *
  * Afterwards each `dispatch`/`rebalance` appends the engine's new log tail.
+ * Returns the typed `Engine`, which is what generated code hands to the
+ * shaper as its `EnginePort`.
  */
-export async function boot<A extends EngineApp>(opts: BootOptions<A>): Promise<PersistedApp<A>> {
+export async function boot<A extends EngineApp>(opts: BootOptions<A>): Promise<PersistedEngine> {
   const { RexApp, program, adapter } = opts;
   const every = opts.snapshotEvery ?? 50;
   const onError = opts.onError ?? ((e) => console.error("[rex] persistence failed", e));
@@ -125,21 +119,8 @@ export async function boot<A extends EngineApp>(opts: BootOptions<A>): Promise<P
 
   persistTail(); // the genesis events on a first load
 
-  // Wrap the write methods on the app object itself, so `this` stays the
-  // engine and every existing holder of `app` gets persistence.
-  const target = app as PersistedApp<A>;
-  const dispatch = app.dispatch.bind(app);
-  const rebalance = app.rebalance.bind(app);
-  target.dispatch = (name, args) => {
-    const out = dispatch(name, args);
-    persistTail();
-    return out;
-  };
-  target.rebalance = (field, rows) => {
-    const out = rebalance(field, rows);
-    persistTail();
-    return out;
-  };
+  const engine = new Engine(app, { afterWrite: persistTail, profiler: opts.profiler });
+  const target = engine as PersistedEngine;
   // A flush also retries anything a failed append left unconfirmed.
   target.flush = () => appendUnconfirmed();
   target.saveSnapshot = saveSnapshot;

@@ -110,7 +110,9 @@ test("reload restores the rows without re-randomising (S-80)", async ({ page }) 
 test("engine cost of create 10,000 (recorded, µs)", async ({ page }) => {
   // The engine alone: `dispatch` = one event, one transaction, one delta batch.
   const t = await page.evaluate(() => {
-    const app = (window as any).__rexApp;
+    // The raw wasm app, so the timing is the engine call alone (no
+    // `Engine.dispatch` JSON encode/parse around it).
+    const app = (window as any).__rexApp.wasm;
     const args = JSON.stringify({
       n: "i:10000",
       labels: Array.from({ length: 10000 }, (_, i) => [`i:${i}`, `t:row ${i}`, 1]),

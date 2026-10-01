@@ -992,7 +992,7 @@ the rebalance/drop helpers, wants them encoded).
 *Acceptance:* vitest: Int keys 3 < 10; benchmark's `SwapRows` is exactly two
 `insertBefore` calls (spy driver).
 
-#### S-71 Rebalance as an event + drag helpers cleanup (S, deps S-22, S-70)
+#### S-71 Rebalance as an event + drag helpers cleanup (S, deps S-22, S-70) — **done** (the event in S-22; `Rebalancer`/`FieldWriter` removed in S-30; `prompt(...)` is gone)
 *Subtasks:* `maybeRebalance` dispatches `@rebalance`; `interact.ts` loses
 its `FieldWriter` dependency on the wasm app; `prompt(...)` extractor
 removed.
@@ -1005,7 +1005,7 @@ the memory note "fractional keys are an impl detail".
 
 ### E7 — Package extraction
 
-#### S-30 Split `rex-dom` / `rex-runtime`; move `pkg/` (M, deps S-01) ∥
+#### S-30 Split `rex-dom` / `rex-runtime`; move `pkg/` (M, deps S-01) ∥ — **done 2026-09-30** (`js/rex-dom/src/types.ts`'s `EnginePort`, `js/rex-runtime/src/app.ts`'s `Engine`, both `package.json` `exports` maps, `scripts/build-wasm.sh`/`build-js.sh`, `.github/workflows/ci.yml`)
 *Files:* `js/rex-dom/*`, `js/rex-runtime/*` (new), `examples/*/package.json`,
 `scripts/build-wasm.sh`, codegen preamble.
 *Subtasks:*
@@ -1021,14 +1021,65 @@ the memory note "fractional keys are an impl detail".
 4. Codegen preamble imports from `rex-runtime`/`rex-dom` only.
 *Acceptance:* `npm pack` produces two tarballs; Kanban runs against them;
 vitest for `rex-dom` runs with no wasm on the path.
+*Landed as:* **`EnginePort`** (rex-dom) is `{ snapshot(): StepDeltas;
+dispatch(event, args): { ids, deltas }; rebalance(field, rows): StepDeltas }`
+over typed values, so no JSON string crosses it. rex-runtime's **`Engine`**
+implements it over the wasm `RexApp` and owns all the JSON; `boot` now returns
+that `Engine` (plus `flush`/`saveSnapshot`) instead of monkey-patching the raw
+wasm object, with persistence as an `afterWrite` hook. `maybeRebalance(port,
+shaper, …)` takes the port and applies the batch itself, so `Rebalancer` and the
+`apply` callback are gone and nothing in rex-dom knows about wasm (S-71's
+"no direct writes" line is met too). The wasm glue builds into
+`js/rex-runtime/pkg/` and is the **`rex-runtime/wasm`** export; nothing is
+copied into examples any more. Generated code imports only `rex-runtime/wasm`,
+`rex-runtime` and `rex-dom`, and exposes the typed engine as `window.__rexApp`
+(`logSince`, `flush`, `.wasm` for raw access) — the e2e specs use `flush()`
+instead of sleeping for IndexedDB. The profiler is now two halves
+(`engine(…)` inside `Engine.dispatch`, `shaper(…)` from the caller) because the
+parse moved inside the wrapper; `__rexProfile.timings` rows are unchanged.
+*Packaging:* both packages have an `exports` map to `dist/` (`tsc -p
+tsconfig.build.json`, `prepack` builds; rex-runtime's also refuses to pack
+without `pkg/`). rex-dom is a *peer* of rex-runtime (types only, no runtime
+import). `npm pack` gives two tarballs (17.9 kB; 285 kB with the wasm). Verified
+by installing both tarballs into a scratch copy of Kanban outside the repo
+(real `node_modules` copies, no links): `tsc`, `vite build` and all 12
+Playwright tests pass on the dev server. Needed on the Vite side:
+`optimizeDeps.exclude: ["rex-runtime"]` (pre-bundling breaks the glue's
+`new URL(…, import.meta.url)`) and, for the in-repo `file:` links only,
+`server.fs.allow: ["../.."]`. CI gained a `packages` job (packs both, checks the
+tarball contents) and builds `dist/` before the examples.
+*Not done:* no workspaces file (the `file:` links work and the plan called it
+optional); not published to npm; the examples must run `scripts/build-js.sh`
+after changing either package, because they consume `dist/`, not `src/`.
 
-#### S-31 Contract doc + README for both packages (S, deps S-30, S-03)
+#### S-31 Contract doc + README for both packages (S, deps S-30, S-03) — **done 2026-09-30** (`js/rex-dom/README.md`, `js/rex-runtime/README.md`, `js/rex-dom/examples/board-shape.ts`, `test/readme.test.ts` in both)
 *Subtasks:* `js/rex-dom/README.md`: the delta protocol (`Tuple`, `StepDeltas`,
 roles), the four phases, the −/+ guarantee, `ShapeNode` reference, how to
 write a `DomDriver`; `js/rex-runtime/README.md`: boot, events, log,
 persistence adapters. Link the S-03 fixtures as the conformance suite.
 *Acceptance:* a reviewer can write a `ShapeNode` by hand from the README and
 drive the shaper with a fixture (add exactly that as an example test).
+*Landed as:* rex-dom's README covers the delta protocol (`Tuple`/`StepDeltas`,
+the encoding table, a real fixture row), the **role table** (what a lone +, a
+−/+ pair and a lone − mean for membership/order/attribute views, and why a
+change is never remove+mount), presence attributes, the phases of `applyStep`,
+ordering, a full `ShapeNode` reference (including `slot`/`slotKey`/`anchor`),
+how to write a `DomDriver`, the `EnginePort`, and the S-03 fixtures as the
+conformance suite with the regenerate command. Its centrepiece example is
+`examples/board-shape.ts`: the Kanban board's `ShapeNode` tree, hand-written and
+generic in the element type. **`test/readme.test.ts` embeds it**: it asserts the
+README's code block *is* that file byte for byte (so it cannot drift), drives the
+shaper with the real engine fixtures (`00-mount`, `01-rename`) and checks the
+documented DOM and mutation counts; `contract.test.ts` now imports the same
+file. It also checks every helper the README names is a real export. Reading the
+README at the "can I write a shape tree from this" bar is the acceptance, and the
+example is the proof it can be done from the document alone. rex-runtime's README
+covers boot, the typed `Engine`, bundler setup, the event log (`@genesis`,
+`@rebalance`, determinism), the persistence flow and adapter contract,
+`programKey`'s "editing a program discards saved state" consequence, profiling,
+and testing without wasm; its test checks the exports named in the README exist
+and that every export is documented. The wasm-dependent snippets are not
+executed by a test.
 
 #### S-32 Boundary batch entry + V8 profile (M, deps S-22) — *perf, can slip*
 *Subtasks:* `replay` crosses once for N events (done in S-22); measure with

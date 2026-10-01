@@ -71,10 +71,9 @@ describe("drag helpers under `order by … desc`", () => {
     const long = (n: number) => "a0" + "V".repeat(45) + String(n);
     const desc = setup(true, { c1: long(1), c2: long(2), c3: long(3) });
     expect(desc.shown()).toEqual(["c3", "c2", "c1"]);
-    let rows: [string, string][] = [];
+    let rows: readonly (readonly [string, string])[] = [];
     maybeRebalance(
-      { rebalance: (_f, json) => ((rows = JSON.parse(json)), "{}") },
-      () => {},
+      { rebalance: (_f, sent) => ((rows = sent), {}) },
       desc.shaper,
       "card",
       "p",

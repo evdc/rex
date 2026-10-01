@@ -10,15 +10,9 @@
  */
 
 import type { Shaper } from "./shaper.js";
+import type { EnginePort } from "./types.js";
 import { decodeText } from "./encode.js";
 import { keyBetween, rebalancePlan } from "./rebalance.js";
-
-/** The slice of the wasm `RexApp` the rebalance helper needs (S-22): a
- *  single logged `@rebalance` event covering every re-spaced row, not N
- *  independent field writes. */
-export interface Rebalancer {
-  rebalance(field: string, rowsJson: string): string;
-}
 
 /** The MIME type Rex drag/drop carries a row key under. One universal type
  *  keeps a drag source and a `drag(...)` extractor in sync without threading
@@ -91,12 +85,12 @@ export function dropPos<El>(
 
 /** Re-space a level's order keys under `parentKey` when same-gap churn has
  *  grown one past the rebalance limit. A rare amortized maintenance sweep —
- *  deliberately runtime library, not a language construct. Dispatches ONE
- *  `@rebalance` event covering every re-spaced row (S-22): a drag storm that
- *  triggers a sweep is one entry in the log, not N torn field writes. */
+ *  deliberately runtime library, not a language construct. Sends ONE
+ *  `@rebalance` event covering every re-spaced row (a drag storm that triggers
+ *  a sweep is one entry in the log, not N torn field writes) and applies the
+ *  batch it returns to `shaper`. */
 export function maybeRebalance<El>(
-  app: Rebalancer,
-  apply: (deltaJson: string) => void,
+  port: Pick<EnginePort, "rebalance">,
   shaper: Shaper<El>,
   childLevel: string,
   parentKey: string,
@@ -110,6 +104,6 @@ export function maybeRebalance<El>(
   if (shaper.orderDesc(childLevel)) ordered.reverse();
   const plan = rebalancePlan(ordered);
   if (!plan) return;
-  const rows = Array.from(plan, ([child, fresh]) => [child, encode(fresh)]);
-  apply(app.rebalance(field, JSON.stringify(rows)));
+  const rows = Array.from(plan, ([child, fresh]) => [child, encode(fresh)] as const);
+  shaper.applyStep(port.rebalance(field, rows));
 }

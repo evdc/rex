@@ -2,10 +2,10 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
-import { decodeText } from "../src/encode.js";
 import { SpyDriver, type SpyEl } from "../src/driver.js";
 import { Shaper } from "../src/shaper.js";
-import { parseStepJson, type ShapeNode } from "../src/types.js";
+import { parseStepJson } from "../src/types.js";
+import { boardShape } from "../examples/board-shape.js";
 
 /**
  * S-03: the engine/shaper contract. `crates/rex-core/tests/contract_fixtures.rs`
@@ -17,10 +17,11 @@ import { parseStepJson, type ShapeNode } from "../src/types.js";
  * classification (mount vs. update vs. move vs. remove) fails a test on
  * *this* side, independent of `examples/kanban`.
  *
- * The shape tree below mirrors `board.rex`'s generated view names exactly
- * (see `crates/rex-codegen/tests/snapshots/board.ts`), but is hand-written
- * rather than the generated module: this test's job is the *shaper's*
- * contract, not codegen's (that's `rex-codegen`'s snapshot test).
+ * The shape tree (`examples/board-shape.ts`, which the README embeds)
+ * mirrors `board.rex`'s generated view names exactly (see
+ * `crates/rex-codegen/tests/snapshots/board.ts`), but is hand-written rather
+ * than the generated module: this test's job is the *shaper's* contract, not
+ * codegen's (that's `rex-codegen`'s snapshot test).
  */
 
 const fixturesDir = join(dirname(fileURLToPath(import.meta.url)), "../../../crates/rex-core/tests/fixtures/steps");
@@ -29,23 +30,7 @@ function loadStep(name: string) {
   return parseStepJson(readFileSync(join(fixturesDir, `${name}.json`), "utf8"));
 }
 
-const cardShape: ShapeNode<SpyEl> = {
-  name: "board#list#card",
-  membershipView: "board#list#card",
-  template: (d) => d.createElement("div"),
-  attrs: [{ view: "board#list#card#title", apply: (d, el, v) => d.setText(el, decodeText(v)) }],
-  orderView: "board#list#card#order",
-  children: [],
-};
-
-const listShape: ShapeNode<SpyEl> = {
-  name: "board#list",
-  membershipView: "board#list",
-  template: (d) => d.createElement("section"),
-  attrs: [{ view: "board#list#title", apply: (d, el, v) => d.setText(el, decodeText(v)) }],
-  orderView: "board#list#order",
-  children: [cardShape],
-};
+const listShape = boardShape<SpyEl>();
 
 function setup() {
   const driver = new SpyDriver();

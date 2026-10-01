@@ -88,6 +88,6 @@ fn a_js_extractor_imports_its_module_and_encodes_the_array_as_a_relation() {
     let out = rex_codegen::generate(&src, "./app.rex?raw").expect("the benchmark generates cleanly");
     assert!(out.contains(r#"import * as utils from "./utils.js";"#), "{out}");
     assert!(out.contains("encodeRel(utils.randomLabels(10000), encodeText)"), "{out}");
-    // Both dispatch args are sent as-is: the relation is a JSON array.
-    assert!(out.contains("args: Record<string, unknown>"), "{out}");
+    // Both dispatch args are sent as-is: a relation arg is an `EventArg` array.
+    assert!(out.contains("args: Record<string, EventArg>"), "{out}");
 }

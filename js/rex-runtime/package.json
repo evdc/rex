@@ -3,14 +3,38 @@
   "version": "0.1.0",
   "description": "Boot, event log and persistence for Rex apps running on the wasm engine",
   "type": "module",
-  "main": "src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./wasm": {
+      "types": "./pkg/rex_wasm.d.ts",
+      "default": "./pkg/rex_wasm.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "pkg",
+    "README.md"
+  ],
+  "sideEffects": false,
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepack": "node scripts/check-pkg.mjs && npm run build"
+  },
+  "peerDependencies": {
+    "rex-dom": "^0.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "fake-indexeddb": "^6.0.0",
+    "rex-dom": "file:../rex-dom",
     "typescript": "^5.5.0",
     "vitest": "^2.0.0"
   }

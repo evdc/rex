@@ -34,9 +34,9 @@ Workspace layout:
 | `crates/rex-core` | Library (`rex`): lexer, parser, checker/elaborator, `view` desugar, batch interpreter, DBSP engine, value encoding. |
 | `crates/rex-cli` | The `rex` binary: `check`, `run`, `build [--watch]` (UI codegen), and the REPL. |
 | `crates/rex-codegen` | Shape IR → generated TypeScript (`main.ts`: shape tree, templates, event wiring). |
-| `crates/rex-wasm` | `RexApp`, the wasm-bindgen API (`dispatch`, `snapshot`, `apply_new`, `update_fields`, `retract`, `read_view`). |
-| `js/rex-runtime` | Boot + persistence: restores from an IndexedDB snapshot and event log, appends every dispatched event (S-80). |
-| `js/rex-dom` | TS shaper + bridge: −/+ fusion, phased apply, fractional ordering, drag/drop helpers. |
+| `crates/rex-wasm` | `RexApp`, the wasm-bindgen API: named-event `dispatch`, `rebalance`, `snapshot`, and the log/snapshot calls (`log_since`, `replay`, `base_snapshot`, `restore`). Built into `js/rex-runtime/pkg/`. |
+| `js/rex-runtime` | [`rex-runtime`](js/rex-runtime/README.md): the wasm engine (`rex-runtime/wasm`), a typed `Engine` implementing rex-dom's `EnginePort`, and boot + persistence (IndexedDB snapshot + event log, S-80). |
+| `js/rex-dom` | [`rex-dom`](js/rex-dom/README.md): the engine-free TS shaper + delta contract: −/+ fusion, phased apply, fractional ordering, drag/drop helpers. |
 | `examples/kanban` | End-to-end app (Vite + Playwright). |
 | `examples/js-framework-benchmark` | The keyed benchmark on Rex: 10k-row bulk events, `import js` extractors (Vite + Playwright). |
 | `examples/todomvc` | TodoMVC, the S-02 program unchanged (Vite + Playwright). |
@@ -49,7 +49,10 @@ cargo run -p rex-cli -- check app.rex        # diagnostics only; exit 1 on error
 cargo run -p rex-cli -- run prog.rex         # check, then batch-evaluate and print every view
 cargo run -p rex-cli -- build app.rex -o app.ts   # compile `view`s to a TS module
 cargo run -p rex-cli -- build app.rex -o app.ts --watch   # ...and rebuild on every save
+./scripts/build-wasm.sh                      # wasm engine -> js/rex-runtime/pkg/
+./scripts/build-js.sh                        # rex-dom + rex-runtime -> dist/ (the examples import these)
 (cd js/rex-dom && npx vitest run)            # shaper tests
+(cd js/rex-runtime && npx vitest run)        # boot / persistence tests
 ```
 
 `rex check` takes several files, prints diagnostics as `file:line:col` with the
@@ -58,10 +61,12 @@ offending line underlined, and exits 0 (clean), 1 (errors; or warnings with
 prints each view's materialized contents (`--ast` adds the s-expression);
 `rex prog.rex` still means `rex run prog.rex`. `cargo run -p rex-cli --
 run crates/rex-core/tests/fixtures/spec12.rex` is the best core demo; the Kanban
-app is the best whole-system demo — run `scripts/build-wasm.sh` to build
-`rex-wasm` and generate the wasm-bindgen glue into `examples/kanban/src/pkg/` (copied into every other example)
-(gitignored, not committed), then `cd examples/kanban && npm run build` and
-`npx playwright test`.
+app is the best whole-system demo: `scripts/build-wasm.sh` and `scripts/build-js.sh`
+(above), then `cd examples/kanban && npm install && npm run build` and
+`npx playwright test`. The wasm glue is `js/rex-runtime/pkg/` (gitignored, not
+committed) and every example imports it as `rex-runtime/wasm`; nothing is copied
+into the examples. `npm pack` in `js/rex-dom` and `js/rex-runtime` produces the
+two publishable tarballs (`rex-runtime`'s needs `pkg/` built first).
 
 The REPL (`crates/rex-cli/src/repl.rs`) accepts `entity`/`let` statements
 (committed to the session) and bare expressions (evaluated in a scratch copy

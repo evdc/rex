@@ -8,16 +8,14 @@ describe("profiler", () => {
 
   it("splits a dispatch into engine, parse and shaper", () => {
     const p = profiler(true)!;
-    let applied: unknown;
-    const step = p.dispatch<{ ids: string[] }>(
-      "Run",
-      () => '{"ids":["#0:1"]}',
-      (s) => {
-        applied = s;
-      },
-    );
+    let applied = false;
+    const step = p.engine("Run", () => '{"ids":["#0:1"]}', (raw) => JSON.parse(raw) as { ids: string[] });
     expect(step.ids).toEqual(["#0:1"]);
-    expect(applied).toBe(step);
+    expect(p.timings).toHaveLength(0); // the row is not complete until the shaper half
+    p.shaper(() => {
+      applied = true;
+    });
+    expect(applied).toBe(true);
     expect(p.timings).toHaveLength(1);
     const t = p.timings[0]!;
     expect(t.name).toBe("Run");

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Build rex-wasm and generate the wasm-bindgen JS/TS glue.
 #
-# Output lands in examples/kanban/src/pkg/ for now (S-01 of MVP-PLAN.md);
-# it moves to js/rex-runtime/pkg/ once S-30 splits the packages.
+# Output lands in js/rex-runtime/pkg/ (the `rex-runtime/wasm` export); the
+# generated apps and every example import it from there, so nothing is copied.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-OUT_DIR="examples/kanban/src/pkg"
+OUT_DIR="js/rex-runtime/pkg"
 
 # wasm-bindgen's CLI must match the `wasm-bindgen` crate version pinned in
 # Cargo.lock exactly, or the generated glue fails to load at runtime with an
@@ -43,14 +43,6 @@ echo "running wasm-bindgen (target web) -> $OUT_DIR ..."
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR"
 wasm-bindgen --target web --out-dir "$OUT_DIR" "$WASM_FILE"
-
-# Every example that has a Vite app gets its own copy of the glue.
-for dir in examples/*/; do
-  if [ -f "$dir/package.json" ] && [ "${dir%/}/src/pkg" != "$OUT_DIR" ]; then
-    rm -rf "$dir/src/pkg"
-    cp -r "$OUT_DIR" "$dir/src/pkg"
-  fi
-done
 
 SIZE=$(wc -c < "$OUT_DIR"/*_bg.wasm | tr -d ' ')
 GZIP_SIZE=$(gzip -c "$OUT_DIR"/*_bg.wasm | wc -c | tr -d ' ')

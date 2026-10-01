@@ -15,8 +15,7 @@ test("an edit survives a reload and the seed does not run twice", async ({ page 
   await input.press("Tab");
   await expect(input).toHaveValue("Persisted title");
   // Let the async append reach IndexedDB before we leave.
-  await page.waitForFunction(() => (window as any).__rexApp.log_since(0n).length > 2);
-  await page.waitForTimeout(200);
+  await page.evaluate(() => (window as any).__rexApp.flush());
 
   await page.reload();
   await expect(page.locator("section.list")).toHaveCount(3);
@@ -31,7 +30,7 @@ test("an event after the last snapshot is replayed", async ({ page }) => {
   await input.fill("Log only");
   await input.press("Tab");
   await expect(input).toHaveValue("Log only");
-  await page.waitForTimeout(300);
+  await page.evaluate(() => (window as any).__rexApp.flush());
 
   const second = await page.context().newPage();
   await second.goto("/");

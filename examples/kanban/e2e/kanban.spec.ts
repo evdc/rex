@@ -152,8 +152,10 @@ test("drag storm into the same gap triggers a rebalance that appears in the log"
   expect(errors).toEqual([]);
   await expect(page.locator('section.list:has(header span:text("Todo")) div.card')).toHaveCount(3);
 
-  const log = await page.evaluate(() => (window as any).__rexApp.log_since(0n));
-  expect(log).toContain('"name":"@rebalance"');
+  const names = await page.evaluate(() =>
+    (window as any).__rexApp.logSince(0).map((e: { name: string }) => e.name),
+  );
+  expect(names).toContain("@rebalance");
 });
 
 test("drop into a list that already has cards", async ({ page }) => {

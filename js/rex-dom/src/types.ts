@@ -21,6 +21,35 @@ export function parseStepJson(json: string): StepDeltas {
   return parsed.views;
 }
 
+/** One argument of an event: a canonically-encoded scalar (`"t:hello"`,
+ *  `"#3:7"`, `"i:4"`), or — for a relation-typed parameter — its rows as
+ *  `[key, value, weight]` (see `encodeRel`). */
+export type EventArg = string | readonly (readonly [key: string, value: string, weight: number])[];
+
+/** What one dispatched event did: the ids its `new` mutations minted (in
+ *  order, canonically encoded) and the resulting delta batch. */
+export interface DispatchResult {
+  readonly ids: readonly string[];
+  readonly deltas: StepDeltas;
+}
+
+/**
+ * The engine, as the shaper's host sees it. This is the whole boundary: the
+ * generated app asks the port for an initial snapshot, dispatches named events
+ * to it, and hands every returned batch to `Shaper.applyStep`. Nothing here
+ * says *where* the engine runs — `rex-runtime` implements it over the wasm
+ * engine, but a worker, or a server pushing batches over a socket, can too.
+ */
+export interface EnginePort {
+  /** The full contents of every view: the initial render, as one batch. */
+  snapshot(): StepDeltas;
+  /** Run a declared event as one atomic transaction. */
+  dispatch(event: string, args: Readonly<Record<string, EventArg>>): DispatchResult;
+  /** Re-space one manual-order level's keys (`[child, newKey]` rows) as one
+   *  logged `@rebalance` transaction. */
+  rebalance(field: string, rows: readonly (readonly [child: string, key: string])[]): StepDeltas;
+}
+
 /**
  * The DOM face the shaper drives. Abstract so tests can substitute a spy that
  * counts mutations — the shaper's correctness claims are mutation-count
