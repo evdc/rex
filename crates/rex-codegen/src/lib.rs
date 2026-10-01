@@ -102,11 +102,20 @@ impl Emit {
         self.line("(window as unknown as { __rexApp: typeof engine }).__rexApp = engine;");
         self.line("const driver = new BrowserDriver();");
         self.line("const container = document.getElementById(\"app\")!;");
-        self.line("function dispatch(name: string, args: Record<string, EventArg>): readonly string[] {");
+        // An event the engine refuses — a row it names is gone, a state it
+        // reads has no value — changes nothing and is not logged. That is an
+        // ordinary outcome, not a crash: say so and let the listener stop.
+        self.line("function dispatch(name: string, args: Record<string, EventArg>): readonly string[] | null {");
         if self.debug {
             self.line("  console.debug(\"[rex] dispatch\", name, args);");
         }
-        self.line("  const res = engine.dispatch(name, args);");
+        self.line("  let res;");
+        self.line("  try {");
+        self.line("    res = engine.dispatch(name, args);");
+        self.line("  } catch (refused) {");
+        self.line("    console.warn(`[rex] event ${name} was refused:`, refused);");
+        self.line("    return null;");
+        self.line("  }");
         if self.debug {
             self.line("  console.debug(\"[rex]  ->\", name, \"ids:\", res.ids, \"views:\", Object.keys(res.deltas));");
         }
@@ -221,8 +230,10 @@ impl Emit {
                 .iter()
                 .map(|(name, a)| format!("{}: {}", js_str(name), arg_ref(a)))
                 .collect();
+            // A refused event ends the handler: later `do`s and actions
+            // (`clear` would throw away what the user typed) do not run.
             self.line(&format!(
-                "      _ids.push(...dispatch({}, {{ {} }}));",
+                "      {{ const _r = dispatch({}, {{ {} }}); if (_r === null) return; _ids.push(..._r); }}",
                 js_str(&d.event),
                 fields.join(", ")
             ));
@@ -472,7 +483,8 @@ fn arg_ref(a: &ArgRef) -> String {
     match a {
         ArgRef::SelfKey => "key".to_string(),
         // `ancestors[0]` is the parent row's key, `[1]` its parent's, …
-        ArgRef::Ancestor(n) => format!("ancestors[{}]", n - 1),
+        // Present by construction: a level this deep has that many enclosing rows.
+        ArgRef::Ancestor(n) => format!("ancestors[{}]!", n - 1),
         ArgRef::Param(p) => param_local(p),
         ArgRef::Lit(l) => js_lit(l),
     }

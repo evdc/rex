@@ -18,8 +18,14 @@ const engine = await boot({ RexApp, program: PROGRAM, adapter: store, profiler: 
 (window as unknown as { __rexApp: typeof engine }).__rexApp = engine;
 const driver = new BrowserDriver();
 const container = document.getElementById("app")!;
-function dispatch(name: string, args: Record<string, EventArg>): readonly string[] {
-  const res = engine.dispatch(name, args);
+function dispatch(name: string, args: Record<string, EventArg>): readonly string[] | null {
+  let res;
+  try {
+    res = engine.dispatch(name, args);
+  } catch (refused) {
+    console.warn(`[rex] event ${name} was refused:`, refused);
+    return null;
+  }
   if (prof) prof.shaper(() => shaper.applyStep(res.deltas));
   else shaper.applyStep(res.deltas);
   return res.ids;
@@ -48,11 +54,11 @@ const shape_board_list_card: ShapeNode<HTMLElement> = {
     ((e0.childNodes[0] as HTMLElement)).addEventListener("change", (ev) => {
       const p_v = encodeText((ev.currentTarget as HTMLInputElement).value);
       const _ids: string[] = [];
-      _ids.push(...dispatch("RenameCard", { "card": key, "title": p_v }));
+      { const _r = dispatch("RenameCard", { "card": key, "title": p_v }); if (_r === null) return; _ids.push(..._r); }
     });
     ((e0.childNodes[1] as HTMLElement)).addEventListener("click", (ev) => {
       const _ids: string[] = [];
-      _ids.push(...dispatch("DeleteCard", { "card": key }));
+      { const _r = dispatch("DeleteCard", { "card": key }); if (_r === null) return; _ids.push(..._r); }
     });
     return e0;
   },
@@ -96,13 +102,13 @@ const shape_board_list: ShapeNode<HTMLElement> = {
       const p_card = dragValue(ev);
       const p_pos = encodeText(dropPos(shaper, "board#list#card", key, (ev as DragEvent).clientY, p_card));
       const _ids: string[] = [];
-      _ids.push(...dispatch("MoveCard", { "card": p_card, "list": key, "pos": p_pos }));
+      { const _r = dispatch("MoveCard", { "card": p_card, "list": key, "pos": p_pos }); if (_r === null) return; _ids.push(..._r); }
       maybeRebalance(engine, shaper, "board#list#card", key, "pos", encodeText);
     });
     (((e0.childNodes[0] as HTMLElement).childNodes[1] as HTMLElement)).addEventListener("click", (ev) => {
       const p_pos = encodeText(endOf(shaper, "board#list#card", key));
       const _ids: string[] = [];
-      _ids.push(...dispatch("AddCard", { "list": key, "pos": p_pos }));
+      { const _r = dispatch("AddCard", { "list": key, "pos": p_pos }); if (_r === null) return; _ids.push(..._r); }
       for (const _id of _ids) { const _el = shaper.el("board#list#card", _id); if (_el) { (_el.querySelector("input, textarea") as HTMLElement | null)?.focus(); break; } }
       maybeRebalance(engine, shaper, "board#list#card", key, "pos", encodeText);
     });

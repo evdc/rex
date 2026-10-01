@@ -18,8 +18,14 @@ const engine = await boot({ RexApp, program: PROGRAM, adapter: store, profiler: 
 (window as unknown as { __rexApp: typeof engine }).__rexApp = engine;
 const driver = new BrowserDriver();
 const container = document.getElementById("app")!;
-function dispatch(name: string, args: Record<string, EventArg>): readonly string[] {
-  const res = engine.dispatch(name, args);
+function dispatch(name: string, args: Record<string, EventArg>): readonly string[] | null {
+  let res;
+  try {
+    res = engine.dispatch(name, args);
+  } catch (refused) {
+    console.warn(`[rex] event ${name} was refused:`, refused);
+    return null;
+  }
   if (prof) prof.shaper(() => shaper.applyStep(res.deltas));
   else shaper.applyStep(res.deltas);
   return res.ids;
@@ -57,35 +63,35 @@ const shape_main_unit_if1_visible: ShapeNode<HTMLElement> = {
     e0.dataset.key = key;
     (((e0.childNodes[0] as HTMLElement).childNodes[0] as HTMLElement)).addEventListener("change", (ev) => {
       const _ids: string[] = [];
-      _ids.push(...dispatch("ToggleTodo", { "t": key }));
+      { const _r = dispatch("ToggleTodo", { "t": key }); if (_r === null) return; _ids.push(..._r); }
     });
     (((e0.childNodes[0] as HTMLElement).childNodes[1] as HTMLElement)).addEventListener("dblclick", (ev) => {
       const _ids: string[] = [];
-      _ids.push(...dispatch("local#TodoItem#editing#set", { "t": key, "#value": encodeAtom("True") }));
+      { const _r = dispatch("local#TodoItem#editing#set", { "t": key, "#value": encodeAtom("True") }); if (_r === null) return; _ids.push(..._r); }
       (e0.querySelector(".edit") as HTMLElement | null)?.focus();
     });
     (((e0.childNodes[0] as HTMLElement).childNodes[2] as HTMLElement)).addEventListener("click", (ev) => {
       const _ids: string[] = [];
-      _ids.push(...dispatch("DeleteTodo", { "t": key }));
+      { const _r = dispatch("DeleteTodo", { "t": key }); if (_r === null) return; _ids.push(..._r); }
     });
     ((e0.childNodes[1] as HTMLElement)).addEventListener("keydown", (ev) => {
       if (!["Enter"].includes((ev as KeyboardEvent).key)) return;
       const p_v = encodeText((ev.currentTarget as HTMLInputElement).value);
       const _ids: string[] = [];
-      _ids.push(...dispatch("EditTodo", { "t": key, "text": p_v }));
-      _ids.push(...dispatch("local#TodoItem#editing#set", { "t": key, "#value": encodeAtom("False") }));
+      { const _r = dispatch("EditTodo", { "t": key, "text": p_v }); if (_r === null) return; _ids.push(..._r); }
+      { const _r = dispatch("local#TodoItem#editing#set", { "t": key, "#value": encodeAtom("False") }); if (_r === null) return; _ids.push(..._r); }
     });
     ((e0.childNodes[1] as HTMLElement)).addEventListener("keydown", (ev) => {
       if (!["Escape"].includes((ev as KeyboardEvent).key)) return;
       const _ids: string[] = [];
-      _ids.push(...dispatch("local#TodoItem#editing#set", { "t": key, "#value": encodeAtom("False") }));
+      { const _r = dispatch("local#TodoItem#editing#set", { "t": key, "#value": encodeAtom("False") }); if (_r === null) return; _ids.push(..._r); }
       { const _i = ev.currentTarget as HTMLInputElement; _i.value = _i.defaultValue; }
     });
     ((e0.childNodes[1] as HTMLElement)).addEventListener("blur", (ev) => {
       const p_v = encodeText((ev.currentTarget as HTMLInputElement).value);
       const _ids: string[] = [];
-      _ids.push(...dispatch("EditTodo", { "t": key, "text": p_v }));
-      _ids.push(...dispatch("local#TodoItem#editing#set", { "t": key, "#value": encodeAtom("False") }));
+      { const _r = dispatch("EditTodo", { "t": key, "text": p_v }); if (_r === null) return; _ids.push(..._r); }
+      { const _r = dispatch("local#TodoItem#editing#set", { "t": key, "#value": encodeAtom("False") }); if (_r === null) return; _ids.push(..._r); }
     });
     return e0;
   },
@@ -157,7 +163,7 @@ const shape_main_unit_if1: ShapeNode<HTMLElement> = {
     ((e0.childNodes[0] as HTMLElement)).addEventListener("change", (ev) => {
       const p_done = ((ev.currentTarget as HTMLInputElement).checked ? encodeAtom("True") : encodeAtom("False"));
       const _ids: string[] = [];
-      _ids.push(...dispatch("ToggleAll", { "done": p_done }));
+      { const _r = dispatch("ToggleAll", { "done": p_done }); if (_r === null) return; _ids.push(..._r); }
     });
     return e0;
   },
@@ -189,7 +195,7 @@ const shape_main_unit_if5_if10: ShapeNode<HTMLElement> = {
     e0.dataset.key = key;
     (e0).addEventListener("click", (ev) => {
       const _ids: string[] = [];
-      _ids.push(...dispatch("ClearCompleted", {  }));
+      { const _r = dispatch("ClearCompleted", {  }); if (_r === null) return; _ids.push(..._r); }
     });
     return e0;
   },
@@ -237,15 +243,15 @@ const shape_main_unit_if5: ShapeNode<HTMLElement> = {
     e0.dataset.key = key;
     ((((e0.childNodes[1] as HTMLElement).childNodes[0] as HTMLElement).childNodes[0] as HTMLElement)).addEventListener("click", (ev) => {
       const _ids: string[] = [];
-      _ids.push(...dispatch("SetFilter", { "f": encodeAtom("All") }));
+      { const _r = dispatch("SetFilter", { "f": encodeAtom("All") }); if (_r === null) return; _ids.push(..._r); }
     });
     ((((e0.childNodes[1] as HTMLElement).childNodes[1] as HTMLElement).childNodes[0] as HTMLElement)).addEventListener("click", (ev) => {
       const _ids: string[] = [];
-      _ids.push(...dispatch("SetFilter", { "f": encodeAtom("Active") }));
+      { const _r = dispatch("SetFilter", { "f": encodeAtom("Active") }); if (_r === null) return; _ids.push(..._r); }
     });
     ((((e0.childNodes[1] as HTMLElement).childNodes[2] as HTMLElement).childNodes[0] as HTMLElement)).addEventListener("click", (ev) => {
       const _ids: string[] = [];
-      _ids.push(...dispatch("SetFilter", { "f": encodeAtom("Completed") }));
+      { const _r = dispatch("SetFilter", { "f": encodeAtom("Completed") }); if (_r === null) return; _ids.push(..._r); }
     });
     return e0;
   },
@@ -310,7 +316,7 @@ const shape_main_unit: ShapeNode<HTMLElement> = {
       if (!["Enter"].includes((ev as KeyboardEvent).key)) return;
       const p_text = encodeText((ev.currentTarget as HTMLInputElement).value);
       const _ids: string[] = [];
-      _ids.push(...dispatch("AddTodo", { "text": p_text }));
+      { const _r = dispatch("AddTodo", { "text": p_text }); if (_r === null) return; _ids.push(..._r); }
       (ev.currentTarget as HTMLInputElement).value = "";
     });
     return e0;

@@ -1,0 +1,20 @@
+{
+  "name": "rex-chat-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "rex-dom": "file:../../js/rex-dom",
+    "rex-runtime": "file:../../js/rex-runtime"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "playwright": "^1.61.1",
+    "typescript": "^5.5.0",
+    "vite": "^5.4.0"
+  }
+}

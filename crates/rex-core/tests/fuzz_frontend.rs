@@ -166,7 +166,7 @@ fn mutants_of_real_programs_never_panic_and_valid_ones_run_exactly() {
         let mut rng = Rng(0x2545_F491_4F6C_DD1D);
         let (mut total, mut valid, mut ran) = (0, 0, 0);
         for (name, src) in sources() {
-            assert!(name == "chat" || front_end(&src), "`{name}` itself should check");
+            assert!(front_end(&src), "`{name}` itself should check");
             for _ in 0..per_source {
                 // One or two mutations: near-valid first, then compounding.
                 let mut m = mutant(&src, &mut rng);

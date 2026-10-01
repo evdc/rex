@@ -218,6 +218,14 @@ impl Engine {
         self.log.iter().filter(move |e| e.seq >= seq)
     }
 
+    /// The sequence number the next `new` of `sort` will be given. Dispatch
+    /// uses it to know a row's id before the transaction that creates it is
+    /// built, so a handler's later statements can refer to the row
+    /// (`let x = new …`).
+    pub fn next_id(&self, sort: SortId) -> u64 {
+        self.next_id.get(&sort).copied().unwrap_or(0)
+    }
+
     /// The seq the next logged event will get — what [`base_snapshot`]
     /// records as its cursor, so a later [`restore`] can resume numbering
     /// without colliding with history the snapshot already covers.

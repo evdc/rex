@@ -60,7 +60,7 @@ pub fn dispatch_event(
         logged.push((p.name.clone(), v.clone()));
     }
     let mut ops = Vec::new();
-    expand(env, &engine.circuit, events, def, &bound, &rel_bound, &mut ops)?;
+    expand(env, engine, events, def, &bound, &rel_bound, &mut ops)?;
     Ok(engine.apply_event(name, &ops, logged))
 }
 
@@ -99,7 +99,7 @@ pub fn replay(
         } else if event.name == REBALANCE {
             replay_rebalance(engine, env, event, silent)?;
         } else {
-            let ops = ops_for_event(env, &engine.circuit, events, event)?;
+            let ops = ops_for_event(env, engine, events, event)?;
             if silent {
                 engine.dispatch_silent(&ops);
             } else {
@@ -184,7 +184,7 @@ fn replay_rebalance(engine: &mut Engine, env: &Env, event: &Event, silent: bool)
 /// bind-check-[`expand`] `dispatch_event` runs. The check is not skipped: a
 /// log is read back from storage, and an argument of the wrong type would
 /// otherwise reach the engine's write path, which trusts its input.
-fn ops_for_event(env: &Env, circuit: &Circuit, events: &[EventDef], event: &Event) -> Result<Vec<DispatchOp>, String> {
+fn ops_for_event(env: &Env, engine: &Engine, events: &[EventDef], event: &Event) -> Result<Vec<DispatchOp>, String> {
     let def = find(events, &event.name)?;
     let mut bound = HashMap::new();
     let mut rel_bound: RelArgs = HashMap::new();
@@ -205,7 +205,7 @@ fn ops_for_event(env: &Env, circuit: &Circuit, events: &[EventDef], event: &Even
         }
     }
     let mut ops = Vec::new();
-    expand(env, circuit, events, def, &bound, &rel_bound, &mut ops)?;
+    expand(env, engine, events, def, &bound, &rel_bound, &mut ops)?;
     Ok(ops)
 }
 
@@ -216,19 +216,28 @@ fn find<'a>(events: &'a [EventDef], name: &str) -> Result<&'a EventDef, String> 
         .ok_or_else(|| format!("unknown event `{name}`"))
 }
 
-/// Append `def`'s mutations (with `do` calls expanded) to `ops`. `circuit` is
-/// the pre-event snapshot a `ValRef::Expr` (S-40) reads through — every read
-/// sees state as of before this whole transaction, never a sibling
+/// Append `def`'s mutations (with `do` calls expanded) to `ops`. The engine's
+/// circuit is the pre-event snapshot a `ValRef::Expr` (S-40) reads through —
+/// every read sees state as of before this whole transaction, never a sibling
 /// mutation's write (MVP-PLAN §2.2/§2.3).
+///
+/// `let x = new E { … }` binds `x` for the statements after it. The row's id
+/// is not minted until the transaction is built, but it is known: ids are
+/// per-sort and sequential, so it is the engine's next id for the sort plus
+/// the `new`s of that sort already in `ops`. [`Engine::apply_event`] mints in
+/// the same order, which is also why replay reproduces the same ids.
 fn expand(
     env: &Env,
-    circuit: &Circuit,
+    engine: &Engine,
     events: &[EventDef],
     def: &EventDef,
     args: &HashMap<String, Value>,
     rel_args: &RelArgs,
     ops: &mut Vec<DispatchOp>,
 ) -> Result<(), String> {
+    let circuit = &engine.circuit;
+    // The handler's params, plus each row it has created and named so far.
+    let mut args = args.clone();
     // `bound` is the event's args, plus per-row names (`ROW_SELF`, a
     // `new … from` binder) when resolving a value once per row.
     let resolve_in = |v: &ValRef, bound: &HashMap<String, Value>| -> Result<Value, String> {
@@ -241,72 +250,84 @@ fn expand(
             ValRef::Expr(ve) => eval_val_expr(env, circuit, bound, ve),
         }
     };
-    let resolve = |v: &ValRef| resolve_in(v, args);
     for m in &def.body {
-        match m {
-            MutationIR::Set { target, entity, updates } => {
-                let sort = entity_sort(env, entity)?;
-                let mut row_args = args.clone();
-                for id in resolve_target(env, circuit, args, target)? {
-                    row_args.insert(ROW_SELF.to_string(), id.clone());
+        // A row this statement creates and names, in scope from the next one.
+        let mut bound: Option<(String, Value)> = None;
+        {
+            let args = &args;
+            let resolve = |v: &ValRef| resolve_in(v, args);
+            match m {
+                MutationIR::Set { target, entity, updates } => {
+                    let sort = entity_sort(env, entity)?;
+                    let mut row_args = args.clone();
+                    for id in resolve_target(env, circuit, args, target)? {
+                        row_args.insert(ROW_SELF.to_string(), id.clone());
+                        let mut resolved = Vec::new();
+                        for (field, val) in updates {
+                            let value = resolve_in(val, &row_args)?;
+                            check_field(env, sort, field, &value)?;
+                            resolved.push((field.clone(), value));
+                        }
+                        ops.push(DispatchOp::Set { id, updates: resolved });
+                    }
+                }
+                MutationIR::Delete { target } => {
+                    for id in resolve_target(env, circuit, args, target)? {
+                        ops.push(DispatchOp::Retract { id });
+                    }
+                }
+                MutationIR::Insert { entity, fields, bind } => {
+                    let sort = entity_sort(env, entity)?;
                     let mut resolved = Vec::new();
-                    for (field, val) in updates {
-                        let value = resolve_in(val, &row_args)?;
+                    for (field, val) in fields {
+                        let value = resolve(val)?;
                         check_field(env, sort, field, &value)?;
                         resolved.push((field.clone(), value));
                     }
-                    ops.push(DispatchOp::Set { id, updates: resolved });
-                }
-            }
-            MutationIR::Delete { target } => {
-                for id in resolve_target(env, circuit, args, target)? {
-                    ops.push(DispatchOp::Retract { id });
-                }
-            }
-            MutationIR::Insert { entity, fields } => {
-                let sort = entity_sort(env, entity)?;
-                let mut resolved = Vec::new();
-                for (field, val) in fields {
-                    let value = resolve(val)?;
-                    check_field(env, sort, field, &value)?;
-                    resolved.push((field.clone(), value));
-                }
-                ops.push(DispatchOp::New { sort, fields: resolved });
-            }
-            MutationIR::InsertFrom { entity, param, key, value: value_name, fields } => {
-                let sort = entity_sort(env, entity)?;
-                let rows = rel_args
-                    .get(param)
-                    .ok_or_else(|| format!("event `{}`: unbound relation parameter `{param}`", def.name))?;
-                // Every id in one transaction, minted in key order (S-42
-                // subtask 2) — never N independent `new`s that re-find a key.
-                let mut live: Vec<&(Value, Value, i64)> = rows.iter().filter(|(_, _, w)| *w > 0).collect();
-                live.sort_by(|a, b| a.0.cmp(&b.0));
-                let mut row_args = args.clone();
-                for (k, v, _) in live {
-                    row_args.insert(key.clone(), k.clone());
-                    row_args.insert(value_name.clone(), v.clone());
-                    let mut resolved = Vec::new();
-                    for (field, fr) in fields {
-                        let value = match fr {
-                            FromField::Key => k.clone(),
-                            FromField::Value => v.clone(),
-                            FromField::Val(vr) => resolve_in(vr, &row_args)?,
-                        };
-                        check_field(env, sort, field, &value)?;
-                        resolved.push((field.clone(), value));
+                    if let Some(name) = bind {
+                        let earlier = ops.iter().filter(|op| matches!(op, DispatchOp::New { sort: s, .. } if *s == sort)).count();
+                        bound = Some((name.clone(), Value::Id(sort, engine.next_id(sort) + earlier as u64)));
                     }
                     ops.push(DispatchOp::New { sort, fields: resolved });
                 }
-            }
-            MutationIR::Do { event, args: call_args } => {
-                let callee = find(events, event)?;
-                let mut inner = HashMap::new();
-                for (p, a) in callee.params.iter().zip(call_args) {
-                    inner.insert(p.name.clone(), resolve(a)?);
+                MutationIR::InsertFrom { entity, param, key, value: value_name, fields } => {
+                    let sort = entity_sort(env, entity)?;
+                    let rows = rel_args
+                        .get(param)
+                        .ok_or_else(|| format!("event `{}`: unbound relation parameter `{param}`", def.name))?;
+                    // Every id in one transaction, minted in key order (S-42
+                    // subtask 2) — never N independent `new`s that re-find a key.
+                    let mut live: Vec<&(Value, Value, i64)> = rows.iter().filter(|(_, _, w)| *w > 0).collect();
+                    live.sort_by(|a, b| a.0.cmp(&b.0));
+                    let mut row_args = args.clone();
+                    for (k, v, _) in live {
+                        row_args.insert(key.clone(), k.clone());
+                        row_args.insert(value_name.clone(), v.clone());
+                        let mut resolved = Vec::new();
+                        for (field, fr) in fields {
+                            let value = match fr {
+                                FromField::Key => k.clone(),
+                                FromField::Value => v.clone(),
+                                FromField::Val(vr) => resolve_in(vr, &row_args)?,
+                            };
+                            check_field(env, sort, field, &value)?;
+                            resolved.push((field.clone(), value));
+                        }
+                        ops.push(DispatchOp::New { sort, fields: resolved });
+                    }
                 }
-                expand(env, circuit, events, callee, &inner, rel_args, ops)?;
+                MutationIR::Do { event, args: call_args } => {
+                    let callee = find(events, event)?;
+                    let mut inner = HashMap::new();
+                    for (p, a) in callee.params.iter().zip(call_args) {
+                        inner.insert(p.name.clone(), resolve(a)?);
+                    }
+                    expand(env, engine, events, callee, &inner, rel_args, ops)?;
+                }
             }
+        }
+        if let Some((name, id)) = bound {
+            args.insert(name, id);
         }
     }
     Ok(())

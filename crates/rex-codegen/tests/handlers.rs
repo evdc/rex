@@ -53,3 +53,48 @@ fn levels_sharing_an_element_share_a_slot_key() {
     );
     assert_eq!(out.matches("slotKey: \"0\"").count(), 2, "{out}");
 }
+
+#[test]
+fn a_bind_beside_other_children_gets_its_own_text_node() {
+    // `td { .text ":" }`: setting the cell's textContent would wipe the ":".
+    let out = generate(r#"view main = ul { Todo as t select li { .text ": " b { .text } " end" } }"#);
+    // The skeleton holds a placeholder where the bind goes, in order.
+    let build = &out[out.find("function build_shape_main_unit_todo").unwrap()..];
+    let order: Vec<usize> = [r#"createTextNode("")"#, r#"createTextNode(": ")"#, r#"createElement("b")"#, r#"createTextNode(" end")"#]
+        .iter()
+        .map(|needle| build.find(needle).unwrap_or_else(|| panic!("no {needle} in:\n{build}")))
+        .collect();
+    assert!(order.windows(2).all(|w| w[0] < w[1]), "children out of order: {order:?}\n{build}");
+    // The bind writes that node (child 0), not the element.
+    assert!(out.contains("((el.childNodes[0] as HTMLElement)).textContent = String(decodeText(v));"), "{out}");
+    // An only child still binds the element itself: no placeholder, no hop.
+    assert!(out.contains("((el.childNodes[2] as HTMLElement)).textContent = String(decodeText(v));"), "{out}");
+    assert_eq!(out.matches(r#"createTextNode("")"#).count(), 1, "{out}");
+}
+
+#[test]
+fn a_refused_event_ends_the_listener_without_throwing() {
+    let out = generate(
+        r#"view main = ul { Todo as t select li {
+             input(value=.text on change(v = value) { do Edit(t, v); do Edit(t, v); clear })
+           } }"#,
+    );
+    // `dispatch` reports a refusal as null instead of letting it escape…
+    assert!(out.contains("): readonly string[] | null {"), "{out}");
+    assert!(out.contains("} catch (refused) {") && out.contains("return null;"), "{out}");
+    // …and each `do` stops the handler on one, before a later `do` or `clear`.
+    assert_eq!(out.matches("if (_r === null) return;").count(), 2, "{out}");
+    let listener = &out[out.find("addEventListener(\"change\"").unwrap()..];
+    assert!(listener.find("if (_r === null) return;").unwrap() < listener.find(".value = \"\"").unwrap());
+}
+
+#[test]
+fn an_enclosing_binder_argument_is_typed_as_present() {
+    let out = rex_codegen::generate(
+        "entity Todo { text: Text }\nentity Sub { todo: Todo, s: Text }\nevent Tap(t: Todo, s: Sub)\n\
+         view main = ul { Todo as t select li { Sub as s where .todo = t select b(on click => do Tap(t, s)) { .s } } }\n",
+        "./app.rex?raw",
+    )
+    .expect("clean codegen");
+    assert!(out.contains("\"t\": ancestors[0]!, \"s\": key"), "{out}");
+}

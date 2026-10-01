@@ -93,6 +93,7 @@ pub fn desugar(program: &Program) -> Desugared {
     }
     let entity_names: std::collections::HashSet<String> = entity_fields.keys().cloned().collect();
     let mut d = Desugar {
+        fresh_rows: Default::default(),
         stmts: Vec::new(),
         shapes: ShapeProgram::default(),
         diagnostics: Vec::new(),
@@ -264,6 +265,9 @@ pub fn desugar(program: &Program) -> Desugared {
 }
 
 struct Desugar {
+    /// Names bound by `let x = new …` in the handler being checked: ids of
+    /// rows that do not exist yet, which a value may pass on but not read.
+    fresh_rows: std::collections::HashSet<String>,
     stmts: Vec<Stmt>,
     shapes: ShapeProgram,
     diagnostics: Vec<Diagnostic>,
@@ -544,12 +548,23 @@ impl Desugar {
             scope.push((n.clone(), p.ty.clone(), vty));
         }
         let mut body = Vec::new();
+        self.fresh_rows.clear();
         for m in &o.body {
             match self.mutation(m, &scope, None, &o.event) {
                 Some(ir) => body.push(ir),
                 None => return,
             }
+            // `let x = new E { … }`: `x` is the new row's id from here on.
+            if let HStmt::New { bind: Some(name), entity, span, .. } = m {
+                if scope.iter().any(|(n, _, _)| n == name) {
+                    self.error(*span, format!("`{name}` is already a parameter or binding of this handler"));
+                    return;
+                }
+                scope.push((name.clone(), ParamTy::Id(entity.clone()), ValTy::Id(entity.clone())));
+                self.fresh_rows.insert(name.clone());
+            }
         }
+        self.fresh_rows.clear();
         self.shapes.events[idx].body = body;
     }
 
@@ -667,8 +682,8 @@ impl Desugar {
                 Some(MutationIR::Delete { target: bulk_target })
             }
             HStmt::New { bind, entity, from, fields, .. } => {
-                if bind.is_some() {
-                    self.error(span, "`let x = new …` in a handler is not supported yet: a handler cannot name a row it has just created");
+                if bind.is_some() && from.is_some() {
+                    self.error(span, "`new … from` creates many rows; it cannot be bound to one name with `let`");
                     return None;
                 }
                 if !self.entity_fields.contains_key(entity) {
@@ -683,7 +698,7 @@ impl Desugar {
                             self.check_field_value(entity, &f.name, &ty, f.value.span)?;
                             fs.push((f.name.clone(), v));
                         }
-                        Some(MutationIR::Insert { entity: entity.clone(), fields: fs })
+                        Some(MutationIR::Insert { entity: entity.clone(), fields: fs, bind: bind.clone() })
                     }
                     Some(from) => self.new_from(entity, from, fields, scope, span),
                 }
@@ -1051,6 +1066,15 @@ impl Desugar {
                     self.error(a.span, format!("`.{field}` needs an entity value on its left, found `{}`", show_valty(&ta)));
                     return None;
                 };
+                if let ValExpr::Param(name) = &va
+                    && self.fresh_rows.contains(name)
+                {
+                    self.error(
+                        e.span,
+                        format!("`{name}` was created by this handler, and a handler reads the state before the event: `{name}.{field}` has no value yet (use the value you gave it)"),
+                    );
+                    return None;
+                }
                 let Some(fty) = self.entity_fields.get(entity).and_then(|f| f.get(field)).cloned() else {
                     self.error(b.span, format!("no field `{field}` on `{entity}`"));
                     return None;
@@ -1565,14 +1589,16 @@ impl LevelWalk<'_> {
             match c {
                 Content::Text(s) => tpl_children.push(Tpl::Static(s.clone())),
                 Content::Bind(expr) => {
-                    // Bind this element's textContent; not a static child node.
                     let (view, encoding) = self.bind_view(expr);
-                    self.attrs.push(AttrBinding {
-                        view,
-                        path: path.to_vec(),
-                        kind: BindKind::Text,
-                        encoding,
-                    });
+                    // An only child binds the element's own text. Beside
+                    // other children (`td { .name ":" }`) it gets a text node
+                    // of its own, in its place, so it cannot overwrite them.
+                    let mut target = path.to_vec();
+                    if el.children.len() > 1 {
+                        target.push(tpl_children.len());
+                        tpl_children.push(Tpl::Static(String::new()));
+                    }
+                    self.attrs.push(AttrBinding { view, path: target, kind: BindKind::Text, encoding });
                 }
                 Content::Element(child) => {
                     let mut cp = path.to_vec();

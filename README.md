@@ -42,7 +42,8 @@ two TypeScript packages that run the result in a browser.
 > **Status (October 2026): the MVP is functionally complete.** Three apps —
 > [Kanban](examples/kanban/src/board.rex), [TodoMVC](examples/todomvc/src/app.rex)
 > and the [js-framework-benchmark](examples/js-framework-benchmark/src/app.rex)
-> — each build from one `.rex` file with no hand-written per-app code, run in
+> — and a fourth, [chat](examples/chat/src/app.rex), each build from one `.rex`
+> file with no hand-written per-app code, run in
 > the browser on the generated module, and pass Playwright suites for node
 > identity, focus and one DOM operation per logical change. Every change enters
 > as a **named event** in an append-only log; a reload restores the app from a
@@ -67,6 +68,7 @@ Workspace layout:
 | `examples/kanban` | End-to-end app (Vite + Playwright). |
 | `examples/js-framework-benchmark` | The keyed benchmark on Rex: 10k-row bulk events, `import js` extractors (Vite + Playwright). |
 | `examples/todomvc` | TodoMVC, the S-02 program unchanged (Vite + Playwright). |
+| `examples/chat` | Chat: a many-to-many through a link entity, a state with no default, and one event that creates rows which refer to each other (Vite + Playwright). |
 
 ```sh
 cargo build
@@ -87,13 +89,53 @@ offending line underlined, and exits 0 (clean), 1 (errors; or warnings with
 `--deny-warnings`) or 2 (unreadable file, bad flag). `rex run` checks, then
 prints each view's materialized contents (`--ast` adds the s-expression);
 `rex prog.rex` still means `rex run prog.rex`. `cargo run -p rex-cli --
-run crates/rex-core/tests/fixtures/spec12.rex` is the best core demo; the Kanban
-app is the best whole-system demo: `scripts/build-wasm.sh` and `scripts/build-js.sh`
-(above), then `cd examples/kanban && npm install && npm run build` and
-`npx playwright test`. The wasm glue is `js/rex-runtime/pkg/` (gitignored, not
-committed) and every example imports it as `rex-runtime/wasm`; nothing is copied
-into the examples. `npm pack` in `js/rex-dom` and `js/rex-runtime` produces the
-two publishable tarballs (`rex-runtime`'s needs `pkg/` built first).
+run crates/rex-core/tests/fixtures/spec12.rex` is the best core demo.
+
+### Running the examples
+
+Each example is a Vite app around one `.rex` file. You need Rust with the
+`wasm32-unknown-unknown` target, the `wasm-bindgen` CLI at the version pinned
+in `Cargo.lock`, and Node 20+.
+
+```sh
+# once
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.126   # build-wasm.sh says if this is the wrong version
+(cd js/rex-dom && npm install) && (cd js/rex-runtime && npm install)
+
+# after changing the engine (crates/) or the packages (js/)
+./scripts/build-wasm.sh     # the engine      -> js/rex-runtime/pkg/
+./scripts/build-js.sh       # the JS packages -> js/*/dist/
+
+# run one: kanban, todomvc, chat or js-framework-benchmark
+cd examples/chat
+npm install
+npm run dev                 # http://localhost:5173 — the page reloads when src/main.ts changes
+```
+
+`src/main.ts` in each example is **generated** and checked in. After editing
+the `.rex` file, regenerate it — or leave `--watch` running beside `npm run dev`:
+
+```sh
+cargo run -p rex-cli -- build examples/chat/src/app.rex -o examples/chat/src/main.ts --watch
+#   kanban's program is examples/kanban/src/board.rex; the others are src/app.rex
+```
+
+State persists in the browser's IndexedDB, keyed by the program's text, so a
+reload brings it back and an edited program starts clean. Add `?ephemeral` to
+the URL to keep nothing, and `?profile` to log each event's engine / parse /
+shaper time.
+
+```sh
+npm run build && npm run preview    # a production build, served locally
+npx playwright install chromium     # once, then:
+npx playwright test                 # the example's browser suite (starts its own server)
+```
+
+The wasm glue (`js/rex-runtime/pkg/`) and the packages' `dist/` are build
+output, not committed; every example imports them as `rex-runtime/wasm`,
+`rex-runtime` and `rex-dom`. `npm pack` in `js/rex-dom` and `js/rex-runtime`
+produces the two publishable tarballs.
 
 The REPL (`crates/rex-cli/src/repl.rs`) accepts `entity`/`let` statements
 (committed to the session) and bare expressions (evaluated in a scratch copy
@@ -197,7 +239,7 @@ Key design choices realized in code:
 - `rex-wasm` (`RexApp`), `rex-dom` (shaper: −/+ fusion, phased apply, typed
   ordering, fractional keys + rebalance, subtree coalescing, reparent), and
   `rex-runtime` (typed engine, boot, IndexedDB persistence, recovery).
-- Three example apps with Playwright suites.
+- Four example apps with Playwright suites.
 
 ---
 
@@ -220,8 +262,6 @@ incremental recursion, an LSP.
 ## What's left
 
 **Small, known, and worth doing next**
-- `examples/chat` does not check: it needs `let x = new …` inside a handler,
-  binding the new row's id for the statements after it.
 - Handler values lack `*`, `if`, `match` and aggregates, and cannot write
   through a path; component arguments must be row binders (SYNTAX.md lists
   these where they come up).
@@ -300,7 +340,7 @@ Unit tests cover each layer — lexer, parser (precedence and associativity of
 every operator), checker (positive cases and the diagnostics that matter),
 elaboration, the algebra kernels, each DBSP operator against its batch kernel
 under random insert/retract histories, codegen snapshots, the shaper's
-mutation counts — and Playwright covers the three apps in a real browser.
+mutation counts — and Playwright covers the four apps in a real browser.
 
 On top of those sits a set of **oracle and fuzz suites**, which is where to
 look (and add) when changing the language or the engine:
@@ -308,7 +348,7 @@ look (and add) when changing the language or the engine:
 | Suite | What it holds the system to |
 |---|---|
 | `rex-core/tests/histories.rs` | Random event histories with hostile arguments over the example apps and a graph program: after every event the base invariant holds, every view equals batch evaluation, each step's deltas are exactly the change, the log replays, and a mid-history snapshot plus the tail restores. |
-| `rex-core/tests/models.rs` | Hand-written reference models (TodoMVC, the benchmark, Kanban, a stockroom built around arg-dependent `where`): what a handler *means*, independent of the engine. |
+| `rex-core/tests/models.rs` | Hand-written reference models (TodoMVC, the benchmark, Kanban, chat, a stockroom built around arg-dependent `where`): what a handler *means*, independent of the engine. |
 | `rex-core/tests/gen_queries.rs` | Randomly **generated queries** from a typed grammar (~90% check); every accepted one must be maintained exactly under random histories. |
 | `rex-core/tests/fuzz_frontend.rs` | Mutants of real programs, token soup, arbitrary text, every construct nested far past the limit, very wide programs: no panic, no stack overflow (on a 1 MB stack in release), every diagnostic renders — and a mutant that still checks is driven through the engine oracle. |
 | `rex-core/tests/encode_props.rs` | The wire encoding round-trips any value and is injective; emitted JSON parses and says what it should. Writes `fixtures/encoding.json`, which `rex-dom` is tested against. |

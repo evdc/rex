@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Rex Chat</title>
+    <style>
+      body { font: 15px system-ui, sans-serif; background: #f5f5f5; margin: 0; }
+      #app { max-width: 640px; margin: 40px auto; }
+      .chat-root { background: #fff; padding: 16px 20px; box-shadow: 0 2px 4px rgba(0,0,0,.2); }
+      h1 { font-size: 22px; margin: 0 0 12px; }
+      .toolbar, .users { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+      .users button.selected { border-color: #2a6; background: #e8f7ee; }
+      table { width: 100%; border-collapse: collapse; margin: 8px 0; }
+      td { padding: 4px 6px; border-bottom: 1px solid #eee; vertical-align: top; }
+      .send-message { font: inherit; width: 100%; box-sizing: border-box; padding: 8px; }
+      button { font: inherit; cursor: pointer; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

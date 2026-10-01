@@ -1,4 +1,5 @@
-// Chat in Rex surface v1 — an S-02 acceptance program (MVP-PLAN.md).
+// Chat in Rex surface v1 — an S-02 acceptance program (MVP-PLAN.md), and the
+// one that needs rows created and referred to within a single handler.
 // Ported from ../../../elysium26/examples/chat.ely (itself after
 // https://www.scattered-thoughts.net/writing/relational-ui/).
 //
@@ -28,6 +29,8 @@ event MessageLiked(msg: Message)
 event MessageDeleted(msg: Message)
 event UserSelected(user: User)
 
+// `let x = new …` names a new row for the statements after it, so one event
+// can build a small graph: users, their messages, likes between them.
 on SeedSynthetic() {
   let alice = new User { name: "Alice" }
   let bob   = new User { name: "Bob" }
@@ -39,9 +42,10 @@ on SeedSynthetic() {
   set current = alice
 }
 
-// `current` is `Unit -> User` with 0 or 1 rows; when empty, `sender: current`
-// writes no `sender` row (6NF: the field is simply absent) — the checker warns
-// that the value may be empty.
+// `current` is `Unit -> User` with 0 or 1 rows. A handler value that reads it
+// while it is empty has nothing to write, so the event is refused whole —
+// which is why the view below only offers "send" and "like" once a user is
+// selected (`if (current)`).
 on MessageSent(text)     => new Message { text: text, sender: current }
 on MessageLiked(msg)     => new Like { msg: msg, user: current }
 on MessageDeleted(msg)   { delete Like where .msg = msg; delete msg }
@@ -61,8 +65,10 @@ view main =
     table {
       Message as m order by id select MessageItem(m)
     }
-    input(class="send-message" placeholder="Say something ..."
-      on keydown.enter(text = value) { do MessageSent(text); clear })
+    if (current) {
+      input(class="send-message" placeholder="Say something ..."
+        on keydown.enter(text = value) { do MessageSent(text); clear })
+    }
   }
 
 // Likes of this message: a nested level over the link entity, joined out to
@@ -75,7 +81,7 @@ view MessageItem(m: Message) =
       Like as l where .msg = m select
         div { l.user.name " likes this!" }
     }
-    td { button(on click => do MessageLiked(m)) "Like!" }
+    td { if (current) { button(on click => do MessageLiked(m)) "Like!" } }
     if (.sender = current) {
       td { button(on click => do MessageDeleted(m)) "Delete" }
     }

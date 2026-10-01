@@ -25,9 +25,9 @@ saying what was actually built and where it deviates.
 Against the five MVP criteria of §1: all met, with two caveats recorded in
 README *Status against the MVP* — CI has not run on the unpushed commits, and
 the "create 10k in one frame" stretch line of S-91 is still missed (~44 ms).
-The one acceptance program that does not check is `examples/chat` (not one of
-the three MVP apps): it needs `let x = new …` in a handler, which no story
-owned.
+The fourth acceptance program, `examples/chat` (not one of the three MVP
+apps), needed `let x = new …` in a handler, which no story owned; it landed
+after S-94 — see *After the MVP: chat* at the end of §3.
 
 How to read the stories:
 
@@ -1347,6 +1347,33 @@ of the changes came from.
 *Not done:* `docs/ordering.md` (S-72). `nesting-draft.md` and `drafts.md` are
 left as the historical notes they are; PERF-PLAN.md and SYNC.md are current
 and were not touched.
+
+#### After the MVP: chat — **done 2026-10-01** (`types/view.rs`, `events.rs`'s `expand`, `Engine::next_id`; `crates/rex-core/tests/handler_new.rs` (8), `models.rs`'s chat model; `examples/chat/`, 9 Playwright specs)
+*Goal:* `examples/chat/src/app.rex` checks, builds and runs.
+*Landed as:* **`let x = new E { … }` in a handler.** `MutationIR::Insert` gains
+`bind`; the checker adds `x` to the handler's scope as an id of `E` for the
+statements after it. Dispatch does not mint early (that would need a second
+write path, or a mint that survives a refused event): it **predicts** the id —
+the sort's next id plus the `new`s of that sort already expanded into the
+transaction, counting bulk `new … from` rows and rows a `do` callee created —
+and `Engine::apply_event` then mints in the same order. Replay goes through the
+same code with the same counters, so it reproduces the ids. `x` is a value and
+a target (`x.f := v`, `delete x` compose with the creation); reading it
+(`x.name`) is a check-time error, since reads see the pre-event snapshot, and
+for the same reason a `where` target does not find the new row.
+Running the app in a browser found three more things, fixed generally:
+1. **A bind beside other children wiped them.** `td { .sender.name ":" }` set
+   the cell's `textContent`. A bind that is not an only child now gets a text
+   node of its own in the template, in its place.
+2. **An enclosing-binder argument did not typecheck** (`ancestors[0]` is
+   `string | undefined` under `noUncheckedIndexedAccess`).
+3. **A refused event was an uncaught exception** in the listener. Generated
+   `dispatch` now returns `null` and warns; the listener stops there, so a
+   later `clear` does not discard what the user typed.
+`app.rex` changed in one way: "send" and "like" sit under `if (current)`, so
+they are offered only once a user is selected (with no user, `MessageSent` has
+no sender to read and is refused). Its comment claiming the checker warns
+about that was wrong and is corrected.
 
 ---
 

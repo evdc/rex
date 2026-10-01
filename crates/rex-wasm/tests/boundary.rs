@@ -25,6 +25,7 @@ fn programs() -> Vec<(&'static str, String)> {
         ("todomvc", example("todomvc/src/app.rex")),
         ("benchmark", example("js-framework-benchmark/src/app.rex")),
         ("kanban", example("kanban/src/board.rex")),
+        ("chat", example("chat/src/app.rex")),
     ]
 }
 
@@ -74,6 +75,7 @@ impl Schema {
 const TEXTS: &[&str] =
     &["t:a", "t:", "t:a\\,b", "t:\\(x\\)", "t:\"q\"", "t:é😀", "t:\u{2028}", "t:\n", "t:a0", "t:a1"];
 const ATOMS: &[&str] = &["@True", "@False", "@All", "@Active", "@Completed"];
+// (chat has no atom-typed params; its ids are made up like every other program's.)
 
 /// Boot `src` and run a made-up history against it.
 fn drive(src: &str, picks: &[(usize, usize)]) -> App {
@@ -124,7 +126,7 @@ proptest! {
 
     #[test]
     fn a_session_round_trips_through_its_own_json(
-        which in 0usize..3,
+        which in 0usize..4,
         picks in prop::collection::vec((any::<usize>(), any::<usize>()), 0..24),
         cut in 0usize..24,
     ) {

@@ -449,8 +449,9 @@ In rough order of how much they block real use:
 2. **Startup and bundle size** — PERF-PLAN P-7: the browser downloads the whole
    compiler and compiles the program at boot. The end of that road is a circuit
    compiled ahead of time.
-3. **The rest of the handler language** — `let x = new …` in a handler (the `chat`
-   example needs it), `*`/`if`/`match` in values, scalar component arguments.
+3. **The rest of the handler language** — `*`/`if`/`match` in values, scalar
+   component arguments. (`let x = new …` landed 2026-10-01, and with it the `chat`
+   example.)
 4. **M4, the effects membrane** — its substrate (logged events with reserved
    `cause`/`intent` fields, MVP-PLAN §5 decision 2) is in place; nothing else is.
 5. **Manual order as a language concept** — `order manual` and `move x before y`,

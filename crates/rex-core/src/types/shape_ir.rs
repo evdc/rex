@@ -232,10 +232,14 @@ pub enum MutationIR {
     },
     /// Retract every row `target` names.
     Delete { target: Target },
-    /// Create an entity.
+    /// Create an entity. `bind` is the name `let x = new …` gives the new
+    /// row's id, in scope as a value for the handler's later statements —
+    /// as an argument, a field value or a target, but not to read from: the
+    /// row does not exist in the pre-event snapshot every read sees.
     Insert {
         entity: String,
         fields: Vec<(String, ValRef)>,
+        bind: Option<String>,
     },
     /// `new Entity from rows as (k, v) { … }` (S-42): one entity per row of
     /// a relation-typed event param, minted in one transaction, in the

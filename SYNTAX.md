@@ -2,15 +2,12 @@
 
 **Status:** the reference for what `rex check` / `rex build` accept, as of
 2026-10-01 (MVP-PLAN E1–E9 landed). The acceptance programs are written in it:
-`examples/todomvc/src/app.rex`, `examples/js-framework-benchmark/src/app.rex`
-and `examples/kanban/src/board.rex` build and run; `examples/chat/src/app.rex`
-is the one program that does not check yet (see below). The grammar is
-whatever those programs need, and no more.
+`examples/todomvc/src/app.rex`, `examples/js-framework-benchmark/src/app.rex`,
+`examples/kanban/src/board.rex` and `examples/chat/src/app.rex` all build and
+run. The grammar is whatever those programs need, and no more.
 
 **Described here but not implemented** — each is marked where it appears:
 
-- `let x = new …` inside a handler, binding the new row's id for later
-  statements (what `chat` needs);
 - component arguments other than row binders (`Panel("Todo")`);
 - `*`, `if`, `match` and aggregates in a handler *value* (§3);
 - a write through a path (`b.owner.name := …`);
@@ -105,7 +102,8 @@ Statements, one spelling per verb, verb first, target an expression:
 
 | Statement | Meaning |
 |---|---|
-| `new E { f: e, … }` | insert one row, all fields atomically. (`let x = new …`, binding its id for later statements, is **not implemented**.) |
+| `new E { f: e, … }` | insert one row, all fields atomically |
+| `let x = new E { f: e, … }` | the same, and `x` names the new row in the statements after it |
 | `new E from R as (k, v) { f: e, … }` | one row per tuple of `R`; `k`/`v` name the key and value in the field expressions |
 | `update T { f: e, … }` | set fields on every row of the keyset `T` (a binder, or `E [where P]`) |
 | `x.f := e` | sugar for `update x { f: e }` |
@@ -123,6 +121,25 @@ queries, §4). A value that reads something absent — a field of a row that is
 gone, a `state` with no default that was never `set` — makes the dispatch
 fail: the event is refused, nothing is written, nothing is logged. A plain
 write to a row that is gone is not an error; it does nothing.
+
+**Naming a new row.** `let x = new E { … }` makes `x` the new row's id for
+the rest of the handler, so one event can build rows that refer to each other:
+
+```rex
+on SeedSynthetic() {
+  let alice = new User { name: "Alice" }
+  let m1    = new Message { text: "Welcome", sender: alice }
+  new Like { msg: m1, user: alice }
+  set current = alice
+}
+```
+
+`x` can be a field value, a `do` argument, a `set` value, or a target
+(`x.f := e`, `delete x` — writes compose with the row's creation). It cannot
+be *read*: `x.name` is an error, because the row is not in the pre-event
+snapshot every read sees; use the value you gave it. For the same reason a
+`where` target does not find rows the handler has just created. `x` must not
+repeat a param or an earlier binding, and a bulk `new … from` cannot be named.
 
 **Targets.** `update`/`delete` take a param (`delete t`), a whole entity
 (`delete Row`), or `E where P`. If `P` mentions no param, the target is a
@@ -195,7 +212,8 @@ view main =
   (see `endOf`/`dropPos`); hiding those keys is post-MVP.
 - **`if (c) { … }`** — children present iff the coreflexive `c` holds at
   this level (`if (total > 0)` at the root, `if (.user = current)` inside a
-  level); sugar for `X where c select …`, so it mounts/removes like any level.
+  level, `if (current)` for "the state `current` has a value"); sugar for
+  `X where c select …`, so it mounts/removes like any level.
   Whatever is nested inside comes and goes with it: a `select` under an `if`
   re-appears, with its current rows, when the condition holds again.
 - **Source order is DOM order.** Levels, `if`s and static markup that share an
@@ -222,7 +240,8 @@ bind     := .path | x.path | name | ( expr )
   `class.done=.completed`. Value binds decode by type (`Int` renders `3`,
   not `i:3`; a `Money` renders its minor units, `250` for 2.50 — formatting
   is not done for you). A bare name that is not a declared relation is an error.
-- Text and binds mix freely as children: `td { .sender.name ":" }`; a string
+- Text and binds mix freely as children: `td { .sender.name ":" }` (a bind
+  beside other children gets a text node of its own, in its place); a string
   followed by `++` starts a concat bind (`"Current user: " ++ current.name`).
 - An element with neither properties nor children needs parens (`hr()`),
   since a bare name is always a bind.
@@ -277,6 +296,9 @@ event (two `do`s are two sequential, separately logged events); `set` of a
 component `local` is sugar for an implicit, logged event (a `state` is set
 from an `on` handler: declare an event and `do` it); `clear`, `revert` and
 `focus` are presentation actions and see the DOM *after* any preceding `do`.
+An event the engine **refuses** (§3) ends the handler there — later `do`s and
+actions do not run, so a `clear` does not throw away what was typed — and is
+reported as a console warning, not an exception.
 A DOM handler may not mutate directly — that is what events are for. It may
 reference its own level's binder, any **enclosing** binder, and its params;
 param types come from the event signature. `keydown.enter` (and `.escape`,
@@ -318,6 +340,7 @@ first input of the row the preceding `do` created at level `c`;
 | `update E where P {…}` (arg-free `P`) | hidden `let on#E#k = E where P`; dispatch reads the keyset |
 | `x.f := e` | `update x { f: e }` |
 | `new E from R as (k, v) {…}` | one `new` per tuple, `k` ≡ `id`, `v` ≡ `R`, in one transaction |
+| `let x = new E {…}` | the `new`, plus `x` bound to its id: the sort's next id, known at dispatch because ids are sequential |
 | `do F(args)` in a handler | inline `F`'s body into the same transaction |
 | `view main = <element>` | implicit root level over `Unit`; `let main#unit = unit#root` (the point `{unit ↦ unit}`); a bind is `unit#root . e`, a class gate `unit#root where e` |
 | `R as x order by e select …` | `let main#x = R`, `let main#x#order = R . e` |

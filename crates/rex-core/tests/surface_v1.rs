@@ -1,7 +1,5 @@
 //! The S-02 acceptance programs (MVP-PLAN.md): the example apps, written in
-//! the v1 surface before the grammar existed. All four parse; the three MVP
-//! apps check. `chat` is the one left: it needs `let x = new …` inside a
-//! handler, which is not implemented (SYNTAX.md).
+//! the v1 surface before the grammar existed. All four parse and check.
 
 const TODOMVC: &str = include_str!("../../../examples/todomvc/src/app.rex");
 const BENCH: &str = include_str!("../../../examples/js-framework-benchmark/src/app.rex");
@@ -37,7 +35,6 @@ fn kanban_v1_parses() { parses_clean(KANBAN_V1); }
 fn chat_parses() { parses_clean(CHAT); }
 
 #[test]
-#[ignore = "`let x = new …` inside a handler is not implemented"]
 fn chat_checks() { checks_clean(CHAT); }
 
 #[test]

@@ -19,8 +19,14 @@ const engine = await boot({ RexApp, program: PROGRAM, adapter: store, profiler: 
 (window as unknown as { __rexApp: typeof engine }).__rexApp = engine;
 const driver = new BrowserDriver();
 const container = document.getElementById("app")!;
-function dispatch(name: string, args: Record<string, EventArg>): readonly string[] {
-  const res = engine.dispatch(name, args);
+function dispatch(name: string, args: Record<string, EventArg>): readonly string[] | null {
+  let res;
+  try {
+    res = engine.dispatch(name, args);
+  } catch (refused) {
+    console.warn(`[rex] event ${name} was refused:`, refused);
+    return null;
+  }
   if (prof) prof.shaper(() => shaper.applyStep(res.deltas));
   else shaper.applyStep(res.deltas);
   return res.ids;
@@ -63,11 +69,11 @@ const shape_main_unit_row: ShapeNode<HTMLElement> = {
     e0.dataset.key = key;
     (((e0.childNodes[1] as HTMLElement).childNodes[0] as HTMLElement)).addEventListener("click", (ev) => {
       const _ids: string[] = [];
-      _ids.push(...dispatch("Select", { "r": key }));
+      { const _r = dispatch("Select", { "r": key }); if (_r === null) return; _ids.push(..._r); }
     });
     (((e0.childNodes[2] as HTMLElement).childNodes[0] as HTMLElement)).addEventListener("click", (ev) => {
       const _ids: string[] = [];
-      _ids.push(...dispatch("Delete", { "r": key }));
+      { const _r = dispatch("Delete", { "r": key }); if (_r === null) return; _ids.push(..._r); }
     });
     return e0;
   },
@@ -193,34 +199,34 @@ const shape_main_unit: ShapeNode<HTMLElement> = {
     (((((((e0.childNodes[0] as HTMLElement).childNodes[0] as HTMLElement).childNodes[1] as HTMLElement).childNodes[0] as HTMLElement).childNodes[0] as HTMLElement).childNodes[0] as HTMLElement)).addEventListener("click", (ev) => {
       const p_labels = encodeRel(utils.randomLabels(1000), encodeText);
       const _ids: string[] = [];
-      _ids.push(...dispatch("Run", { "n": "i:1000", "labels": p_labels }));
+      { const _r = dispatch("Run", { "n": "i:1000", "labels": p_labels }); if (_r === null) return; _ids.push(..._r); }
       maybeRebalance(engine, shaper, "main#unit#row", key, "pos", encodeText);
     });
     (((((((e0.childNodes[0] as HTMLElement).childNodes[0] as HTMLElement).childNodes[1] as HTMLElement).childNodes[0] as HTMLElement).childNodes[1] as HTMLElement).childNodes[0] as HTMLElement)).addEventListener("click", (ev) => {
       const p_labels = encodeRel(utils.randomLabels(10000), encodeText);
       const _ids: string[] = [];
-      _ids.push(...dispatch("Run", { "n": "i:10000", "labels": p_labels }));
+      { const _r = dispatch("Run", { "n": "i:10000", "labels": p_labels }); if (_r === null) return; _ids.push(..._r); }
       maybeRebalance(engine, shaper, "main#unit#row", key, "pos", encodeText);
     });
     (((((((e0.childNodes[0] as HTMLElement).childNodes[0] as HTMLElement).childNodes[1] as HTMLElement).childNodes[0] as HTMLElement).childNodes[2] as HTMLElement).childNodes[0] as HTMLElement)).addEventListener("click", (ev) => {
       const p_labels = encodeRel(utils.randomLabels(1000), encodeText);
       const _ids: string[] = [];
-      _ids.push(...dispatch("Add", { "labels": p_labels }));
+      { const _r = dispatch("Add", { "labels": p_labels }); if (_r === null) return; _ids.push(..._r); }
       maybeRebalance(engine, shaper, "main#unit#row", key, "pos", encodeText);
     });
     (((((((e0.childNodes[0] as HTMLElement).childNodes[0] as HTMLElement).childNodes[1] as HTMLElement).childNodes[0] as HTMLElement).childNodes[3] as HTMLElement).childNodes[0] as HTMLElement)).addEventListener("click", (ev) => {
       const _ids: string[] = [];
-      _ids.push(...dispatch("Update", {  }));
+      { const _r = dispatch("Update", {  }); if (_r === null) return; _ids.push(..._r); }
       maybeRebalance(engine, shaper, "main#unit#row", key, "pos", encodeText);
     });
     (((((((e0.childNodes[0] as HTMLElement).childNodes[0] as HTMLElement).childNodes[1] as HTMLElement).childNodes[0] as HTMLElement).childNodes[4] as HTMLElement).childNodes[0] as HTMLElement)).addEventListener("click", (ev) => {
       const _ids: string[] = [];
-      _ids.push(...dispatch("Clear", {  }));
+      { const _r = dispatch("Clear", {  }); if (_r === null) return; _ids.push(..._r); }
       maybeRebalance(engine, shaper, "main#unit#row", key, "pos", encodeText);
     });
     (((((((e0.childNodes[0] as HTMLElement).childNodes[0] as HTMLElement).childNodes[1] as HTMLElement).childNodes[0] as HTMLElement).childNodes[5] as HTMLElement).childNodes[0] as HTMLElement)).addEventListener("click", (ev) => {
       const _ids: string[] = [];
-      _ids.push(...dispatch("SwapRows", {  }));
+      { const _r = dispatch("SwapRows", {  }); if (_r === null) return; _ids.push(..._r); }
       maybeRebalance(engine, shaper, "main#unit#row", key, "pos", encodeText);
     });
     return e0;

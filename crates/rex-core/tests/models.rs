@@ -558,6 +558,118 @@ fn stock_agrees(app: &App, m: &StockModel) -> Result<(), String> {
     }
 }
 
+// --- chat: rows that name rows created in the same event ----------------------------
+
+#[derive(Clone, Debug)]
+enum ChatOp {
+    Seed,
+    Send(String),
+    Like(u64),
+    Delete(u64),
+    Select(u64),
+}
+
+fn chat_op() -> impl Strategy<Value = ChatOp> {
+    prop_oneof![
+        2 => Just(ChatOp::Seed),
+        3 => text().prop_map(ChatOp::Send),
+        3 => (0u64..8).prop_map(ChatOp::Like),
+        2 => (0u64..8).prop_map(ChatOp::Delete),
+        // Users 0..3 exist after one seed; nothing checks that a selected
+        // user does.
+        2 => (0u64..8).prop_map(ChatOp::Select),
+    ]
+}
+
+#[derive(Default)]
+struct ChatModel {
+    users: Vec<(u64, String)>,
+    /// `(id, text, sender)`.
+    messages: Vec<(u64, String, u64)>,
+    /// `(id, msg, user)`.
+    likes: Vec<(u64, u64, u64)>,
+    current: Option<u64>,
+    next: [u64; 3],
+}
+
+impl ChatModel {
+    fn mint(&mut self, sort: usize) -> u64 {
+        self.next[sort] += 1;
+        self.next[sort] - 1
+    }
+
+    /// Apply `op`; `false` if the app must refuse it.
+    fn apply(&mut self, op: &ChatOp) -> bool {
+        match op {
+            ChatOp::Seed => {
+                let [alice, bob, chloe] = ["Alice", "Bob", "Chloe"].map(|n| {
+                    let id = self.mint(0);
+                    self.users.push((id, n.to_string()));
+                    id
+                });
+                let m1 = self.mint(1);
+                self.messages.push((m1, "Welcome to Rex chat".into(), alice));
+                let m2 = self.mint(1);
+                self.messages.push((m2, "Like messages to test many-to-many joins".into(), bob));
+                for user in [bob, chloe] {
+                    let id = self.mint(2);
+                    self.likes.push((id, m1, user));
+                }
+                self.current = Some(alice);
+            }
+            // Both read `current`: with no user selected there is no event.
+            ChatOp::Send(text) => {
+                let Some(user) = self.current else { return false };
+                let id = self.mint(1);
+                self.messages.push((id, text.clone(), user));
+            }
+            // A like of a message that is gone is still a like row.
+            ChatOp::Like(msg) => {
+                let Some(user) = self.current else { return false };
+                let id = self.mint(2);
+                self.likes.push((id, *msg, user));
+            }
+            ChatOp::Delete(msg) => {
+                self.likes.retain(|l| l.1 != *msg);
+                self.messages.retain(|m| m.0 != *msg);
+            }
+            ChatOp::Select(user) => self.current = Some(*user),
+        }
+        true
+    }
+}
+
+fn chat_dispatch(app: &mut App, op: &ChatOp) -> Result<(), String> {
+    let r = match op {
+        ChatOp::Seed => app.dispatch("SeedSynthetic", &[]),
+        ChatOp::Send(text) => app.dispatch("MessageSent", &[("text", Value::text(text))]),
+        ChatOp::Like(m) => app.dispatch("MessageLiked", &[("msg", id(app, "Message", *m))]),
+        ChatOp::Delete(m) => app.dispatch("MessageDeleted", &[("msg", id(app, "Message", *m))]),
+        ChatOp::Select(u) => app.dispatch("UserSelected", &[("user", id(app, "User", *u))]),
+    };
+    r.map(|_| ())
+}
+
+fn chat_agrees(app: &App, m: &ChatModel) -> Result<(), String> {
+    let (user, msg) = (|n| id(app, "User", n), |n| id(app, "Message", n));
+    let current: Vec<Value> = app.field("State#", "current").into_iter().map(|(_, v)| v).collect();
+    let checks: [(&str, bool); 6] = [
+        ("users", column(app, "User", "name") == m.users.iter().map(|u| (u.0, Value::text(&u.1))).collect::<Vec<_>>()),
+        ("message text", column(app, "Message", "text") == m.messages.iter().map(|x| (x.0, Value::text(&x.1))).collect::<Vec<_>>()),
+        ("message sender", column(app, "Message", "sender") == m.messages.iter().map(|x| (x.0, user(x.2))).collect::<Vec<_>>()),
+        ("like msg", column(app, "Like", "msg") == m.likes.iter().map(|l| (l.0, msg(l.1))).collect::<Vec<_>>()),
+        ("like user", column(app, "Like", "user") == m.likes.iter().map(|l| (l.0, user(l.2))).collect::<Vec<_>>()),
+        ("current", current == m.current.map(user).into_iter().collect::<Vec<_>>()),
+    ];
+    match checks.iter().find(|(_, ok)| !ok) {
+        Some((what, _)) => Err(format!(
+            "`{what}` disagrees with the model: users {:?}, messages {:?}, likes {:?}, current {:?}",
+            m.users, m.messages, m.likes, m.current
+        )),
+        None => Ok(()),
+    }
+}
+
 fn fail(e: String) -> TestCaseError {
     TestCaseError::fail(e)
 }
@@ -616,6 +728,25 @@ proptest! {
         }
         check_views(&app, "at the end").map_err(fail)?;
         check_replay(STOCK, &app).map_err(fail)?;
+    }
+
+    #[test]
+    fn chat_matches_its_model(ops in prop::collection::vec(chat_op(), 0..30)) {
+        let src = example("chat/src/app.rex");
+        let mut app = App::build(&src);
+        let mut model = ChatModel::default();
+        chat_agrees(&app, &model).map_err(fail)?;
+        for (i, op) in ops.iter().enumerate() {
+            let cursor = app.engine.cursor();
+            let accepted = model.apply(op);
+            let got = chat_dispatch(&mut app, op);
+            prop_assert_eq!(got.is_ok(), accepted, "step {} {:?}: {:?}", i, op, got);
+            prop_assert_eq!(app.engine.cursor(), cursor + accepted as u64, "step {}: log", i);
+            chat_agrees(&app, &model).map_err(|e| fail(format!("after step {i} {op:?}: {e}")))?;
+            check_base_invariant(&app.engine).map_err(fail)?;
+        }
+        check_views(&app, "at the end").map_err(fail)?;
+        check_replay(&src, &app).map_err(fail)?;
     }
 
     #[test]

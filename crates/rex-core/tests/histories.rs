@@ -132,6 +132,11 @@ proptest! {
     }
 
     #[test]
+    fn chat((ops, cut) in history()) {
+        check_history(&example("chat/src/app.rex"), &ops, cut).map_err(TestCaseError::fail)?;
+    }
+
+    #[test]
     fn graph((ops, cut) in history()) {
         check_history(GRAPH, &ops, cut).map_err(TestCaseError::fail)?;
     }
